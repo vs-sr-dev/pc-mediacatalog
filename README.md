@@ -128,5 +128,5 @@ without inheriting their licenses:
 [MIT](LICENSE) © 2026 Samuele Voltan.
 
 ## Credits
-Original concept and feature brief by _(add your friend's name/handle here)_.
+From an idea by **Phreak** — original concept and feature brief.
 Implementation and architecture built out from that brief.
