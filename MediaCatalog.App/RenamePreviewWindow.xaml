@@ -1,0 +1,39 @@
+<Window x:Class="MediaCatalog.App.RenamePreviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="Rename preview" Height="520" Width="900"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,6"
+                   Text="Review the proposed names. Untick any you want to keep. Renames happen in place (same folder); nothing is moved to another drive."/>
+
+        <DataGrid x:Name="ProposalGrid" Grid.Row="1"
+                  AutoGenerateColumns="False" CanUserSortColumns="True"
+                  GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                  SelectionUnit="FullRow">
+            <DataGrid.Columns>
+                <DataGridCheckBoxColumn Header="✓" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="30"/>
+                <DataGridTextColumn Header="Current name" Binding="{Binding CurrentName}" Width="*" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Proposed name" Binding="{Binding ProposedName}" Width="*" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Folder" Binding="{Binding Folder}" Width="1.2*" IsReadOnly="True"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+            <TextBlock x:Name="CountText" VerticalAlignment="Center" Margin="0,0,12,0" Foreground="Gray"/>
+            <Button Content="Select all" Click="OnSelectAll" Width="80" Margin="0,0,4,0"/>
+            <Button Content="Select none" Click="OnSelectNone" Width="80" Margin="0,0,12,0"/>
+            <Button Content="Apply renames" Click="OnApply" Width="120" IsDefault="True" FontWeight="Bold"/>
+            <Button Content="Cancel" Click="OnCancel" Width="80" Margin="4,0,0,0" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

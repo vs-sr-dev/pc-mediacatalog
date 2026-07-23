@@ -1,0 +1,32 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+
+# Publish / distribution artifacts
+dist/
+publish/
+*.zip
+
+# Rider / VS / VS Code
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# .NET
+project.lock.json
+*.nupkg
+*.snupkg
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store

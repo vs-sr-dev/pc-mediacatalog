@@ -1,0 +1,118 @@
+<Window x:Class="MediaCatalog.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:MediaCatalog.App"
+        xmlns:vm="clr-namespace:MediaCatalog.App.ViewModels"
+        mc:Ignorable="d"
+        Title="Media Catalog" Height="640" Width="1080"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <ToolBarTray Grid.Row="0">
+            <ToolBar>
+                <Button Content="Scan" Command="{Binding ScanCommand}" Padding="12,2" FontWeight="Bold"/>
+                <Button Content="Cancel" Command="{Binding CancelCommand}" Padding="8,2"/>
+                <Separator/>
+                <TextBlock Text="View:" VerticalAlignment="Center" Margin="4,0"/>
+                <ComboBox ItemsSource="{Binding FilterModes}"
+                          SelectedItem="{Binding SelectedFilter}"
+                          Width="120" VerticalAlignment="Center"/>
+                <Separator/>
+                <Button x:Name="RelocateButton" Content="Relocate selected…"
+                        Click="OnRelocateClick" Padding="8,2"
+                        IsEnabled="{Binding IsIdle}"/>
+                <CheckBox x:Name="DeleteOriginalCheck" Content="Delete original after verify"
+                          VerticalAlignment="Center" Margin="6,0"/>
+                <Separator/>
+                <Button x:Name="RenameButton" Content="Rename…"
+                        Click="OnRenameClick" Padding="8,2"
+                        IsEnabled="{Binding IsIdle}"/>
+                <Separator/>
+                <Button x:Name="AnalyzeButton" Content="Fingerprint / analyse"
+                        Click="OnAnalyzeClick" Padding="8,2"
+                        IsEnabled="{Binding IsIdle}"
+                        ToolTip="Compute audio/video fingerprints to find same content across different encodings."/>
+                <Button x:Name="DeepCheckButton" Content="Deep integrity check"
+                        Click="OnDeepCheckClick" Padding="8,2"
+                        IsEnabled="{Binding IsIdle}"
+                        ToolTip="Fully decode files with FFmpeg to detect corruption (slow)."/>
+                <Button x:Name="ToolsButton" Content="Tools…"
+                        Click="OnToolsClick" Padding="8,2"/>
+            </ToolBar>
+        </ToolBarTray>
+
+        <!-- Body -->
+        <Grid Grid.Row="1" Margin="0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="320"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Drives panel -->
+            <DockPanel Grid.Column="0" Margin="0,0,8,0">
+                <TextBlock DockPanel.Dock="Top" Text="Drives to scan" FontWeight="Bold" Margin="0,0,0,4"/>
+                <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,4,0,0">
+                    <Button Content="All" Command="{Binding SelectAllDrivesCommand}" Width="50" Margin="0,0,4,0"/>
+                    <Button Content="None" Command="{Binding SelectNoDrivesCommand}" Width="50" Margin="0,0,4,0"/>
+                    <Button Content="Refresh" Command="{Binding RefreshDrivesCommand}" Width="70"/>
+                </StackPanel>
+                <ListBox ItemsSource="{Binding Drives}" BorderThickness="1">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox IsChecked="{Binding IsSelected}" Content="{Binding Display}"
+                                      Margin="2"/>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+
+            <!-- File grid -->
+            <DataGrid x:Name="FilesGrid" Grid.Column="1"
+                      ItemsSource="{Binding Files}"
+                      AutoGenerateColumns="False" IsReadOnly="True"
+                      SelectionMode="Extended" SelectionUnit="FullRow"
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                      CanUserSortColumns="True" EnableRowVirtualization="True">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Dup" Binding="{Binding DuplicateFlag}" Width="44"/>
+                    <DataGridTextColumn Header="Name" Binding="{Binding FileName}" Width="2*"/>
+                    <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="60"/>
+                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="80"/>
+                    <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="1.5*"/>
+                    <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="50"/>
+                    <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="60"/>
+                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"/>
+                    <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"/>
+                    <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="2*"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Grid>
+
+        <!-- Status bar -->
+        <StatusBar Grid.Row="2">
+            <StatusBarItem>
+                <TextBlock Text="{Binding SummaryText}"/>
+            </StatusBarItem>
+            <Separator/>
+            <StatusBarItem>
+                <TextBlock Text="{Binding ToolStatus}" Foreground="DimGray"/>
+            </StatusBarItem>
+            <Separator/>
+            <StatusBarItem>
+                <ProgressBar Width="200" Height="16"
+                             Minimum="0" Maximum="{Binding ProgressMax}" Value="{Binding ProgressValue}"/>
+            </StatusBarItem>
+            <StatusBarItem HorizontalAlignment="Right">
+                <TextBlock Text="{Binding StatusText}" TextTrimming="CharacterEllipsis"/>
+            </StatusBarItem>
+        </StatusBar>
+    </Grid>
+</Window>

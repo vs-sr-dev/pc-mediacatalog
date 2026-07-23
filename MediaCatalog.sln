@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MediaCatalog.Core", "MediaCatalog.Core\MediaCatalog.Core.csproj", "{FB43824E-EF18-4D75-B1D5-C056189861DE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MediaCatalog.App", "MediaCatalog.App\MediaCatalog.App.csproj", "{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{FB43824E-EF18-4D75-B1D5-C056189861DE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FB43824E-EF18-4D75-B1D5-C056189861DE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FB43824E-EF18-4D75-B1D5-C056189861DE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FB43824E-EF18-4D75-B1D5-C056189861DE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

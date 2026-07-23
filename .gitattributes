@@ -1,0 +1,18 @@
+# Normalize line endings: let Git handle EOL automatically.
+* text=auto
+
+# Explicitly treat these as text.
+*.cs      text
+*.xaml    text
+*.csproj  text
+*.sln     text
+*.md      text
+*.txt     text
+*.json    text
+*.xml     text
+
+# Binary assets — never munge.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
