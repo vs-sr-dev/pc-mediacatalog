@@ -26,6 +26,9 @@ project.lock.json
 *.nupkg
 *.snupkg
 
+# Editor / tooling local config
+.claude/
+
 # OS junk
 Thumbs.db
 desktop.ini
