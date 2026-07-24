@@ -27,41 +27,70 @@ public class ScanEngine
     /// <see cref="OperationCanceledException"/> having preserved all work done so far;
     /// entries for vanished files are only pruned once a full pass completes.
     /// </summary>
+    /// <param name="onCheckpoint">
+    /// Called periodically (and carries the resume index = files processed so far) so the
+    /// caller can persist the catalogue and scan session for crash-safe resume.
+    /// </param>
+    /// <param name="resume">
+    /// When true, reuse the on-disk enumeration snapshot (if it matches the roots) and
+    /// continue from <paramref name="resumeFromIndex"/> instead of re-walking the drives.
+    /// </param>
     public async Task ScanAsync(
         IReadOnlyList<string> roots,
         IProgress<ScanProgress>? progress = null,
-        Action? onCheckpoint = null,
+        Action<int>? onCheckpoint = null,
         TimeSpan? checkpointInterval = null,
+        bool resume = false,
+        int resumeFromIndex = 0,
         CancellationToken ct = default)
     {
-        progress?.Report(new ScanProgress(0, 0, string.Empty, "Enumerating files…"));
+        var enumPath = Storage.AppPaths.EnumerationPath;
 
-        // Materialise the file list first so we can show a real progress bar.
-        var paths = await Task.Run(
-            () => DriveScanner.EnumerateMediaFiles(roots, ct).ToList(), ct);
+        // Reuse a matching enumeration snapshot on resume; otherwise walk the drives.
+        List<string> paths;
+        var startIndex = 0;
+        var cache = resume ? EnumerationCache.Load(enumPath) : null;
+        if (cache != null && cache.MatchesRoots(roots))
+        {
+            paths = cache.Paths;
+            startIndex = Math.Clamp(resumeFromIndex, 0, paths.Count);
+            progress?.Report(new ScanProgress(startIndex, paths.Count, string.Empty,
+                "Resuming from saved enumeration…"));
+        }
+        else
+        {
+            progress?.Report(new ScanProgress(0, 0, string.Empty, "Enumerating files…"));
+            paths = await Task.Run(
+                () => DriveScanner.EnumerateMediaFiles(roots, ct).ToList(), ct);
+            new EnumerationCache
+            {
+                Roots = roots.ToList(),
+                Paths = paths,
+                CreatedUtc = DateTime.UtcNow
+            }.Save(enumPath);
+        }
 
         var total = paths.Count;
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var done = 0;
-
         var interval = checkpointInterval ?? TimeSpan.FromSeconds(30);
         var sw = Stopwatch.StartNew();
         var nextCheckpoint = interval;
 
-        foreach (var path in paths)
+        for (var i = startIndex; i < total; i++)
         {
-            // Note: cancellation is checked *before* mutating state, so a pause always
-            // stops at a clean file boundary with the catalogue in a consistent state.
+            // Cancellation is checked *before* mutating state, so a pause always stops at
+            // a clean file boundary with the catalogue in a consistent state.
             ct.ThrowIfCancellationRequested();
-            seen.Add(path);
+            var path = paths[i];
+
+            // Report progress as the count of *completed* files (i), so if we pause during
+            // this file, the persisted resume index redoes it rather than skipping it.
+            progress?.Report(new ScanProgress(i, total, Path.GetFileName(path), "Hashing & classifying"));
 
             FileInfo info;
             try { info = new FileInfo(path); }
-            catch { done++; continue; }
+            catch { continue; }
 
             var entry = MergeEntry(info);
-            progress?.Report(new ScanProgress(done, total, entry.FileName, "Hashing & classifying"));
-
             MediaClassifier.Classify(entry);
             QuickIntegrityCheck(entry, info);
 
@@ -74,29 +103,31 @@ public class ScanEngine
             }
 
             entry.IndexedUtc = DateTime.UtcNow;
-            done++;
 
-            // Periodic crash-safe checkpoint.
+            // Periodic crash-safe checkpoint; hand back the resume index (i + 1).
             if (onCheckpoint != null && sw.Elapsed >= nextCheckpoint)
             {
                 _catalog.RebuildIndex();
-                TryCheckpoint(onCheckpoint);
+                TryCheckpoint(onCheckpoint, i + 1);
                 nextCheckpoint = sw.Elapsed + interval;
             }
         }
 
-        // Full pass completed: only now is it safe to drop entries whose files
-        // disappeared (a partial/paused pass must never prune).
-        _catalog.Files.RemoveAll(f => !seen.Contains(f.FullPath));
+        // Full pass completed. The enumeration snapshot is the authoritative set of files
+        // that exist, so pruning here is correct even across a restart. A partial/paused
+        // pass never reaches this point, so it never prunes.
+        var existing = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+        _catalog.Files.RemoveAll(f => !existing.Contains(f.FullPath));
         _catalog.RebuildIndex();
         _catalog.LastScanUtc = DateTime.UtcNow;
 
+        EnumerationCache.Clear(enumPath);
         progress?.Report(new ScanProgress(total, total, string.Empty, "Done"));
     }
 
-    private static void TryCheckpoint(Action onCheckpoint)
+    private static void TryCheckpoint(Action<int> onCheckpoint, int index)
     {
-        try { onCheckpoint(); }
+        try { onCheckpoint(index); }
         catch { /* a failed checkpoint must not abort the scan */ }
     }
 

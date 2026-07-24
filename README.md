@@ -42,26 +42,34 @@ dotnet run --project MediaCatalog.App
    only deleted if you tick *Delete original after verify* (and only after the copy
    verifies successfully).
 
-The catalogue is saved automatically to
-`%LOCALAPPDATA%\MediaCatalog\catalog.xml` after each scan.
+All data is written to **the folder the app runs from** (portable-app style) — the
+catalogue (`catalog.xml`), tool paths (`tools.xml`), and scan state — not to
+`%APPDATA%`. Copy the app folder to another machine or drive and its catalogue comes
+with it. (Run it from a writable location, not read-only media.)
 
 ### Pausing & resuming long scans
-Scanning terabytes can take hours, so scans are interruptible:
-- **Pause** stops at the current file, saves everything done so far, and remembers the
-  session. Next launch, the app offers to **Resume** from where it left off.
-- **Resume** re-walks the same drives but **skips files already hashed** (unchanged
-  files aren't re-processed), so it picks up almost immediately where it stopped.
-- **Cancel** stops *and* discards the resumable session (a plain stop).
-- Even without pausing, the scan **checkpoints to disk every ~30 seconds**, so a crash
-  or power loss never costs more than the last half-minute of hashing.
+Scanning terabytes can take hours, so scans are fully interruptible and survive an
+application restart:
+- **Pause** stops at the current file, saves everything done so far, and records the
+  session. On the next launch the app offers to **Resume** from where it left off.
+- **Resume across restarts without re-scanning** — the file enumeration is serialized
+  to disk (`enumeration.xml`), so resuming does **not** re-walk the drives (itself slow
+  on multi-TB volumes); it restores the saved file list and continues from the exact
+  index. Files already hashed are skipped.
+- **Crash-safe** — the scan checkpoints catalogue + position to disk every ~30 seconds,
+  and a leftover session from an unexpected shutdown is offered for resume too, not just
+  an explicit pause. A crash never costs more than the last half-minute of hashing.
+- **Cancel** stops *and* discards the resumable session and enumeration cache.
 
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
 
 ## What's implemented (Phases 1–3)
 - ✅ Spider all attached drives, catalogue audio + video
-- ✅ **Pause / resume scanning** with periodic on-disk checkpoints — built for
-  multi-terabyte libraries where a scan may run for hours
+- ✅ **Pause / resume scanning across application restarts** — the file enumeration is
+  serialized to disk, with periodic crash-safe checkpoints; built for multi-terabyte
+  libraries where a scan may run for hours
+- ✅ **Portable storage** — all data lives in the app's own folder, not `%APPDATA%`
 - ✅ Exact-duplicate detection (SHA-256 content hash, not just name/size)
 - ✅ **Near-duplicate detection across different encodings** via perceptual fingerprints
 - ✅ Movie / TV / Other classification from filenames (offline, no API key)

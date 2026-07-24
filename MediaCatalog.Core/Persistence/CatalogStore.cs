@@ -9,21 +9,8 @@ public static class CatalogStore
 {
     private static readonly XmlSerializer Serializer = new(typeof(Catalog));
 
-    /// <summary>
-    /// Default catalogue location under the user's local app data, e.g.
-    /// %LOCALAPPDATA%\MediaCatalog\catalog.xml
-    /// </summary>
-    public static string DefaultPath
-    {
-        get
-        {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "MediaCatalog");
-            Directory.CreateDirectory(dir);
-            return Path.Combine(dir, "catalog.xml");
-        }
-    }
+    /// <summary>Default catalogue location: catalog.xml in the app's own folder.</summary>
+    public static string DefaultPath => Storage.AppPaths.CatalogPath;
 
     public static Catalog Load(string path)
     {

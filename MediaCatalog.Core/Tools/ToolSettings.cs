@@ -13,17 +13,7 @@ public class ToolSettings
     public string FfprobePath { get; set; } = string.Empty;
     public string FpcalcPath { get; set; } = string.Empty;
 
-    public static string DefaultPath
-    {
-        get
-        {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "MediaCatalog");
-            Directory.CreateDirectory(dir);
-            return Path.Combine(dir, "tools.xml");
-        }
-    }
+    public static string DefaultPath => Storage.AppPaths.ToolSettingsPath;
 
     private static readonly XmlSerializer Serializer = new(typeof(ToolSettings));
 

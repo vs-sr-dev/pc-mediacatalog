@@ -8,6 +8,7 @@ using MediaCatalog.Core.Naming;
 using MediaCatalog.Core.Persistence;
 using MediaCatalog.Core.Relocation;
 using MediaCatalog.Core.Scanning;
+using MediaCatalog.Core.Storage;
 using MediaCatalog.Core.Tools;
 
 namespace MediaCatalog.App.ViewModels;
@@ -58,8 +59,11 @@ public class MainViewModel : ObservableObject
 
         CanResume = _session.IsResumable;
         if (CanResume)
-            StatusText = $"Paused scan available: {_session.LastDone}/{_session.LastTotal} done " +
+        {
+            var how = _session.Status == ScanSessionStatus.Paused ? "Paused" : "Interrupted";
+            StatusText = $"{how} scan can be resumed: {_session.LastDone}/{_session.LastTotal} done " +
                          $"on {_session.Roots.Count} drive(s). Click Resume to continue.";
+        }
 
         LoadDrives();
         RebuildRows();
@@ -179,13 +183,15 @@ public class MainViewModel : ObservableObject
             return;
         }
 
+        var resumeFromIndex = resuming ? _session.NextIndex : 0;
+
         _cts = new CancellationTokenSource();
         _isPausing = false;
         IsScanning = true;
         CanResume = false;
         ProgressValue = 0;
         ProgressMax = 1;
-        _lastDone = 0;
+        _lastDone = resumeFromIndex;
         _lastTotal = 0;
 
         var progress = new Progress<ScanProgress>(p =>
@@ -199,18 +205,26 @@ public class MainViewModel : ObservableObject
                 : p.Phase;
         });
 
-        // Checkpoint the catalogue to disk periodically so a pause/crash keeps work.
-        void Checkpoint() => CatalogStore.Save(_catalog, _catalogPath);
+        // Checkpoint the catalogue AND the session (as Running) so a crash mid-scan is
+        // resumable, not just an explicit pause. 'index' is the resume position.
+        void Checkpoint(int index)
+        {
+            CatalogStore.Save(_catalog, _catalogPath);
+            SaveSession(ScanSessionStatus.Running, roots, index);
+        }
 
         try
         {
+            // Record an initial Running session immediately, so even an early crash resumes.
+            SaveSession(ScanSessionStatus.Running, roots, resumeFromIndex);
+
             var engine = new ScanEngine(_catalog);
             await Task.Run(() => engine.ScanAsync(
-                roots, progress, Checkpoint, TimeSpan.FromSeconds(30), _cts.Token));
+                roots, progress, Checkpoint, TimeSpan.FromSeconds(30),
+                resume: resuming, resumeFromIndex: resumeFromIndex, ct: _cts.Token));
 
             CatalogStore.Save(_catalog, _catalogPath);
-            ScanSession.Clear(_sessionPath);
-            _session = new ScanSession();
+            ClearSession();
             StatusText = $"Scan complete. Catalogue saved to {_catalogPath}";
         }
         catch (OperationCanceledException)
@@ -218,22 +232,14 @@ public class MainViewModel : ObservableObject
             CatalogStore.Save(_catalog, _catalogPath);
             if (_isPausing)
             {
-                _session = new ScanSession
-                {
-                    Status = ScanSessionStatus.Paused,
-                    Roots = roots,
-                    LastDone = _lastDone,
-                    LastTotal = _lastTotal,
-                    UpdatedUtc = DateTime.UtcNow
-                };
-                _session.Save(_sessionPath);
+                SaveSession(ScanSessionStatus.Paused, roots, _lastDone);
                 CanResume = true;
                 StatusText = $"Paused at {_lastDone}/{_lastTotal}. Work saved — click Resume to continue.";
             }
             else
             {
-                ScanSession.Clear(_sessionPath);
-                _session = new ScanSession();
+                ClearSession();
+                EnumerationCache.Clear(AppPaths.EnumerationPath);
                 StatusText = "Scan cancelled. Partial results saved.";
             }
         }
@@ -249,6 +255,26 @@ public class MainViewModel : ObservableObject
             _cts = null;
             RebuildRows();
         }
+    }
+
+    private void SaveSession(ScanSessionStatus status, List<string> roots, int nextIndex)
+    {
+        _session = new ScanSession
+        {
+            Status = status,
+            Roots = roots,
+            NextIndex = nextIndex,
+            LastDone = _lastDone,
+            LastTotal = _lastTotal,
+            UpdatedUtc = DateTime.UtcNow
+        };
+        _session.Save(_sessionPath);
+    }
+
+    private void ClearSession()
+    {
+        ScanSession.Clear(_sessionPath);
+        _session = new ScanSession();
     }
 
     /// <summary>Rebuild the display rows from the catalogue and mark duplicates.</summary>

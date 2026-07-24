@@ -2,7 +2,7 @@ using System.Xml.Serialization;
 
 namespace MediaCatalog.Core.Scanning;
 
-public enum ScanSessionStatus { None = 0, Paused, Completed }
+public enum ScanSessionStatus { None = 0, Running, Paused, Completed }
 
 /// <summary>
 /// Records the state of an interrupted scan so it can be resumed in a later run
@@ -19,24 +19,23 @@ public class ScanSession
     [XmlArrayItem("Root")]
     public List<string> Roots { get; set; } = new();
 
+    /// <summary>Index into the cached enumeration where the next pass should resume.</summary>
+    public int NextIndex { get; set; }
+
     public int LastDone { get; set; }
     public int LastTotal { get; set; }
     public DateTime UpdatedUtc { get; set; }
 
+    /// <summary>
+    /// Resumable when interrupted with roots recorded. A leftover <c>Running</c> session
+    /// means the app was closed/crashed mid-scan (a clean finish or cancel clears it),
+    /// so that is offered for resume too — not just an explicit pause.
+    /// </summary>
     [XmlIgnore]
-    public bool IsResumable => Status == ScanSessionStatus.Paused && Roots.Count > 0;
+    public bool IsResumable =>
+        (Status is ScanSessionStatus.Paused or ScanSessionStatus.Running) && Roots.Count > 0;
 
-    public static string DefaultPath
-    {
-        get
-        {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "MediaCatalog");
-            Directory.CreateDirectory(dir);
-            return Path.Combine(dir, "scan-session.xml");
-        }
-    }
+    public static string DefaultPath => Storage.AppPaths.ScanSessionPath;
 
     private static readonly XmlSerializer Serializer = new(typeof(ScanSession));
 
