@@ -18,11 +18,16 @@ public class MainViewModel : ObservableObject
 {
     private readonly string _catalogPath = CatalogStore.DefaultPath;
     private readonly string _toolSettingsPath = ToolSettings.DefaultPath;
+    private readonly string _sessionPath = ScanSession.DefaultPath;
     private Catalog _catalog;
     private ToolSettings _toolSettings;
     private ExternalTools _tools;
+    private ScanSession _session;
     private readonly List<FileRow> _allRows = new();
     private CancellationTokenSource? _cts;
+    private bool _isPausing;
+    private int _lastDone;
+    private int _lastTotal;
 
     private string _statusText = "Ready.";
     private string _summaryText = "";
@@ -30,6 +35,7 @@ public class MainViewModel : ObservableObject
     private int _progressValue;
     private int _progressMax = 1;
     private bool _isScanning;
+    private bool _canResume;
     private FilterMode _selectedFilter = FilterMode.All;
 
     public MainViewModel()
@@ -37,13 +43,23 @@ public class MainViewModel : ObservableObject
         _catalog = CatalogStore.Load(_catalogPath);
         _toolSettings = ToolSettings.Load(_toolSettingsPath);
         _tools = ExternalTools.Resolve(_toolSettings);
+        _session = ScanSession.Load(_sessionPath);
         UpdateToolStatus();
 
-        ScanCommand = new RelayCommand(async () => await ScanAsync(), () => !IsScanning);
-        CancelCommand = new RelayCommand(() => _cts?.Cancel(), () => IsScanning);
+        ScanCommand = new RelayCommand(async () => await RunScanAsync(SelectedRootPaths(), resuming: false),
+            () => !IsScanning);
+        ResumeCommand = new RelayCommand(async () => await RunScanAsync(_session.Roots, resuming: true),
+            () => !IsScanning && CanResume);
+        PauseCommand = new RelayCommand(() => { _isPausing = true; _cts?.Cancel(); }, () => IsScanning);
+        CancelCommand = new RelayCommand(() => { _isPausing = false; _cts?.Cancel(); }, () => IsScanning);
         RefreshDrivesCommand = new RelayCommand(LoadDrives, () => !IsScanning);
         SelectAllDrivesCommand = new RelayCommand(() => SetAllDrives(true), () => !IsScanning);
         SelectNoDrivesCommand = new RelayCommand(() => SetAllDrives(false), () => !IsScanning);
+
+        CanResume = _session.IsResumable;
+        if (CanResume)
+            StatusText = $"Paused scan available: {_session.LastDone}/{_session.LastTotal} done " +
+                         $"on {_session.Roots.Count} drive(s). Click Resume to continue.";
 
         LoadDrives();
         RebuildRows();
@@ -55,10 +71,19 @@ public class MainViewModel : ObservableObject
     public Array FilterModes => Enum.GetValues(typeof(FilterMode));
 
     public ICommand ScanCommand { get; }
+    public ICommand ResumeCommand { get; }
+    public ICommand PauseCommand { get; }
     public ICommand CancelCommand { get; }
     public ICommand RefreshDrivesCommand { get; }
     public ICommand SelectAllDrivesCommand { get; }
     public ICommand SelectNoDrivesCommand { get; }
+
+    /// <summary>True when a paused scan can be resumed.</summary>
+    public bool CanResume
+    {
+        get => _canResume;
+        set { if (SetProperty(ref _canResume, value)) RaiseCommandStates(); }
+    }
 
     public string StatusText
     {
@@ -137,22 +162,36 @@ public class MainViewModel : ObservableObject
         foreach (var d in Drives) d.IsSelected = selected;
     }
 
-    private async Task ScanAsync()
+    private List<string> SelectedRootPaths() =>
+        Drives.Where(d => d.IsSelected).Select(d => d.Path).ToList();
+
+    /// <summary>
+    /// Run (or resume) a scan over <paramref name="roots"/>. Pause and cancel both stop
+    /// the scan at a clean boundary; pause additionally saves a resumable session.
+    /// </summary>
+    private async Task RunScanAsync(List<string> roots, bool resuming)
     {
-        var roots = Drives.Where(d => d.IsSelected).Select(d => d.Path).ToList();
         if (roots.Count == 0)
         {
-            StatusText = "Select at least one drive to scan.";
+            StatusText = resuming
+                ? "No paused scan to resume."
+                : "Select at least one drive to scan.";
             return;
         }
 
         _cts = new CancellationTokenSource();
+        _isPausing = false;
         IsScanning = true;
+        CanResume = false;
         ProgressValue = 0;
         ProgressMax = 1;
+        _lastDone = 0;
+        _lastTotal = 0;
 
         var progress = new Progress<ScanProgress>(p =>
         {
+            _lastDone = p.Done;
+            _lastTotal = p.Total;
             ProgressMax = Math.Max(1, p.Total);
             ProgressValue = p.Done;
             StatusText = p.Total > 0
@@ -160,17 +199,43 @@ public class MainViewModel : ObservableObject
                 : p.Phase;
         });
 
+        // Checkpoint the catalogue to disk periodically so a pause/crash keeps work.
+        void Checkpoint() => CatalogStore.Save(_catalog, _catalogPath);
+
         try
         {
             var engine = new ScanEngine(_catalog);
-            await engine.ScanAsync(roots, progress, _cts.Token);
+            await Task.Run(() => engine.ScanAsync(
+                roots, progress, Checkpoint, TimeSpan.FromSeconds(30), _cts.Token));
+
             CatalogStore.Save(_catalog, _catalogPath);
+            ScanSession.Clear(_sessionPath);
+            _session = new ScanSession();
             StatusText = $"Scan complete. Catalogue saved to {_catalogPath}";
         }
         catch (OperationCanceledException)
         {
             CatalogStore.Save(_catalog, _catalogPath);
-            StatusText = "Scan cancelled. Partial results saved.";
+            if (_isPausing)
+            {
+                _session = new ScanSession
+                {
+                    Status = ScanSessionStatus.Paused,
+                    Roots = roots,
+                    LastDone = _lastDone,
+                    LastTotal = _lastTotal,
+                    UpdatedUtc = DateTime.UtcNow
+                };
+                _session.Save(_sessionPath);
+                CanResume = true;
+                StatusText = $"Paused at {_lastDone}/{_lastTotal}. Work saved — click Resume to continue.";
+            }
+            else
+            {
+                ScanSession.Clear(_sessionPath);
+                _session = new ScanSession();
+                StatusText = "Scan cancelled. Partial results saved.";
+            }
         }
         catch (Exception ex)
         {
@@ -178,6 +243,7 @@ public class MainViewModel : ObservableObject
         }
         finally
         {
+            _isPausing = false;
             IsScanning = false;
             _cts?.Dispose();
             _cts = null;
@@ -399,6 +465,8 @@ public class MainViewModel : ObservableObject
     private void RaiseCommandStates()
     {
         (ScanCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        (ResumeCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        (PauseCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (CancelCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (RefreshDrivesCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (SelectAllDrivesCommand as RelayCommand)?.RaiseCanExecuteChanged();

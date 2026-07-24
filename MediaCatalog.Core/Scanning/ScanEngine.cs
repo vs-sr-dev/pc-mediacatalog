@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MediaCatalog.Core.Classification;
 using MediaCatalog.Core.Hashing;
 using MediaCatalog.Core.Models;
@@ -10,6 +11,10 @@ public record ScanProgress(int Done, int Total, string CurrentFile, string Phase
 /// Orchestrates a full scan: enumerate media under the chosen roots, classify each
 /// file, hash it (reusing prior hashes when the file is unchanged) and merge the
 /// results into the catalogue. Reports determinate progress to the UI.
+///
+/// Designed to be interruptible and resumable: it checkpoints the catalogue to disk
+/// periodically (via <paramref name="onCheckpoint"/>) so a pause — or a crash — never
+/// loses hashing work, and re-running over the same roots skips already-hashed files.
 /// </summary>
 public class ScanEngine
 {
@@ -17,9 +22,16 @@ public class ScanEngine
 
     public ScanEngine(Catalog catalog) => _catalog = catalog;
 
+    /// <summary>
+    /// Scan <paramref name="roots"/>. When cancelled (pause/cancel) the method throws
+    /// <see cref="OperationCanceledException"/> having preserved all work done so far;
+    /// entries for vanished files are only pruned once a full pass completes.
+    /// </summary>
     public async Task ScanAsync(
         IReadOnlyList<string> roots,
         IProgress<ScanProgress>? progress = null,
+        Action? onCheckpoint = null,
+        TimeSpan? checkpointInterval = null,
         CancellationToken ct = default)
     {
         progress?.Report(new ScanProgress(0, 0, string.Empty, "Enumerating files…"));
@@ -32,8 +44,14 @@ public class ScanEngine
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var done = 0;
 
+        var interval = checkpointInterval ?? TimeSpan.FromSeconds(30);
+        var sw = Stopwatch.StartNew();
+        var nextCheckpoint = interval;
+
         foreach (var path in paths)
         {
+            // Note: cancellation is checked *before* mutating state, so a pause always
+            // stops at a clean file boundary with the catalogue in a consistent state.
             ct.ThrowIfCancellationRequested();
             seen.Add(path);
 
@@ -57,14 +75,29 @@ public class ScanEngine
 
             entry.IndexedUtc = DateTime.UtcNow;
             done++;
+
+            // Periodic crash-safe checkpoint.
+            if (onCheckpoint != null && sw.Elapsed >= nextCheckpoint)
+            {
+                _catalog.RebuildIndex();
+                TryCheckpoint(onCheckpoint);
+                nextCheckpoint = sw.Elapsed + interval;
+            }
         }
 
-        // Drop entries whose files disappeared since a previous scan.
+        // Full pass completed: only now is it safe to drop entries whose files
+        // disappeared (a partial/paused pass must never prune).
         _catalog.Files.RemoveAll(f => !seen.Contains(f.FullPath));
         _catalog.RebuildIndex();
         _catalog.LastScanUtc = DateTime.UtcNow;
 
         progress?.Report(new ScanProgress(total, total, string.Empty, "Done"));
+    }
+
+    private static void TryCheckpoint(Action onCheckpoint)
+    {
+        try { onCheckpoint(); }
+        catch { /* a failed checkpoint must not abort the scan */ }
     }
 
     /// <summary>

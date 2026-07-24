@@ -19,7 +19,12 @@
         <ToolBarTray Grid.Row="0">
             <ToolBar>
                 <Button Content="Scan" Command="{Binding ScanCommand}" Padding="12,2" FontWeight="Bold"/>
-                <Button Content="Cancel" Command="{Binding CancelCommand}" Padding="8,2"/>
+                <Button Content="Pause" Command="{Binding PauseCommand}" Padding="8,2"
+                        ToolTip="Stop the scan but keep all progress; resume later."/>
+                <Button Content="Resume" Command="{Binding ResumeCommand}" Padding="8,2"
+                        ToolTip="Continue a previously paused scan from where it stopped."/>
+                <Button Content="Cancel" Command="{Binding CancelCommand}" Padding="8,2"
+                        ToolTip="Stop the scan and discard the resumable session."/>
                 <Separator/>
                 <TextBlock Text="View:" VerticalAlignment="Center" Margin="4,0"/>
                 <ComboBox ItemsSource="{Binding FilterModes}"

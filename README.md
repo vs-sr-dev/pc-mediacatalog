@@ -45,8 +45,23 @@ dotnet run --project MediaCatalog.App
 The catalogue is saved automatically to
 `%LOCALAPPDATA%\MediaCatalog\catalog.xml` after each scan.
 
+### Pausing & resuming long scans
+Scanning terabytes can take hours, so scans are interruptible:
+- **Pause** stops at the current file, saves everything done so far, and remembers the
+  session. Next launch, the app offers to **Resume** from where it left off.
+- **Resume** re-walks the same drives but **skips files already hashed** (unchanged
+  files aren't re-processed), so it picks up almost immediately where it stopped.
+- **Cancel** stops *and* discards the resumable session (a plain stop).
+- Even without pausing, the scan **checkpoints to disk every ~30 seconds**, so a crash
+  or power loss never costs more than the last half-minute of hashing.
+
+Files that vanished from disk are only pruned from the catalogue once a scan runs to
+full completion — a pause never deletes anything.
+
 ## What's implemented (Phases 1–3)
 - ✅ Spider all attached drives, catalogue audio + video
+- ✅ **Pause / resume scanning** with periodic on-disk checkpoints — built for
+  multi-terabyte libraries where a scan may run for hours
 - ✅ Exact-duplicate detection (SHA-256 content hash, not just name/size)
 - ✅ **Near-duplicate detection across different encodings** via perceptual fingerprints
 - ✅ Movie / TV / Other classification from filenames (offline, no API key)
