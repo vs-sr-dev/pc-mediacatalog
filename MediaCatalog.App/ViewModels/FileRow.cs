@@ -8,6 +8,7 @@ public class FileRow : ObservableObject
 {
     private bool _isDuplicate;
     private bool _isNearDuplicate;
+    private string _category = "";
 
     public FileRow(MediaFile model) => Model = model;
 
@@ -16,9 +17,12 @@ public class FileRow : ObservableObject
     public string FileName => Model.FileName;
     public string Kind => Model.Kind.ToString();
 
-    public string Category => Model.Kind == MediaKind.Video
-        ? Model.VideoCategory.ToString()
-        : "—";
+    /// <summary>Effective category (per-file/folder override or auto), set by the VM.</summary>
+    public string Category
+    {
+        get => _category;
+        set => SetProperty(ref _category, value);
+    }
 
     public string Title => Model.ParsedTitle;
     public string Year => Model.Year?.ToString() ?? "";
@@ -31,6 +35,26 @@ public class FileRow : ObservableObject
     public string SizeDisplay => Format.Bytes(Model.SizeBytes);
     public string Integrity => Model.Integrity.ToString();
     public string FullPath => Model.FullPath;
+
+    /// <summary>Whether this title has been confirmed against TMDb (shown as a flag).</summary>
+    public string TmdbFlag => Model.TmdbVerified ? "✓" : "";
+
+    /// <summary>Value of a named column, for wildcard column filtering.</summary>
+    public string ColumnValue(string column) => column switch
+    {
+        "Name" => FileName,
+        "Kind" => Kind,
+        "Category" => Category,
+        "Title" => Model.TmdbVerified && !string.IsNullOrEmpty(Model.TmdbName) ? Model.TmdbName : Title,
+        "Year" => Year,
+        "S/E" => SeasonEpisode,
+        "Size" => SizeDisplay,
+        "Integrity" => Integrity,
+        "Path" => FullPath,
+        "Dup" => DuplicateFlag,
+        "TMDb" => TmdbFlag,
+        _ => ""
+    };
 
     public bool IsDuplicate
     {

@@ -76,9 +76,16 @@ full completion — a pause never deletes anything.
 - ✅ Relocate files with copy-and-verify, optional delete
 - ✅ Consistent metadata extraction (title / year / season / episode)
 - ✅ Rename to a consistent scheme, with a preview-and-confirm dialog
+- ✅ **Consolidate** TV/films into a structured library (`<dir>\<A–Z or #>\<Show>\Season NN\`)
+- ✅ **Editable categories** — per-file or per-folder overrides, plus your own custom categories
+- ✅ **TMDb validation** of TV names (rate-limited, cached, with folder-name fallback)
+- ✅ **Exclude folders / ignore file types** from results and future scans
+- ✅ **Wildcard column filters** (`*` and `?`) on any column
+- ✅ **Duplicate manager** — open any duplicated file to copy/move/delete its copies
+- ✅ **Resilient scans** — missing files never abort a scan; they're reported afterwards
 - ✅ Integrity flags: zero-byte + in-progress downloads (`.part`/`.crdownload`), plus
   **deep corrupt-file detection** via full FFmpeg decode
-- ✅ XML persistence (catalogue *and* tool settings)
+- ✅ XML persistence (catalogue, tool settings, app settings, scan state, TMDb cache)
 
 ### Renaming (Phase 2)
 Click **Rename…** to preview proposed names before anything is touched:
@@ -119,9 +126,42 @@ them manually; the status bar shows `ffmpeg ✓ ffprobe ✓ fpcalc ✓` for what
 > Near-duplicate video matching is perceptual and therefore **fuzzy** — treat matches
 > as strong candidates to confirm, not absolute proof.
 
+## Library management
+
+**Categories** — right-click files in the grid → *Set category* (built-in or your own),
+*Set category for this folder…* (applies to a whole folder, optionally its subfolders),
+or *Add new category…*. Overrides win over the auto-detected category.
+
+**Consolidate** — select TV/film files and click **Consolidate…** to move (or copy) them
+into a tidy library:
+- TV → `<TV dir>\<A–Z or #>\<Show>\Season NN\` (season left-padded to ≥2 digits)
+- Films → `<Film dir>\<A–Z or #>\<Title (Year)>\`
+
+Set the TV/Film target folders in **Settings…**. Uses the same copy-and-verify as Relocate.
+
+**Filtering** — use the filter bar to match any column with wildcards: `*` = any run of
+characters, `?` = one character; plain text is a "contains" search.
+
+**Excluding** — right-click → *Exclude this folder…* (optionally including subfolders) or
+*Ignore this file type* to drop files from results and skip them in future scans. Manage
+these lists in **Settings…**.
+
+**Duplicates** — double-click a `DUP` file (or right-click → *Show duplicates*) to open a
+manager listing every identical copy, with copy / move / delete.
+
+**Missing files** — if files vanish between enumeration and scanning, the scan keeps going;
+ones under a `Temp` folder are ignored, the rest are listed via the **Missing files…**
+button afterwards.
+
+### TMDb (themoviedb.org) TV validation
+Enter a free TMDb v3 API key in **Settings…**, then **Validate TV (TMDb)** confirms show
+names against TMDb. Lookups are **rate-limited to one every two seconds** and **cached**
+(`tmdb-cache.xml`) so names are never queried twice. If the episode title doesn't match,
+the containing folder names are tried in turn (e.g. `…\Bewitched\Season 01\ep.avi` falls
+back to "Bewitched"). Validated titles show a ✓ in the TMDb column.
+
 ## Roadmap / possible extensions
-- Online metadata (TMDb/TVDb) for exact titles — deliberately omitted (no API key).
-- Folder-restructuring rename (e.g. `Show/Season 01/…`) in addition to in-place rename.
+- Film metadata validation against TMDb (TV is validated today).
 - Acting on near-duplicate groups directly (keep-best / bulk delete) from the UI.
 
 ## Project layout

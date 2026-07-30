@@ -31,6 +31,16 @@ public class MediaFile
     public int? Season { get; set; }
     public int? Episode { get; set; }
 
+    // --- User overrides / enrichment (all optional; default empty for old catalogues) ---
+    /// <summary>Explicit per-file category set by the user; overrides <see cref="VideoCategory"/>.</summary>
+    public string CategoryOverride { get; set; } = string.Empty;
+
+    /// <summary>Set once a TV title has been confirmed against TMDb (cached).</summary>
+    public bool TmdbVerified { get; set; }
+
+    /// <summary>The canonical name TMDb returned, if validated.</summary>
+    public string TmdbName { get; set; } = string.Empty;
+
     // --- Content analysis (populated on demand via external tools) ---
     /// <summary>Media duration in seconds, from ffprobe. 0 if unknown.</summary>
     public double DurationSeconds { get; set; }

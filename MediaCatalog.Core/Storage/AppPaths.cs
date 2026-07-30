@@ -11,7 +11,9 @@ public static class AppPaths
 
     public static string CatalogPath => Path.Combine(DataDirectory, "catalog.xml");
     public static string ToolSettingsPath => Path.Combine(DataDirectory, "tools.xml");
+    public static string SettingsPath => Path.Combine(DataDirectory, "settings.xml");
     public static string ScanSessionPath => Path.Combine(DataDirectory, "scan-session.xml");
+    public static string TmdbCachePath => Path.Combine(DataDirectory, "tmdb-cache.xml");
 
     /// <summary>Cached file-enumeration snapshot, so a resume needn't re-walk the drives.</summary>
     public static string EnumerationPath => Path.Combine(DataDirectory, "enumeration.xml");

@@ -1,7 +1,11 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Windows.Input;
 using MediaCatalog.App.Infrastructure;
+using MediaCatalog.Core.Classification;
+using MediaCatalog.Core.Consolidation;
 using MediaCatalog.Core.Duplicates;
+using MediaCatalog.Core.Filtering;
 using MediaCatalog.Core.Fingerprinting;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Naming;
@@ -9,6 +13,7 @@ using MediaCatalog.Core.Persistence;
 using MediaCatalog.Core.Relocation;
 using MediaCatalog.Core.Scanning;
 using MediaCatalog.Core.Storage;
+using MediaCatalog.Core.Tmdb;
 using MediaCatalog.Core.Tools;
 
 namespace MediaCatalog.App.ViewModels;
@@ -19,11 +24,15 @@ public class MainViewModel : ObservableObject
 {
     private readonly string _catalogPath = CatalogStore.DefaultPath;
     private readonly string _toolSettingsPath = ToolSettings.DefaultPath;
+    private readonly string _settingsPath = AppSettings.DefaultPath;
     private readonly string _sessionPath = ScanSession.DefaultPath;
+    private readonly string _tmdbCachePath = AppPaths.TmdbCachePath;
     private Catalog _catalog;
     private ToolSettings _toolSettings;
+    private AppSettings _settings;
     private ExternalTools _tools;
     private ScanSession _session;
+    private TmdbCache _tmdbCache;
     private readonly List<FileRow> _allRows = new();
     private CancellationTokenSource? _cts;
     private bool _isPausing;
@@ -38,13 +47,17 @@ public class MainViewModel : ObservableObject
     private bool _isScanning;
     private bool _canResume;
     private FilterMode _selectedFilter = FilterMode.All;
+    private string _filterColumn = "Name";
+    private string _filterPattern = "";
 
     public MainViewModel()
     {
         _catalog = CatalogStore.Load(_catalogPath);
         _toolSettings = ToolSettings.Load(_toolSettingsPath);
+        _settings = AppSettings.Load(_settingsPath);
         _tools = ExternalTools.Resolve(_toolSettings);
         _session = ScanSession.Load(_sessionPath);
+        _tmdbCache = TmdbCache.Load(_tmdbCachePath);
         UpdateToolStatus();
 
         ScanCommand = new RelayCommand(async () => await RunScanAsync(SelectedRootPaths(), resuming: false),
@@ -148,6 +161,37 @@ public class MainViewModel : ObservableObject
         }
     }
 
+    // --- Wildcard column filter ---
+    public static readonly string[] FilterColumns =
+        { "Name", "Kind", "Category", "Title", "Year", "S/E", "Size", "Integrity", "Path", "Dup", "TMDb" };
+
+    public Array Columns => FilterColumns;
+
+    public string FilterColumn
+    {
+        get => _filterColumn;
+        set { if (SetProperty(ref _filterColumn, value)) ApplyFilter(); }
+    }
+
+    public string FilterPattern
+    {
+        get => _filterPattern;
+        set { if (SetProperty(ref _filterPattern, value)) ApplyFilter(); }
+    }
+
+    /// <summary>Built-in + custom categories, for the "set category" menus.</summary>
+    public IReadOnlyList<string> Categories => CategoryResolver.All(_settings);
+
+    public AppSettings Settings => _settings;
+
+    private IReadOnlyList<string> _missingFiles = Array.Empty<string>();
+    public IReadOnlyList<string> MissingFiles
+    {
+        get => _missingFiles;
+        set { if (SetProperty(ref _missingFiles, value)) OnPropertyChanged(nameof(HasMissingFiles)); }
+    }
+    public bool HasMissingFiles => _missingFiles.Count > 0;
+
     private void LoadDrives()
     {
         var previouslySelected = Drives.Where(d => d.IsSelected)
@@ -219,13 +263,16 @@ public class MainViewModel : ObservableObject
             SaveSession(ScanSessionStatus.Running, roots, resumeFromIndex);
 
             var engine = new ScanEngine(_catalog);
-            await Task.Run(() => engine.ScanAsync(
+            var report = await Task.Run(() => engine.ScanAsync(
                 roots, progress, Checkpoint, TimeSpan.FromSeconds(30),
-                resume: resuming, resumeFromIndex: resumeFromIndex, ct: _cts.Token));
+                resume: resuming, resumeFromIndex: resumeFromIndex, settings: _settings, ct: _cts.Token));
 
             CatalogStore.Save(_catalog, _catalogPath);
             ClearSession();
-            StatusText = $"Scan complete. Catalogue saved to {_catalogPath}";
+            MissingFiles = report.MissingFiles;
+            StatusText = report.MissingFiles.Count > 0
+                ? $"Scan complete. {report.MissingFiles.Count} file(s) could not be found — see the missing-files list."
+                : $"Scan complete. Catalogue saved to {_catalogPath}";
         }
         catch (OperationCanceledException)
         {
@@ -284,7 +331,12 @@ public class MainViewModel : ObservableObject
         var rowByPath = new Dictionary<string, FileRow>(StringComparer.OrdinalIgnoreCase);
         foreach (var f in _catalog.Files)
         {
-            var row = new FileRow(f);
+            // Hide files under excluded folders or with ignored extensions (they stay in
+            // the catalogue but drop out of the results until a rescan prunes them).
+            if (_settings.IsPathExcluded(f.FullPath) || _settings.IsExtensionIgnored(f.Extension))
+                continue;
+
+            var row = new FileRow(f) { Category = CategoryResolver.Effective(f, _settings) };
             _allRows.Add(row);
             rowByPath[f.FullPath] = row;
         }
@@ -324,14 +376,18 @@ public class MainViewModel : ObservableObject
         {
             FilterMode.Video => rows.Where(r => r.Model.Kind == MediaKind.Video),
             FilterMode.Audio => rows.Where(r => r.Model.Kind == MediaKind.Audio),
-            FilterMode.Movies => rows.Where(r => r.Model.VideoCategory == VideoCategory.Movie),
-            FilterMode.TvShows => rows.Where(r => r.Model.VideoCategory == VideoCategory.TvShow),
+            FilterMode.Movies => rows.Where(r => r.Category == CategoryResolver.Movie),
+            FilterMode.TvShows => rows.Where(r => r.Category == CategoryResolver.TvShow),
             FilterMode.Duplicates => rows.Where(r => r.IsDuplicate),
             FilterMode.NearDuplicates => rows.Where(r => r.IsNearDuplicate),
             FilterMode.Problems => rows.Where(r =>
                 r.Model.Integrity is IntegrityStatus.Corrupt or IntegrityStatus.IncompleteDownload),
             _ => rows
         };
+
+        // Wildcard filter on the chosen column (* = any run, ? = one char, plain = contains).
+        if (!string.IsNullOrEmpty(_filterPattern))
+            rows = rows.Where(r => WildcardMatcher.IsMatch(r.ColumnValue(_filterColumn), _filterPattern));
 
         Files.Clear();
         foreach (var r in rows.OrderBy(r => r.FullPath))
@@ -486,6 +542,218 @@ public class MainViewModel : ObservableObject
             RebuildRows();
         }
         return StatusText;
+    }
+
+    // --- Categories -------------------------------------------------------
+
+    public void SetCategoryForFiles(IReadOnlyList<FileRow> rows, string category)
+    {
+        foreach (var r in rows) r.Model.CategoryOverride = category;
+        CatalogStore.Save(_catalog, _catalogPath);
+        RebuildRows();
+        StatusText = $"Set category '{category}' on {rows.Count} file(s).";
+    }
+
+    public void SetCategoryForFolder(string folder, string category, bool includeSubdirs)
+    {
+        _settings.FolderCategoryRules.RemoveAll(r =>
+            string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
+        _settings.FolderCategoryRules.Add(new FolderCategoryRule
+        {
+            Path = folder, Category = category, IncludeSubdirectories = includeSubdirs
+        });
+        _settings.Save(_settingsPath);
+        RebuildRows();
+        StatusText = $"Folder rule: '{category}' for {folder}{(includeSubdirs ? " (and subfolders)" : "")}.";
+    }
+
+    public void AddCustomCategory(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return;
+        if (!_settings.CustomCategories.Contains(category, StringComparer.OrdinalIgnoreCase) &&
+            !CategoryResolver.BuiltIn.Contains(category, StringComparer.OrdinalIgnoreCase))
+        {
+            _settings.CustomCategories.Add(category);
+            _settings.Save(_settingsPath);
+            OnPropertyChanged(nameof(Categories));
+        }
+    }
+
+    // --- Exclusions -------------------------------------------------------
+
+    public void ExcludeFolder(string folder, bool includeSubdirs)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return;
+        _settings.ExcludedFolders.RemoveAll(f =>
+            string.Equals(f.Path, folder, StringComparison.OrdinalIgnoreCase));
+        _settings.ExcludedFolders.Add(new ExcludedFolder { Path = folder, IncludeSubdirectories = includeSubdirs });
+        _settings.Save(_settingsPath);
+        RebuildRows();
+        StatusText = $"Excluded folder: {folder}{(includeSubdirs ? " (and subfolders)" : "")}.";
+    }
+
+    public void IgnoreExtension(string extension)
+    {
+        _settings.IgnoreExtension(extension);
+        _settings.Save(_settingsPath);
+        RebuildRows();
+        StatusText = $"Ignoring '{extension}' files (removed from results and future scans).";
+    }
+
+    // --- Duplicates -------------------------------------------------------
+
+    /// <summary>The exact-duplicate group a file belongs to, or null if it has none.</summary>
+    public DuplicateGroup? DuplicateGroupFor(MediaFile file)
+    {
+        if (string.IsNullOrEmpty(file.Sha256)) return null;
+        return DuplicateGroupBySha(file.Sha256);
+    }
+
+    public DuplicateGroup? DuplicateGroupBySha(string sha)
+    {
+        if (string.IsNullOrEmpty(sha)) return null;
+        return DuplicateFinder.FindExactDuplicates(_catalog.Files)
+            .FirstOrDefault(g => string.Equals(g.Sha256, sha, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Copy/move specific catalogue entries (used by the duplicate manager).</summary>
+    public async Task<string> RelocateModelsAsync(IReadOnlyList<MediaFile> files, string dir, bool delete)
+    {
+        int ok = 0, failed = 0;
+        foreach (var f in files)
+        {
+            var r = await FileRelocator.RelocateAsync(f, dir, delete);
+            if (r.Success) ok++; else failed++;
+        }
+        PersistAndRefresh();
+        return $"{ok} {(delete ? "moved" : "copied")}, {failed} failed.";
+    }
+
+    /// <summary>Delete a file from disk and catalogue (used by the duplicate manager).</summary>
+    public string DeleteFile(MediaFile file)
+    {
+        try
+        {
+            if (File.Exists(file.FullPath)) File.Delete(file.FullPath);
+            _catalog.Files.Remove(file);
+            _catalog.RebuildIndex();
+            CatalogStore.Save(_catalog, _catalogPath);
+            RebuildRows();
+            return $"Deleted {file.FileName}.";
+        }
+        catch (Exception ex)
+        {
+            return $"Could not delete {file.FileName}: {ex.Message}";
+        }
+    }
+
+    public void PersistAndRefresh()
+    {
+        CatalogStore.Save(_catalog, _catalogPath);
+        RebuildRows();
+    }
+
+    // --- Consolidation ----------------------------------------------------
+
+    /// <summary>
+    /// Move (or copy) selected TV/film files into the structured consolidation folders.
+    /// Files whose category/target isn't set are skipped.
+    /// </summary>
+    public async Task<string> ConsolidateAsync(IReadOnlyList<FileRow> rows, bool deleteOriginal)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.TvConsolidationDir) &&
+            string.IsNullOrWhiteSpace(_settings.FilmConsolidationDir))
+            return "Set a TV and/or Film consolidation folder in Settings first.";
+
+        IsScanning = true;
+        int ok = 0, skipped = 0, failed = 0;
+        try
+        {
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var row = rows[i];
+                var category = CategoryResolver.Effective(row.Model, _settings);
+                var destDir = ConsolidationPlanner.PlanDirectory(
+                    row.Model, category, _settings.TvConsolidationDir, _settings.FilmConsolidationDir);
+                if (destDir == null) { skipped++; continue; }
+
+                StatusText = $"Consolidating {i + 1}/{rows.Count}: {row.FileName}";
+                var result = await FileRelocator.RelocateAsync(row.Model, destDir, deleteOriginal);
+                if (result.Success) { ok++; row.Refresh(); } else failed++;
+            }
+            CatalogStore.Save(_catalog, _catalogPath);
+        }
+        finally
+        {
+            IsScanning = false;
+            RebuildRows();
+        }
+
+        var msg = $"Consolidation: {ok} moved, {skipped} skipped (no category/target), {failed} failed.";
+        StatusText = msg;
+        return msg;
+    }
+
+    // --- TMDb validation --------------------------------------------------
+
+    public async Task<string> ValidateTvAsync(IReadOnlyList<FileRow> rows)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.TmdbApiKey))
+            return "Enter a TMDb API key in Settings first.";
+
+        var models = (rows.Count > 0 ? rows.Select(r => r.Model) : _catalog.Files).ToList();
+
+        _cts = new CancellationTokenSource();
+        IsScanning = true;
+        ProgressValue = 0;
+        ProgressMax = 1;
+
+        var progress = new Progress<ValidationProgress>(p =>
+        {
+            ProgressMax = Math.Max(1, p.Total);
+            ProgressValue = p.Done;
+            StatusText = $"Validating TV names {p.Done}/{p.Total} — {p.Current}";
+        });
+
+        try
+        {
+            var limiter = new RateLimiter(TimeSpan.FromSeconds(2)); // 1 query / 2s
+            var client = new TmdbClient(_settings.TmdbApiKey, _tmdbCache, limiter);
+            var validator = new TvNameValidator(client);
+            var count = await validator.ValidateManyAsync(models, progress, _cts.Token);
+            _tmdbCache.Save(_tmdbCachePath);
+            CatalogStore.Save(_catalog, _catalogPath);
+            StatusText = $"TMDb validation complete: {count} TV title(s) confirmed.";
+        }
+        catch (OperationCanceledException)
+        {
+            _tmdbCache.Save(_tmdbCachePath);
+            CatalogStore.Save(_catalog, _catalogPath);
+            StatusText = "TMDb validation cancelled. Progress saved.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"TMDb validation failed: {ex.Message}";
+        }
+        finally
+        {
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+            RebuildRows();
+        }
+        return StatusText;
+    }
+
+    // --- Settings ---------------------------------------------------------
+
+    public void ApplyAppSettings(AppSettings settings)
+    {
+        _settings = settings;
+        _settings.Save(_settingsPath);
+        OnPropertyChanged(nameof(Categories));
+        RebuildRows();
+        StatusText = "Settings saved.";
     }
 
     private void RaiseCommandStates()

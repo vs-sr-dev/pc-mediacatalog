@@ -6,10 +6,14 @@
         xmlns:local="clr-namespace:MediaCatalog.App"
         xmlns:vm="clr-namespace:MediaCatalog.App.ViewModels"
         mc:Ignorable="d"
-        Title="Media Catalog" Height="640" Width="1080"
+        Title="Media Catalog" Height="680" Width="1160"
         WindowStartupLocation="CenterScreen">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    </Window.Resources>
     <Grid Margin="8">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -31,33 +35,51 @@
                           SelectedItem="{Binding SelectedFilter}"
                           Width="120" VerticalAlignment="Center"/>
                 <Separator/>
-                <Button x:Name="RelocateButton" Content="Relocate selected…"
-                        Click="OnRelocateClick" Padding="8,2"
-                        IsEnabled="{Binding IsIdle}"/>
-                <CheckBox x:Name="DeleteOriginalCheck" Content="Delete original after verify"
+                <Button x:Name="RelocateButton" Content="Relocate…"
+                        Click="OnRelocateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
+                <CheckBox x:Name="DeleteOriginalCheck" Content="Delete after verify"
                           VerticalAlignment="Center" Margin="6,0"/>
-                <Separator/>
                 <Button x:Name="RenameButton" Content="Rename…"
-                        Click="OnRenameClick" Padding="8,2"
-                        IsEnabled="{Binding IsIdle}"/>
+                        Click="OnRenameClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
+                <Button x:Name="ConsolidateButton" Content="Consolidate…"
+                        Click="OnConsolidateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Move selected TV/films into the structured library folders."/>
                 <Separator/>
-                <Button x:Name="AnalyzeButton" Content="Fingerprint / analyse"
-                        Click="OnAnalyzeClick" Padding="8,2"
-                        IsEnabled="{Binding IsIdle}"
-                        ToolTip="Compute audio/video fingerprints to find same content across different encodings."/>
-                <Button x:Name="DeepCheckButton" Content="Deep integrity check"
-                        Click="OnDeepCheckClick" Padding="8,2"
-                        IsEnabled="{Binding IsIdle}"
+                <Button x:Name="AnalyzeButton" Content="Fingerprint"
+                        Click="OnAnalyzeClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Compute audio/video fingerprints to find the same content across encodings."/>
+                <Button x:Name="DeepCheckButton" Content="Deep check"
+                        Click="OnDeepCheckClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
                         ToolTip="Fully decode files with FFmpeg to detect corruption (slow)."/>
-                <Button x:Name="ToolsButton" Content="Tools…"
-                        Click="OnToolsClick" Padding="8,2"/>
+                <Button x:Name="ValidateTvButton" Content="Validate TV (TMDb)"
+                        Click="OnValidateTvClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Validate TV show names against themoviedb.org."/>
+                <Separator/>
+                <Button x:Name="ToolsButton" Content="Tools…" Click="OnToolsClick" Padding="8,2"/>
+                <Button x:Name="SettingsButton" Content="Settings…" Click="OnSettingsClick" Padding="8,2"/>
             </ToolBar>
         </ToolBarTray>
 
+        <!-- Filter bar -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="2,6">
+            <TextBlock Text="Filter column:" VerticalAlignment="Center" Margin="2,0"/>
+            <ComboBox ItemsSource="{Binding Columns}" SelectedItem="{Binding FilterColumn}"
+                      Width="110" VerticalAlignment="Center" Margin="4,0"/>
+            <TextBox Text="{Binding FilterPattern, UpdateSourceTrigger=PropertyChanged, Delay=200}"
+                     Width="320" VerticalAlignment="Center" Margin="4,0"
+                     ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains."/>
+            <TextBlock Text="(* = many, ? = one)" VerticalAlignment="Center" Foreground="Gray" Margin="4,0"/>
+            <Button Content="Clear" Click="OnClearFilter" Padding="8,1" Margin="8,0" VerticalAlignment="Center"/>
+            <Separator/>
+            <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
+                    VerticalAlignment="Center" Visibility="{Binding HasMissingFiles,
+                    Converter={StaticResource BoolToVis}}"/>
+        </StackPanel>
+
         <!-- Body -->
-        <Grid Grid.Row="1" Margin="0,8">
+        <Grid Grid.Row="2" Margin="0,4">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="320"/>
+                <ColumnDefinition Width="300"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
@@ -65,15 +87,14 @@
             <DockPanel Grid.Column="0" Margin="0,0,8,0">
                 <TextBlock DockPanel.Dock="Top" Text="Drives to scan" FontWeight="Bold" Margin="0,0,0,4"/>
                 <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,4,0,0">
-                    <Button Content="All" Command="{Binding SelectAllDrivesCommand}" Width="50" Margin="0,0,4,0"/>
-                    <Button Content="None" Command="{Binding SelectNoDrivesCommand}" Width="50" Margin="0,0,4,0"/>
-                    <Button Content="Refresh" Command="{Binding RefreshDrivesCommand}" Width="70"/>
+                    <Button Content="All" Command="{Binding SelectAllDrivesCommand}" Width="46" Margin="0,0,4,0"/>
+                    <Button Content="None" Command="{Binding SelectNoDrivesCommand}" Width="46" Margin="0,0,4,0"/>
+                    <Button Content="Refresh" Command="{Binding RefreshDrivesCommand}" Width="64"/>
                 </StackPanel>
                 <ListBox ItemsSource="{Binding Drives}" BorderThickness="1">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <CheckBox IsChecked="{Binding IsSelected}" Content="{Binding Display}"
-                                      Margin="2"/>
+                            <CheckBox IsChecked="{Binding IsSelected}" Content="{Binding Display}" Margin="2"/>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
@@ -85,24 +106,40 @@
                       AutoGenerateColumns="False" IsReadOnly="True"
                       SelectionMode="Extended" SelectionUnit="FullRow"
                       GridLinesVisibility="Horizontal" HeadersVisibility="Column"
-                      CanUserSortColumns="True" EnableRowVirtualization="True">
+                      CanUserSortColumns="True" EnableRowVirtualization="True"
+                      MouseDoubleClick="OnGridDoubleClick">
+                <DataGrid.ContextMenu>
+                    <ContextMenu Opened="OnContextMenuOpened">
+                        <MenuItem Header="Set category" x:Name="CategoryMenu"/>
+                        <MenuItem Header="Set category for this folder…" Click="OnSetCategoryFolder"/>
+                        <MenuItem Header="Add new category…" Click="OnAddCategory"/>
+                        <Separator/>
+                        <MenuItem Header="Show duplicates of this file…" Click="OnShowDuplicates"/>
+                        <MenuItem Header="Consolidate selected…" Click="OnConsolidateClick"/>
+                        <MenuItem Header="Validate TV name (TMDb)" Click="OnValidateTvSelected"/>
+                        <Separator/>
+                        <MenuItem Header="Exclude this folder from results…" Click="OnExcludeFolder"/>
+                        <MenuItem Header="Ignore this file type (removes + skips future scans)" Click="OnIgnoreExtension"/>
+                    </ContextMenu>
+                </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Dup" Binding="{Binding DuplicateFlag}" Width="44"/>
                     <DataGridTextColumn Header="Name" Binding="{Binding FileName}" Width="2*"/>
-                    <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="60"/>
+                    <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="55"/>
                     <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="80"/>
                     <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="1.5*"/>
-                    <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="50"/>
-                    <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="60"/>
-                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"/>
-                    <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"/>
+                    <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="46"/>
+                    <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"/>
+                    <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"/>
+                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="76"/>
+                    <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="100"/>
                     <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="2*"/>
                 </DataGrid.Columns>
             </DataGrid>
         </Grid>
 
         <!-- Status bar -->
-        <StatusBar Grid.Row="2">
+        <StatusBar Grid.Row="3">
             <StatusBarItem>
                 <TextBlock Text="{Binding SummaryText}"/>
             </StatusBarItem>
@@ -112,7 +149,7 @@
             </StatusBarItem>
             <Separator/>
             <StatusBarItem>
-                <ProgressBar Width="200" Height="16"
+                <ProgressBar Width="180" Height="16"
                              Minimum="0" Maximum="{Binding ProgressMax}" Value="{Binding ProgressValue}"/>
             </StatusBarItem>
             <StatusBarItem HorizontalAlignment="Right">

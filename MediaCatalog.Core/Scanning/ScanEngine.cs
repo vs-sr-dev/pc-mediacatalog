@@ -2,10 +2,14 @@ using System.Diagnostics;
 using MediaCatalog.Core.Classification;
 using MediaCatalog.Core.Hashing;
 using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Storage;
 
 namespace MediaCatalog.Core.Scanning;
 
 public record ScanProgress(int Done, int Total, string CurrentFile, string Phase);
+
+/// <summary>Outcome of a completed scan; currently the files that could not be found.</summary>
+public record ScanReport(List<string> MissingFiles);
 
 /// <summary>
 /// Orchestrates a full scan: enumerate media under the chosen roots, classify each
@@ -35,18 +39,22 @@ public class ScanEngine
     /// When true, reuse the on-disk enumeration snapshot (if it matches the roots) and
     /// continue from <paramref name="resumeFromIndex"/> instead of re-walking the drives.
     /// </param>
-    public async Task ScanAsync(
+    public async Task<ScanReport> ScanAsync(
         IReadOnlyList<string> roots,
         IProgress<ScanProgress>? progress = null,
         Action<int>? onCheckpoint = null,
         TimeSpan? checkpointInterval = null,
         bool resume = false,
         int resumeFromIndex = 0,
+        AppSettings? settings = null,
         CancellationToken ct = default)
     {
-        var enumPath = Storage.AppPaths.EnumerationPath;
+        settings ??= new AppSettings();
+        var enumPath = AppPaths.EnumerationPath;
+        var missing = new List<string>();
 
-        // Reuse a matching enumeration snapshot on resume; otherwise walk the drives.
+        // Reuse a matching enumeration snapshot on resume; otherwise walk the drives,
+        // pruning excluded folders and ignored file types as we go.
         List<string> paths;
         var startIndex = 0;
         var cache = resume ? EnumerationCache.Load(enumPath) : null;
@@ -60,8 +68,10 @@ public class ScanEngine
         else
         {
             progress?.Report(new ScanProgress(0, 0, string.Empty, "Enumerating files…"));
-            paths = await Task.Run(
-                () => DriveScanner.EnumerateMediaFiles(roots, ct).ToList(), ct);
+            paths = await Task.Run(() => DriveScanner.EnumerateMediaFiles(
+                roots, ct,
+                excludeDescent: settings.IsDescentBlocked,
+                ignoreExtension: settings.IsExtensionIgnored).ToList(), ct);
             new EnumerationCache
             {
                 Roots = roots.ToList(),
@@ -86,9 +96,21 @@ public class ScanEngine
             // this file, the persisted resume index redoes it rather than skipping it.
             progress?.Report(new ScanProgress(i, total, Path.GetFileName(path), "Hashing & classifying"));
 
+            // A file that vanished since enumeration must never abort the scan. Ones under
+            // a "Temp" folder are ignored silently; the rest are reported afterwards.
+            if (!File.Exists(path))
+            {
+                if (!DriveScanner.IsUnderTempFolder(path)) missing.Add(path);
+                continue;
+            }
+
             FileInfo info;
             try { info = new FileInfo(path); }
-            catch { continue; }
+            catch
+            {
+                if (!DriveScanner.IsUnderTempFolder(path)) missing.Add(path);
+                continue;
+            }
 
             var entry = MergeEntry(info);
             MediaClassifier.Classify(entry);
@@ -113,16 +135,18 @@ public class ScanEngine
             }
         }
 
-        // Full pass completed. The enumeration snapshot is the authoritative set of files
-        // that exist, so pruning here is correct even across a restart. A partial/paused
-        // pass never reaches this point, so it never prunes.
+        // Full pass completed. The enumeration snapshot (minus anything that turned out to
+        // be missing) is the authoritative set of files that exist, so pruning here is
+        // correct even across a restart. A partial/paused pass never reaches this point.
         var existing = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+        foreach (var m in missing) existing.Remove(m);
         _catalog.Files.RemoveAll(f => !existing.Contains(f.FullPath));
         _catalog.RebuildIndex();
         _catalog.LastScanUtc = DateTime.UtcNow;
 
         EnumerationCache.Clear(enumPath);
         progress?.Report(new ScanProgress(total, total, string.Empty, "Done"));
+        return new ScanReport(missing);
     }
 
     private static void TryCheckpoint(Action<int> onCheckpoint, int index)
