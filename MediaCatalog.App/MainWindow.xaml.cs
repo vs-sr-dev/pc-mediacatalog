@@ -20,6 +20,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = _vm;
+        Closed += (_, _) => _vm.Shutdown();
     }
 
     private async void OnRelocateClick(object sender, RoutedEventArgs e)
@@ -142,7 +143,42 @@ public partial class MainWindow : Window
             _vm.ApplyAppSettings(dlg.Result);
     }
 
-    private void OnClearFilter(object sender, RoutedEventArgs e) => _vm.FilterPattern = "";
+    private void OnClearFilter(object sender, RoutedEventArgs e) => _vm.ClearFilters();
+
+    private void OnAddFilter(object sender, RoutedEventArgs e) => _vm.AddCurrentFilter();
+
+    private void OnRemoveFilter(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: FilterClause clause })
+            _vm.RemoveFilter(clause);
+    }
+
+    private void OnColumnsClick(object sender, RoutedEventArgs e) =>
+        new ColumnChooserWindow(FilesGrid) { Owner = this }.ShowDialog();
+
+    private async void OnSuggestConsolidationClick(object sender, RoutedEventArgs e)
+    {
+        var suggestions = _vm.SuggestConsolidation();
+        if (suggestions.Count == 0)
+        {
+            MessageBox.Show(this,
+                "No consolidation suggestions. Set consolidation folders in Settings, and make sure " +
+                "files have a category (TV files also need a validated title and season/episode).",
+                "Suggest consolidation", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var dlg = new ConsolidationSuggesterWindow(suggestions) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+        var chosen = dlg.Selected;
+        if (chosen.Count == 0) return;
+        var deleteOriginal = MessageBox.Show(this,
+            $"Move {chosen.Count} file(s) to their consolidation folders?\n\n" +
+            "Yes = move (copy, verify, delete original). No = copy only.",
+            "Consolidate", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (deleteOriginal == MessageBoxResult.Cancel) return;
+        var result = await _vm.ApplyConsolidationAsync(chosen, deleteOriginal == MessageBoxResult.Yes);
+        MessageBox.Show(this, result, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
 
     private void OnMissingFilesClick(object sender, RoutedEventArgs e)
     {
@@ -218,7 +254,7 @@ public partial class MainWindow : Window
 
         var dlg = new CategoryFolderWindow(folder, _vm.Categories) { Owner = this };
         if (dlg.ShowDialog() == true)
-            _vm.SetCategoryForFolder(folder, dlg.SelectedCategory, dlg.IncludeSubdirectories);
+            _vm.SetCategoryForFolder(dlg.SelectedFolder, dlg.SelectedCategory, dlg.IncludeSubdirectories);
     }
 
     private void OnAddCategory(object sender, RoutedEventArgs e)
@@ -236,12 +272,17 @@ public partial class MainWindow : Window
         var folder = Path.GetDirectoryName(row.Model.FullPath);
         if (string.IsNullOrEmpty(folder)) return;
 
+        // Let the user edit the path first — they may want a parent folder, or a wildcard.
+        var edited = PromptWindow.Ask(this, "Exclude folder",
+            "Folder to exclude (edit to a parent, or use wildcards like ?:\\Windows):", folder);
+        if (string.IsNullOrWhiteSpace(edited)) return;
+
         var subdirs = MessageBox.Show(this,
-            $"Exclude this folder from results and future scans?\n\n{folder}\n\n" +
+            $"Exclude this folder from results and future scans?\n\n{edited}\n\n" +
             "Yes = also exclude all subfolders.  No = just this folder.",
             "Exclude folder", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
         if (subdirs == MessageBoxResult.Cancel) return;
-        _vm.ExcludeFolder(folder, subdirs == MessageBoxResult.Yes);
+        _vm.ExcludeFolder(edited.Trim(), subdirs == MessageBoxResult.Yes);
     }
 
     private void OnIgnoreExtension(object sender, RoutedEventArgs e)

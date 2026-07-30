@@ -20,30 +20,46 @@ public class SettingsWindow : Window
         public string Display => Model.Path + (Model.IncludeSubdirectories ? "   [+ subfolders]" : "   [this folder only]");
     }
 
+    private sealed class CatFolderRow
+    {
+        public required CategoryConsolidation Model { get; init; }
+        public string Display => $"{Model.Category}   →   {Model.Folder}";
+    }
+
     private readonly AppSettings _incoming;
+    private readonly IReadOnlyList<string> _knownCategories;
     private readonly TextBox _apiKey = new();
+    private readonly TextBox _readToken = new();
     private readonly TextBox _tvDir = new();
     private readonly TextBox _filmDir = new();
+    private readonly CheckBox _startup = new() { Content = "Start Media Catalog when Windows starts" };
+    private readonly CheckBox _watch = new() { Content = "Watch scanned drives for new files and add them (with a taskbar notification)" };
     private readonly ObservableCollection<string> _exts = new();
     private readonly ObservableCollection<ExclRow> _excluded = new();
     private readonly ObservableCollection<string> _categories = new();
+    private readonly ObservableCollection<CatFolderRow> _catFolders = new();
 
     public AppSettings Result { get; private set; }
 
     public SettingsWindow(AppSettings settings, IReadOnlyList<string> knownCategories)
     {
         _incoming = settings;
+        _knownCategories = knownCategories;
         Result = settings;
 
-        Title = "Settings"; Width = 660; Height = 640;
+        Title = "Settings"; Width = 700; Height = 720;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         _apiKey.Text = settings.TmdbApiKey;
+        _readToken.Text = settings.TmdbReadAccessToken;
         _tvDir.Text = settings.TvConsolidationDir;
         _filmDir.Text = settings.FilmConsolidationDir;
+        _startup.IsChecked = settings.StartWithWindows;
+        _watch.IsChecked = settings.WatchForNewFiles;
         foreach (var e in settings.IgnoredExtensions) _exts.Add(e);
         foreach (var f in settings.ExcludedFolders) _excluded.Add(new ExclRow { Model = f });
         foreach (var c in settings.CustomCategories) _categories.Add(c);
+        foreach (var cf in settings.CategoryFolders) _catFolders.Add(new CatFolderRow { Model = cf });
 
         var root = new DockPanel { Margin = new Thickness(14) };
 
@@ -64,16 +80,27 @@ public class SettingsWindow : Window
         var panel = new StackPanel();
         panel.Children.Add(Section("themoviedb.org"));
         panel.Children.Add(Labeled("API key (v3):", _apiKey));
-        panel.Children.Add(Hint("Get a free key at themoviedb.org → account settings → API. Queries are rate-limited to one every two seconds."));
+        panel.Children.Add(Labeled("Read token (v4):", _readToken));
+        panel.Children.Add(Hint("Get free credentials at themoviedb.org → account settings → API. Either the v4 Read Access Token or the v3 API Key works (the token is preferred). Queries are rate-limited to one every two seconds."));
+
+        panel.Children.Add(Section("Startup & watching"));
+        _startup.Margin = new Thickness(0, 2, 0, 2);
+        _watch.Margin = new Thickness(0, 2, 0, 2);
+        panel.Children.Add(_startup);
+        panel.Children.Add(_watch);
 
         panel.Children.Add(Section("Consolidation folders"));
         panel.Children.Add(DirRow("TV shows:", _tvDir));
         panel.Children.Add(DirRow("Films:", _filmDir));
+        panel.Children.Add(Hint("The consolidation folder is a central location that scattered files are eventually moved into (e.g. all TV under T:\\TV\\)."));
+
+        panel.Children.Add(Section("Per-category consolidation folders (for custom categories)"));
+        panel.Children.Add(CategoryFolderEditor());
 
         panel.Children.Add(Section("Ignored file types (removed from results and skipped in future scans)"));
         panel.Children.Add(ListEditor(_exts, addPrompt: "Extension e.g. .nfo", onAdd: AddExtension));
 
-        panel.Children.Add(Section("Excluded folders"));
+        panel.Children.Add(Section("Excluded folders (paths may use wildcards: ?:\\Windows or *\\Cache\\*)"));
         panel.Children.Add(ExcludedEditor());
 
         panel.Children.Add(Section("Custom categories"));
@@ -162,17 +189,87 @@ public class SettingsWindow : Window
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
         var subdirs = new CheckBox { Content = "incl. subfolders", IsChecked = true, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
         controls.Children.Add(subdirs);
-        var add = new Button { Content = "Add folder…", Width = 100 };
+
+        var add = new Button { Content = "Add folder…", Width = 96 };
         add.Click += (_, _) =>
         {
             var dlg = new OpenFolderDialog { Title = "Choose folder to exclude" };
             if (dlg.ShowDialog(this) == true)
-                _excluded.Add(new ExclRow { Model = new ExcludedFolder { Path = dlg.FolderName, IncludeSubdirectories = subdirs.IsChecked == true } });
+                AddExclusion(dlg.FolderName, subdirs.IsChecked == true);
         };
         controls.Children.Add(add);
-        var remove = new Button { Content = "Remove selected", Width = 120, Margin = new Thickness(6, 0, 0, 0) };
+
+        // Edit lets the user fix the path first (e.g. exclude the parent, or add wildcards).
+        var edit = new Button { Content = "Edit…", Width = 70, Margin = new Thickness(6, 0, 0, 0) };
+        edit.Click += (_, _) =>
+        {
+            if (list.SelectedItem is not ExclRow r) return;
+            var newPath = PromptWindow.Ask(this, "Edit excluded folder",
+                "Folder path (wildcards allowed: ?:\\Windows, *\\Cache\\*):");
+            if (newPath == null) return;
+            r.Model.Path = newPath.Trim();
+            // refresh display
+            var idx = _excluded.IndexOf(r);
+            _excluded.RemoveAt(idx);
+            _excluded.Insert(idx, new ExclRow { Model = r.Model });
+        };
+        controls.Children.Add(edit);
+
+        var remove = new Button { Content = "Remove", Width = 80, Margin = new Thickness(6, 0, 0, 0) };
         remove.Click += (_, _) => { if (list.SelectedItem is ExclRow r) _excluded.Remove(r); };
         controls.Children.Add(remove);
+        wrap.Children.Add(controls);
+        return wrap;
+    }
+
+    /// <summary>Add an exclusion, offering to prune any narrower rules it now supersedes.</summary>
+    private void AddExclusion(string path, bool includeSubdirs)
+    {
+        var candidate = new ExcludedFolder { Path = path, IncludeSubdirectories = includeSubdirs };
+        var probe = new AppSettings { ExcludedFolders = _excluded.Select(r => r.Model).ToList() };
+        var superseded = probe.FindSupersededBy(candidate);
+        if (superseded.Count > 0)
+        {
+            var ask = MessageBox.Show(this,
+                $"This rule already covers {superseded.Count} more specific excluded folder(s):\n\n" +
+                string.Join("\n", superseded.Select(s => s.Path)) +
+                "\n\nRemove the redundant rules?",
+                "Redundant rules", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (ask == MessageBoxResult.Yes)
+                foreach (var s in superseded)
+                {
+                    var row = _excluded.FirstOrDefault(r => ReferenceEquals(r.Model, s));
+                    if (row != null) _excluded.Remove(row);
+                }
+        }
+        _excluded.Add(new ExclRow { Model = candidate });
+    }
+
+    private FrameworkElement CategoryFolderEditor()
+    {
+        var wrap = new StackPanel();
+        var list = new ListBox { Height = 70, ItemsSource = _catFolders, DisplayMemberPath = nameof(CatFolderRow.Display) };
+        wrap.Children.Add(list);
+
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        var cat = new ComboBox { IsEditable = true, Width = 140, ItemsSource = _knownCategories, VerticalContentAlignment = VerticalAlignment.Center };
+        controls.Children.Add(cat);
+        var addTo = new Button { Content = "Set folder…", Width = 100, Margin = new Thickness(6, 0, 0, 0) };
+        addTo.Click += (_, _) =>
+        {
+            var category = cat.Text.Trim();
+            if (string.IsNullOrEmpty(category)) return;
+            var dlg = new OpenFolderDialog { Title = $"Consolidation folder for '{category}'" };
+            if (dlg.ShowDialog(this) != true) return;
+            var existing = _catFolders.FirstOrDefault(c =>
+                string.Equals(c.Model.Category, category, StringComparison.OrdinalIgnoreCase));
+            if (existing != null) _catFolders.Remove(existing);
+            _catFolders.Add(new CatFolderRow { Model = new CategoryConsolidation { Category = category, Folder = dlg.FolderName } });
+        };
+        controls.Children.Add(addTo);
+        var removeCf = new Button { Content = "Remove", Width = 80, Margin = new Thickness(6, 0, 0, 0) };
+        removeCf.Click += (_, _) => { if (list.SelectedItem is CatFolderRow r) _catFolders.Remove(r); };
+        controls.Children.Add(removeCf);
         wrap.Children.Add(controls);
         return wrap;
     }
@@ -193,11 +290,15 @@ public class SettingsWindow : Window
         Result = new AppSettings
         {
             TmdbApiKey = _apiKey.Text.Trim(),
+            TmdbReadAccessToken = _readToken.Text.Trim(),
             TvConsolidationDir = _tvDir.Text.Trim(),
             FilmConsolidationDir = _filmDir.Text.Trim(),
+            StartWithWindows = _startup.IsChecked == true,
+            WatchForNewFiles = _watch.IsChecked == true,
             IgnoredExtensions = _exts.ToList(),
             ExcludedFolders = _excluded.Select(r => r.Model).ToList(),
             CustomCategories = _categories.ToList(),
+            CategoryFolders = _catFolders.Select(r => r.Model).ToList(),
             FolderCategoryRules = _incoming.FolderCategoryRules // preserved
         };
         DialogResult = true;

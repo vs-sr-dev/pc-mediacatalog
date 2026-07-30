@@ -33,9 +33,11 @@ public class PromptWindow : Window
         Content = panel;
     }
 
-    public static string? Ask(Window owner, string title, string prompt)
+    public static string? Ask(Window owner, string title, string prompt, string initial = "")
     {
         var w = new PromptWindow(title, prompt) { Owner = owner };
+        w._box.Text = initial;
+        w._box.SelectAll();
         return w.ShowDialog() == true ? w._box.Text : null;
     }
 }
@@ -68,25 +70,38 @@ public class ListWindow : Window
     }
 }
 
-/// <summary>Choose a category (and subfolder scope) for a folder rule.</summary>
+/// <summary>Choose a category, the target folder (this one or a parent), and subfolder scope.</summary>
 public class CategoryFolderWindow : Window
 {
     private readonly ComboBox _combo = new() { IsEditable = true };
+    private readonly ComboBox _folderCombo = new();
     private readonly CheckBox _subdirs = new() { Content = "Include all subfolders", IsChecked = true };
 
     public string SelectedCategory => _combo.Text.Trim();
+    public string SelectedFolder => _folderCombo.SelectedItem as string ?? _folderCombo.Text;
     public bool IncludeSubdirectories => _subdirs.IsChecked == true;
 
     public CategoryFolderWindow(string folder, IReadOnlyList<string> categories)
     {
-        Title = "Set category for folder"; Width = 480; SizeToContent = SizeToContent.Height;
+        Title = "Set category for folder"; Width = 520; SizeToContent = SizeToContent.Height;
         WindowStartupLocation = WindowStartupLocation.CenterOwner; ResizeMode = ResizeMode.NoResize;
 
         var panel = new StackPanel { Margin = new Thickness(14) };
-        panel.Children.Add(new TextBlock
+
+        // The folder and each of its ancestors, so a rule can be applied higher up the tree.
+        var ancestors = new List<string>();
+        var d = folder;
+        while (!string.IsNullOrEmpty(d))
         {
-            Text = $"Folder: {folder}", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10)
-        });
+            ancestors.Add(d);
+            d = System.IO.Path.GetDirectoryName(d);
+        }
+        panel.Children.Add(new TextBlock { Text = "Apply to folder (pick this one or a parent):" });
+        _folderCombo.ItemsSource = ancestors;
+        _folderCombo.SelectedIndex = 0;
+        _folderCombo.Margin = new Thickness(0, 2, 0, 10);
+        panel.Children.Add(_folderCombo);
+
         panel.Children.Add(new TextBlock { Text = "Category (pick or type a new one):" });
         _combo.ItemsSource = categories;
         if (categories.Count > 0) _combo.SelectedIndex = 0;

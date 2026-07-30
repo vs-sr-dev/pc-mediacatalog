@@ -4,12 +4,21 @@
     <ProjectReference Include="..\MediaCatalog.Core\MediaCatalog.Core.csproj" />
   </ItemGroup>
 
+  <!-- Keep the WinForms reference (for NotifyIcon) but drop its global usings so WPF
+       control types (TextBox, Button, …) stay unambiguous. WinForms is fully qualified. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- WinForms enabled only for the NotifyIcon taskbar notification. -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
 </Project>

@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Windows;
 using System.Windows.Input;
 using MediaCatalog.App.Infrastructure;
 using MediaCatalog.Core.Classification;
+using MediaCatalog.Core.Hashing;
 using MediaCatalog.Core.Consolidation;
 using MediaCatalog.Core.Duplicates;
 using MediaCatalog.Core.Filtering;
@@ -33,6 +35,9 @@ public class MainViewModel : ObservableObject
     private ExternalTools _tools;
     private ScanSession _session;
     private TmdbCache _tmdbCache;
+    private NewFileWatcher? _watcher;
+    private TaskbarNotifier? _notifier;
+    private List<string> _lastRoots = new();
     private readonly List<FileRow> _allRows = new();
     private CancellationTokenSource? _cts;
     private bool _isPausing;
@@ -80,6 +85,7 @@ public class MainViewModel : ObservableObject
 
         LoadDrives();
         RebuildRows();
+        StartWatchingIfEnabled(_lastRoots); // resumes watching if enabled in settings
     }
 
     public ObservableCollection<DriveItem> Drives { get; } = new();
@@ -167,6 +173,8 @@ public class MainViewModel : ObservableObject
 
     public Array Columns => FilterColumns;
 
+    private bool _filterNegate;
+
     public string FilterColumn
     {
         get => _filterColumn;
@@ -177,6 +185,44 @@ public class MainViewModel : ObservableObject
     {
         get => _filterPattern;
         set { if (SetProperty(ref _filterPattern, value)) ApplyFilter(); }
+    }
+
+    public bool FilterNegate
+    {
+        get => _filterNegate;
+        set { if (SetProperty(ref _filterNegate, value)) ApplyFilter(); }
+    }
+
+    /// <summary>Committed filter clauses (all must match; each may be negated).</summary>
+    public ObservableCollection<FilterClause> ActiveFilters { get; } = new();
+
+    /// <summary>Commit the current column/pattern/negate as a stacked filter clause.</summary>
+    public void AddCurrentFilter()
+    {
+        if (string.IsNullOrEmpty(_filterPattern)) return;
+        ActiveFilters.Add(new FilterClause
+        {
+            Column = _filterColumn, Pattern = _filterPattern, Negate = _filterNegate
+        });
+        FilterPattern = ""; // clears and re-applies
+    }
+
+    public void RemoveFilter(FilterClause clause)
+    {
+        ActiveFilters.Remove(clause);
+        ApplyFilter();
+    }
+
+    public void ClearFilters()
+    {
+        ActiveFilters.Clear();
+        FilterPattern = "";
+    }
+
+    private static bool Matches(FileRow row, FilterClause clause)
+    {
+        var m = WildcardMatcher.IsMatch(row.ColumnValue(clause.Column), clause.Pattern);
+        return clause.Negate ? !m : m;
     }
 
     /// <summary>Built-in + custom categories, for the "set category" menus.</summary>
@@ -269,6 +315,8 @@ public class MainViewModel : ObservableObject
 
             CatalogStore.Save(_catalog, _catalogPath);
             ClearSession();
+            _lastRoots = roots;
+            StartWatchingIfEnabled(roots);
             MissingFiles = report.MissingFiles;
             StatusText = report.MissingFiles.Count > 0
                 ? $"Scan complete. {report.MissingFiles.Count} file(s) could not be found — see the missing-files list."
@@ -385,9 +433,14 @@ public class MainViewModel : ObservableObject
             _ => rows
         };
 
-        // Wildcard filter on the chosen column (* = any run, ? = one char, plain = contains).
+        // Committed clauses (AND), then the live in-progress clause from the filter box.
+        foreach (var clause in ActiveFilters)
+            rows = rows.Where(r => Matches(r, clause));
         if (!string.IsNullOrEmpty(_filterPattern))
-            rows = rows.Where(r => WildcardMatcher.IsMatch(r.ColumnValue(_filterColumn), _filterPattern));
+        {
+            var live = new FilterClause { Column = _filterColumn, Pattern = _filterPattern, Negate = _filterNegate };
+            rows = rows.Where(r => Matches(r, live));
+        }
 
         Files.Clear();
         foreach (var r in rows.OrderBy(r => r.FullPath))
@@ -708,6 +761,40 @@ public class MainViewModel : ObservableObject
         return msg;
     }
 
+    /// <summary>Propose consolidation moves for the whole catalogue.</summary>
+    public List<ConsolidationSuggestion> SuggestConsolidation() =>
+        ConsolidationSuggester.Suggest(
+            _catalog.Files, _settings, f => CategoryResolver.Effective(f, _settings));
+
+    /// <summary>Apply chosen consolidation suggestions (copy-and-verify, optional delete).</summary>
+    public async Task<string> ApplyConsolidationAsync(
+        IReadOnlyList<ConsolidationSuggestion> chosen, bool deleteOriginal)
+    {
+        IsScanning = true;
+        int ok = 0, failed = 0;
+        try
+        {
+            for (var i = 0; i < chosen.Count; i++)
+            {
+                var s = chosen[i];
+                var destDir = System.IO.Path.GetDirectoryName(s.ProposedPath);
+                if (string.IsNullOrEmpty(destDir)) { failed++; continue; }
+                StatusText = $"Consolidating {i + 1}/{chosen.Count}: {s.File.FileName}";
+                var r = await FileRelocator.RelocateAsync(s.File, destDir, deleteOriginal);
+                if (r.Success) ok++; else failed++;
+            }
+            CatalogStore.Save(_catalog, _catalogPath);
+        }
+        finally
+        {
+            IsScanning = false;
+            RebuildRows();
+        }
+        var msg = $"Consolidation: {ok} moved, {failed} failed.";
+        StatusText = msg;
+        return msg;
+    }
+
     // --- TMDb validation --------------------------------------------------
 
     public async Task<string> ValidateTvAsync(IReadOnlyList<FileRow> rows)
@@ -766,9 +853,87 @@ public class MainViewModel : ObservableObject
     {
         _settings = settings;
         _settings.Save(_settingsPath);
+        StartupManager.Apply(_settings.StartWithWindows);
+        StartWatchingIfEnabled(_lastRoots);
         OnPropertyChanged(nameof(Categories));
         RebuildRows();
         StatusText = "Settings saved.";
+    }
+
+    // --- New-file watching + notifications --------------------------------
+
+    private TaskbarNotifier Notifier => _notifier ??= new TaskbarNotifier();
+
+    private void StartWatchingIfEnabled(IEnumerable<string> roots)
+    {
+        StopWatching();
+        if (!_settings.WatchForNewFiles) return;
+
+        var rootList = roots.Where(r => !string.IsNullOrWhiteSpace(r)).Distinct().ToList();
+        if (rootList.Count == 0)
+            rootList = _catalog.Files.Select(f => Path.GetPathRoot(f.FullPath) ?? "")
+                .Where(r => r.Length > 0).Distinct().ToList();
+        if (rootList.Count == 0) return;
+
+        _watcher = new NewFileWatcher(rootList, path =>
+            Application.Current?.Dispatcher.Invoke(() => OnWatchedFile(path)));
+    }
+
+    private void StopWatching()
+    {
+        _watcher?.Dispose();
+        _watcher = null;
+    }
+
+    private void OnWatchedFile(string path)
+    {
+        try
+        {
+            if (_catalog.ByPath.ContainsKey(path)) return;
+            var ext = Path.GetExtension(path);
+            if (_settings.IsPathExcluded(path) || _settings.IsExtensionIgnored(ext)) return;
+
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length == 0) return;
+
+            var entry = new MediaFile
+            {
+                FullPath = path, FileName = info.Name, Extension = info.Extension,
+                SizeBytes = info.Length, LastModifiedUtc = info.LastWriteTimeUtc,
+                IndexedUtc = DateTime.UtcNow, Integrity = IntegrityStatus.Ok
+            };
+            MediaClassifier.Classify(entry);
+            _catalog.Files.Add(entry);
+            _catalog.ByPath[path] = entry;
+            CatalogStore.Save(_catalog, _catalogPath);
+            RebuildRows();
+
+            Notifier.Notify("Media Catalog", $"Added new file: {info.Name}");
+            StatusText = $"New file detected and added: {info.Name}";
+
+            _ = HashNewFileAsync(entry); // fill in the content hash in the background
+        }
+        catch { /* a watcher hiccup must never crash the app */ }
+    }
+
+    private async Task HashNewFileAsync(MediaFile entry)
+    {
+        var hash = await FileHasher.ComputeSha256Async(entry.FullPath);
+        if (string.IsNullOrEmpty(hash)) return;
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            entry.Sha256 = hash;
+            CatalogStore.Save(_catalog, _catalogPath);
+            RebuildRows();
+        });
+    }
+
+    /// <summary>Release the watcher/tray icon on shutdown.</summary>
+    public void Shutdown()
+    {
+        StopWatching();
+        _notifier?.Dispose();
+        _notifier = null;
     }
 
     private void RaiseCommandStates()

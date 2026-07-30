@@ -76,11 +76,17 @@ full completion — a pause never deletes anything.
 - ✅ Relocate files with copy-and-verify, optional delete
 - ✅ Consistent metadata extraction (title / year / season / episode)
 - ✅ Rename to a consistent scheme, with a preview-and-confirm dialog
-- ✅ **Consolidate** TV/films into a structured library (`<dir>\<A–Z or #>\<Show>\Season NN\`)
-- ✅ **Editable categories** — per-file or per-folder overrides, plus your own custom categories
-- ✅ **TMDb validation** of TV names (rate-limited, cached, with folder-name fallback)
-- ✅ **Exclude folders / ignore file types** from results and future scans
-- ✅ **Wildcard column filters** (`*` and `?`) on any column
+- ✅ **Consolidate** TV/films into a structured library (`<dir>\<A–Z or #>\<Show>\Season NN\`),
+  reusing an existing show folder, preferring the **highest-quality** copy, with a
+  **suggestions** view (current → new location, collisions, duplicates)
+- ✅ **Editable categories** — per-file / per-folder / parent-folder overrides, custom
+  categories, each with its own consolidation folder
+- ✅ **TMDb validation** of TV names — v4 Read Token *or* v3 API Key — rate-limited, cached,
+  with folder-name fallback
+- ✅ **Exclude folders (incl. wildcards `?:\Windows`, `*\Cache\*`) / ignore file types**
+- ✅ **Column filters** — wildcard (`*`/`?`), **negation** (`not`), and **multiple stacked
+  filters**; plus **hide/show columns** and horizontal scrolling
+- ✅ **Watch for new files** (auto-add + taskbar notification) and **start with Windows**
 - ✅ **Duplicate manager** — open any duplicated file to copy/move/delete its copies
 - ✅ **Open file / open containing folder** — double-click or right-click a result
 - ✅ **Remove from results** — select rows and press Delete to drop them from the view
@@ -141,10 +147,23 @@ into a tidy library:
 - TV → `<TV dir>\<A–Z or #>\<Show>\Season NN\` (season left-padded to ≥2 digits)
 - Films → `<Film dir>\<A–Z or #>\<Title (Year)>\`
 
-Set the TV/Film target folders in **Settings…**. Uses the same copy-and-verify as Relocate.
+Set the TV/Film target folders in **Settings…** (custom categories get their own folders
+there too). Uses the same copy-and-verify as Relocate.
 
-**Filtering** — use the filter bar to match any column with wildcards: `*` = any run of
-characters, `?` = one character; plain text is a "contains" search.
+**Suggest consolidation** — click **Suggest consolidation…** to scan the catalogue and get a
+reviewable list of proposed moves: current location → new location, with name-collision and
+duplicate flags. When several copies of the same film/episode exist, the **highest-quality**
+one (2160 > 1080 > 720 > 480) is preferred; TV items must have a TMDb-validated title and a
+season/episode to be recommended. Tick the ones to apply.
+
+**Filtering** — the filter bar matches any column with wildcards (`*` = any run, `?` = one
+char; plain text = contains). Tick **not** to exclude matches (e.g. *Category not Audio*),
+and **Add filter** to stack several filters at once. **Columns…** hides/shows columns, and
+the grid scrolls horizontally.
+
+**Watching & startup** — in **Settings…**, enable *Watch for new files* to have new media
+auto-added to the catalogue with a taskbar notification, and *Start with Windows* to launch
+at sign-in.
 
 **Excluding** — right-click → *Exclude this folder…* (optionally including subfolders) or
 *Ignore this file type* to drop files from results and skip them in future scans. Manage
@@ -171,8 +190,8 @@ ones under a `Temp` folder are ignored, the rest are listed via the **Missing fi
 button afterwards.
 
 ### TMDb (themoviedb.org) TV validation
-Enter a free TMDb v3 API key in **Settings…**, then **Validate TV (TMDb)** confirms show
-names against TMDb. Lookups are **rate-limited to one every two seconds** and **cached**
+Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** in **Settings…** (the token is
+preferred if both are given), then **Validate TV (TMDb)** confirms show names against TMDb. Lookups are **rate-limited to one every two seconds** and **cached**
 (`tmdb-cache.xml`) so names are never queried twice. If the episode title doesn't match,
 the containing folder names are tried in turn (e.g. `…\Bewitched\Season 01\ep.avi` falls
 back to "Bewitched"). Validated titles show a ✓ in the TMDb column.

@@ -61,19 +61,37 @@
         </ToolBarTray>
 
         <!-- Filter bar -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="2,6">
-            <TextBlock Text="Filter column:" VerticalAlignment="Center" Margin="2,0"/>
-            <ComboBox ItemsSource="{Binding Columns}" SelectedItem="{Binding FilterColumn}"
-                      Width="110" VerticalAlignment="Center" Margin="4,0"/>
-            <TextBox Text="{Binding FilterPattern, UpdateSourceTrigger=PropertyChanged, Delay=200}"
-                     Width="320" VerticalAlignment="Center" Margin="4,0"
-                     ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains."/>
-            <TextBlock Text="(* = many, ? = one)" VerticalAlignment="Center" Foreground="Gray" Margin="4,0"/>
-            <Button Content="Clear" Click="OnClearFilter" Padding="8,1" Margin="8,0" VerticalAlignment="Center"/>
-            <Separator/>
-            <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
-                    VerticalAlignment="Center" Visibility="{Binding HasMissingFiles,
-                    Converter={StaticResource BoolToVis}}"/>
+        <StackPanel Grid.Row="1" Margin="2,6">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="2,0"/>
+                <ComboBox ItemsSource="{Binding Columns}" SelectedItem="{Binding FilterColumn}"
+                          Width="100" VerticalAlignment="Center" Margin="4,0"/>
+                <CheckBox Content="not" IsChecked="{Binding FilterNegate}" VerticalAlignment="Center"
+                          Margin="2,0" ToolTip="Exclude rows that match (e.g. Category not Audio)."/>
+                <TextBox Text="{Binding FilterPattern, UpdateSourceTrigger=PropertyChanged, Delay=200}"
+                         Width="280" VerticalAlignment="Center" Margin="4,0"
+                         ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains."/>
+                <Button Content="Add filter" Click="OnAddFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"
+                        ToolTip="Stack this as an additional filter (multiple filters per column allowed)."/>
+                <Button Content="Clear all" Click="OnClearFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
+                <Separator/>
+                <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
+                <Button Content="Suggest consolidation…" Click="OnSuggestConsolidationClick" Padding="8,1" Margin="2,0"
+                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"/>
+                <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
+                        VerticalAlignment="Center" Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
+            </StackPanel>
+            <ItemsControl ItemsSource="{Binding ActiveFilters}" Margin="40,4,0,0">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Button Content="{Binding Display}" Click="OnRemoveFilter" Margin="0,0,6,0" Padding="6,1"
+                                ToolTip="Click to remove this filter."/>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
         </StackPanel>
 
         <!-- Body -->
@@ -106,7 +124,8 @@
                       AutoGenerateColumns="False" IsReadOnly="True"
                       SelectionMode="Extended" SelectionUnit="FullRow"
                       GridLinesVisibility="Horizontal" HeadersVisibility="Column"
-                      CanUserSortColumns="True" EnableRowVirtualization="True"
+                      CanUserSortColumns="True" CanUserResizeColumns="True" EnableRowVirtualization="True"
+                      HorizontalScrollBarVisibility="Auto" ColumnWidth="SizeToHeader"
                       MouseDoubleClick="OnGridDoubleClick" PreviewKeyDown="OnGridKeyDown">
                 <DataGrid.ContextMenu>
                     <ContextMenu Opened="OnContextMenuOpened">
@@ -127,17 +146,17 @@
                     </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="Dup" Binding="{Binding DuplicateFlag}" Width="44"/>
-                    <DataGridTextColumn Header="Name" Binding="{Binding FileName}" Width="2*"/>
+                    <DataGridTextColumn Header="Dup" Binding="{Binding DuplicateFlag}" Width="46"/>
+                    <DataGridTextColumn Header="Name" Binding="{Binding FileName}" Width="260"/>
                     <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="55"/>
-                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="80"/>
-                    <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="1.5*"/>
+                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="90"/>
+                    <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="200"/>
                     <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="46"/>
                     <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"/>
                     <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"/>
-                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="76"/>
-                    <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="100"/>
-                    <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="2*"/>
+                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"/>
+                    <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"/>
+                    <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="380"/>
                 </DataGrid.Columns>
             </DataGrid>
         </Grid>
