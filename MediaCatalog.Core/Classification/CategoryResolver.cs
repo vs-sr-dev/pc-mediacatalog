@@ -12,11 +12,34 @@ public static class CategoryResolver
 {
     public const string Movie = "Movie";
     public const string TvShow = "TvShow";
+    public const string TvExtra = "TvExtra";
+    public const string MovieExtra = "MovieExtra";
     public const string Other = "Other";
     public const string Unknown = "Unknown";
     public const string Audio = "Audio";
 
-    public static readonly string[] BuiltIn = { Movie, TvShow, Other, Unknown, Audio };
+    public static readonly string[] BuiltIn =
+        { Movie, TvShow, TvExtra, MovieExtra, Other, Unknown, Audio };
+
+    /// <summary>The extras category belonging to a main category, or null.</summary>
+    public static string? ExtraOf(string category) => category switch
+    {
+        TvShow => TvExtra,
+        Movie => MovieExtra,
+        _ => null
+    };
+
+    /// <summary>The main category an extras category belongs to, or null.</summary>
+    public static string? MainOf(string category) => category switch
+    {
+        TvExtra => TvShow,
+        MovieExtra => Movie,
+        _ => null
+    };
+
+    /// <summary>True for the specials/featurettes categories.</summary>
+    public static bool IsExtra(string category) =>
+        category is TvExtra or MovieExtra;
 
     /// <summary>The effective category string: per-file override wins, then a folder rule,
     /// otherwise the auto-detected value.</summary>

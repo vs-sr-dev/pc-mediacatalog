@@ -125,6 +125,7 @@ public class ScanEngine
             }
 
             entry.IndexedUtc = DateTime.UtcNow;
+            entry.FeatureVersion = CatalogRefresher.CurrentFeatureVersion;
 
             // Periodic crash-safe checkpoint; hand back the resume index (i + 1).
             if (onCheckpoint != null && sw.Elapsed >= nextCheckpoint)
@@ -142,6 +143,9 @@ public class ScanEngine
         foreach (var m in missing) existing.Remove(m);
         _catalog.Files.RemoveAll(f => !existing.Contains(f.FullPath));
         _catalog.RebuildIndex();
+
+        // Specials/featurettes can only be attached once every file is known.
+        ExtraLinker.Link(_catalog.Files);
         _catalog.LastScanUtc = DateTime.UtcNow;
 
         EnumerationCache.Clear(enumPath);

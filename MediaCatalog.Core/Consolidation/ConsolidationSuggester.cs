@@ -15,6 +15,12 @@ public class ConsolidationSuggestion
     /// <summary>A different file already exists at the destination path.</summary>
     public bool NameCollision { get; set; }
 
+    /// <summary>
+    /// This exact file is already in the consolidation location, so the source is a
+    /// redundant copy that can be deleted rather than moved.
+    /// </summary>
+    public bool DuplicateAtDestination { get; set; }
+
     /// <summary>Recommended to include in the operation by default.</summary>
     public bool Recommended { get; set; } = true;
 
@@ -56,7 +62,8 @@ public static class ConsolidationSuggester
                 var destDir = ConsolidationPlanner.PlanDirectory(file, category, settings);
                 if (destDir == null) continue;
 
-                var proposed = System.IO.Path.Combine(destDir, file.FileName);
+                var proposed = System.IO.Path.Combine(destDir,
+                    ConsolidationPlanner.PlanFileName(file, category));
                 var s = new ConsolidationSuggestion
                 {
                     File = file,
@@ -78,12 +85,33 @@ public static class ConsolidationSuggester
                     { s.Recommended = false; s.AddNote("missing season/episode"); }
                 }
 
-                // A real name collision: a different file already occupies the target path.
+                if (CategoryResolver.IsExtra(category))
+                {
+                    if (string.IsNullOrEmpty(file.LinkedFileId))
+                    {
+                        // Without an owner we only have the file's own name to file it
+                        // under, which would invent a folder — leave it to the user.
+                        s.Recommended = false;
+                        s.AddNote("extra with no linked film/show");
+                    }
+                    else s.AddNote("extra — files with its film/show");
+                }
+
+                // Something already occupies the target path. If it is the same file, this
+                // copy is redundant and can be deleted instead of moved.
                 if (!PathsEqual(proposed, file.FullPath) && System.IO.File.Exists(proposed))
                 {
-                    s.NameCollision = true;
                     s.Recommended = false;
-                    s.AddNote("name collision at destination");
+                    if (SameContent(proposed, file))
+                    {
+                        s.DuplicateAtDestination = true;
+                        s.AddNote("already in the consolidation location");
+                    }
+                    else
+                    {
+                        s.NameCollision = true;
+                        s.AddNote("name collision at destination");
+                    }
                 }
 
                 // Already at the destination — nothing to do.
@@ -113,6 +141,20 @@ public static class ConsolidationSuggester
             CategoryResolver.Movie => $"mv|{title}|{f.Year}",
             _ => "id|" + f.Id // no grouping for other categories
         };
+    }
+
+    /// <summary>
+    /// Cheap "is this the same file" test for the listing: identical length. Anything
+    /// actually deleted is hash-verified against the destination copy first.
+    /// </summary>
+    private static bool SameContent(string path, MediaFile file)
+    {
+        try
+        {
+            var info = new System.IO.FileInfo(path);
+            return info.Exists && info.Length == file.SizeBytes;
+        }
+        catch { return false; }
     }
 
     private static bool PathsEqual(string a, string b) =>

@@ -41,6 +41,24 @@ public class MediaFile
     /// <summary>The canonical name TMDb returned, if validated.</summary>
     public string TmdbName { get; set; } = string.Empty;
 
+    /// <summary>
+    /// True when <see cref="TmdbName"/> was typed by the user rather than returned by
+    /// TMDb. Manually corrected titles count as validated for consolidation purposes.
+    /// </summary>
+    public bool TitleManuallySet { get; set; }
+
+    /// <summary>
+    /// For extras (specials/featurettes): the <see cref="Id"/> of the film or episode
+    /// they belong to, so they travel with it. Empty when unlinked.
+    /// </summary>
+    public string LinkedFileId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Which generation of catalogue features this entry has been processed by. Older
+    /// entries (0) are brought up to date by a catalogue refresh without re-hashing.
+    /// </summary>
+    public int FeatureVersion { get; set; }
+
     // --- Content analysis (populated on demand via external tools) ---
     /// <summary>Media duration in seconds, from ffprobe. 0 if unknown.</summary>
     public double DurationSeconds { get; set; }
@@ -56,4 +74,14 @@ public class MediaFile
 
     [XmlIgnore]
     public bool HasHash => !string.IsNullOrEmpty(Sha256);
+
+    /// <summary>The title to show and to file under: the validated/edited one if set.</summary>
+    [XmlIgnore]
+    public string EffectiveTitle =>
+        !string.IsNullOrWhiteSpace(TmdbName) ? TmdbName : ParsedTitle;
+
+    /// <summary>True for specials/featurettes attached to a film or show.</summary>
+    [XmlIgnore]
+    public bool IsExtra =>
+        VideoCategory is VideoCategory.TvExtra or VideoCategory.MovieExtra;
 }

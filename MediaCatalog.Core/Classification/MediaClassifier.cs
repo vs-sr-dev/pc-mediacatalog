@@ -50,6 +50,12 @@ public static class MediaClassifier
     {
         file.Kind = MediaExtensions.Classify(file.Extension);
 
+        // Start from scratch: classifying an existing entry again (a catalogue refresh)
+        // must not leave values behind that the current rules no longer produce.
+        file.Year = null;
+        file.Season = null;
+        file.Episode = null;
+
         var name = Path.GetFileNameWithoutExtension(file.FileName);
 
         // Year applies to both movies and TV; capture the first plausible one.
@@ -106,6 +112,11 @@ public static class MediaClassifier
         {
             file.VideoCategory = VideoCategory.Unknown;
         }
+
+        // Specials/featurettes keep whatever season/episode was parsed, but are filed as
+        // extras so they can travel with the film or show they belong to.
+        if (ExtraDetector.Detect(file) is { } extra)
+            file.VideoCategory = extra;
 
         file.ParsedTitle = CleanTitle(name, titleCut);
     }

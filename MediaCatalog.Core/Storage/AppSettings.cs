@@ -25,6 +25,14 @@ public class CategoryConsolidation
     public string Folder { get; set; } = string.Empty;
 }
 
+/// <summary>Remembered width/visibility of a results-grid column.</summary>
+public class ColumnLayout
+{
+    public string Header { get; set; } = string.Empty;
+    public double Width { get; set; }
+    public bool Visible { get; set; } = true;
+}
+
 /// <summary>
 /// User preferences persisted to <c>settings.xml</c> in the app folder. Separate from
 /// <see cref="Tools.ToolSettings"/> (tools.xml) so existing installs keep working; this
@@ -49,12 +57,26 @@ public class AppSettings
     public bool StartWithWindows { get; set; }
     public bool WatchForNewFiles { get; set; }
 
+    /// <summary>
+    /// Drives to watch for new files. Empty means "every drive that was scanned", which
+    /// is what earlier versions did.
+    /// </summary>
+    [XmlArray("WatchedDrives"), XmlArrayItem("Drive")]
+    public List<string> WatchedDrives { get; set; } = new();
+
     // --- Exclusions ---
     [XmlArray("IgnoredExtensions"), XmlArrayItem("Extension")]
     public List<string> IgnoredExtensions { get; set; } = new();
 
     [XmlArray("ExcludedFolders"), XmlArrayItem("Folder")]
     public List<ExcludedFolder> ExcludedFolders { get; set; } = new();
+
+    /// <summary>Skip Windows, Program Files, $Recycle.Bin and friends (on by default).</summary>
+    public bool ExcludeSystemDirectories { get; set; } = true;
+
+    // --- Results grid ---
+    [XmlArray("Columns"), XmlArrayItem("Column")]
+    public List<ColumnLayout> ColumnLayouts { get; set; } = new();
 
     // --- Categories ---
     [XmlArray("CustomCategories"), XmlArrayItem("Category")]
@@ -75,24 +97,116 @@ public class AppSettings
         if (!IsExtensionIgnored(ext)) IgnoredExtensions.Add(ext.ToLowerInvariant());
     }
 
-    /// <summary>The consolidation folder for a category, or null if none is configured.</summary>
+    /// <summary>
+    /// The consolidation folder for a category, or null if none is configured. Extras
+    /// follow the film/show they belong to, and the legacy TV/Film settings act as a
+    /// fallback for catalogues saved before per-category folders existed.
+    /// </summary>
     public string? ConsolidationDirFor(string category)
     {
+        if (string.IsNullOrWhiteSpace(category)) return null;
+
         var m = CategoryFolders.FirstOrDefault(c =>
             string.Equals(c.Category, category, StringComparison.OrdinalIgnoreCase));
         if (m != null && !string.IsNullOrWhiteSpace(m.Folder)) return m.Folder;
+
         if (string.Equals(category, "TvShow", StringComparison.OrdinalIgnoreCase))
-            return string.IsNullOrWhiteSpace(TvConsolidationDir) ? null : TvConsolidationDir;
+            return Blank(TvConsolidationDir);
         if (string.Equals(category, "Movie", StringComparison.OrdinalIgnoreCase))
-            return string.IsNullOrWhiteSpace(FilmConsolidationDir) ? null : FilmConsolidationDir;
+            return Blank(FilmConsolidationDir);
+
+        // Extras have no folder of their own: they live with their show or film.
+        if (string.Equals(category, "TvExtra", StringComparison.OrdinalIgnoreCase))
+            return ConsolidationDirFor("TvShow");
+        if (string.Equals(category, "MovieExtra", StringComparison.OrdinalIgnoreCase))
+            return ConsolidationDirFor("Movie");
+
         return null;
+
+        static string? Blank(string s) => string.IsNullOrWhiteSpace(s) ? null : s;
     }
 
-    private static bool HasWildcard(string s) => s.IndexOf('*') >= 0 || s.IndexOf('?') >= 0;
+    /// <summary>
+    /// Fold the legacy TV/Film folder settings into <see cref="CategoryFolders"/> so the
+    /// settings UI can present one uniform, unbounded list.
+    /// </summary>
+    public void NormaliseCategoryFolders()
+    {
+        void Seed(string category, string folder)
+        {
+            if (string.IsNullOrWhiteSpace(folder)) return;
+            if (CategoryFolders.Any(c => string.Equals(c.Category, category, StringComparison.OrdinalIgnoreCase)))
+                return;
+            CategoryFolders.Add(new CategoryConsolidation { Category = category, Folder = folder });
+        }
+
+        Seed("TvShow", TvConsolidationDir);
+        Seed("Movie", FilmConsolidationDir);
+        CategoryFolders.RemoveAll(c => string.IsNullOrWhiteSpace(c.Category) ||
+                                       string.IsNullOrWhiteSpace(c.Folder));
+        SyncLegacyFolders();
+    }
+
+    /// <summary>Keep the old TV/Film fields in step with the category list.</summary>
+    public void SyncLegacyFolders()
+    {
+        TvConsolidationDir = ConsolidationDirFor("TvShow") ?? string.Empty;
+        FilmConsolidationDir = ConsolidationDirFor("Movie") ?? string.Empty;
+    }
+
+    /// <summary>True when at least one category has somewhere to be consolidated to.</summary>
+    public bool HasAnyConsolidationFolder =>
+        CategoryFolders.Any(c => !string.IsNullOrWhiteSpace(c.Folder)) ||
+        !string.IsNullOrWhiteSpace(TvConsolidationDir) ||
+        !string.IsNullOrWhiteSpace(FilmConsolidationDir);
+
+    /// <summary>True when a rule is a pattern rather than a specific folder path.</summary>
+    public static bool HasWildcard(string s) =>
+        !string.IsNullOrEmpty(s) && (s.IndexOf('*') >= 0 || s.IndexOf('?') >= 0);
+
+    /// <summary>
+    /// True when an exclusion path is a plain folder that doesn't exist — worth
+    /// confirming, since it is more likely a typo than a deliberate rule. Patterns are
+    /// exempt: <c>*\Windows\*</c> is meant to match many folders and exists as none.
+    /// </summary>
+    public static bool IsQuestionablePath(string path) =>
+        !string.IsNullOrWhiteSpace(path) &&
+        !HasWildcard(path) &&
+        !Directory.Exists(path.TrimEnd('\\', '/'));
+
+    /// <summary>
+    /// Folders that are never worth cataloguing. Wildcard rules, so they cover every
+    /// drive: <c>?:</c> is any drive letter.
+    /// </summary>
+    public static readonly string[] SystemDirectoryPatterns =
+    {
+        @"?:\Windows",
+        @"?:\Windows.old",
+        @"?:\Program Files",
+        @"?:\Program Files (x86)",
+        @"?:\ProgramData",
+        @"?:\$Recycle.Bin",
+        @"?:\$RECYCLE.BIN",
+        @"?:\System Volume Information",
+        @"?:\Recovery",
+        @"?:\$WinREAgent",
+        @"?:\MSOCache",
+        @"?:\PerfLogs",
+        @"*\AppData\Local\Temp",
+        @"*\AppData\Local\Packages"
+    };
+
+    private static readonly ExcludedFolder[] SystemExclusions = SystemDirectoryPatterns
+        .Select(p => new ExcludedFolder { Path = p, IncludeSubdirectories = true })
+        .ToArray();
+
+    /// <summary>Every rule in force: the user's, plus the system folders when enabled.</summary>
+    private IEnumerable<ExcludedFolder> EffectiveExclusions() =>
+        ExcludeSystemDirectories ? ExcludedFolders.Concat(SystemExclusions) : ExcludedFolders;
 
     /// <summary>True if <paramref name="fullPath"/> is excluded (literal or wildcard rule).</summary>
     public bool IsPathExcluded(string fullPath) =>
-        ExcludedFolders.Any(ex => ExcludesFile(ex, fullPath));
+        EffectiveExclusions().Any(ex => ExcludesFile(ex, fullPath));
 
     private static bool ExcludesFile(ExcludedFolder ex, string fullPath)
     {
@@ -111,7 +225,7 @@ public class AppSettings
 
     /// <summary>True if descent into <paramref name="dir"/> should be pruned (subtree excluded).</summary>
     public bool IsDescentBlocked(string dir) =>
-        ExcludedFolders.Any(ex => ex.IncludeSubdirectories && BlocksDescent(ex, dir));
+        EffectiveExclusions().Any(ex => ex.IncludeSubdirectories && BlocksDescent(ex, dir));
 
     private static bool BlocksDescent(ExcludedFolder ex, string dir)
     {
@@ -119,8 +233,13 @@ public class AppSettings
         if (HasWildcard(ex.Path))
         {
             var pat = ex.Path.TrimEnd('\\', '/');
+            // A rule written to match files — "*\Windows\*" — must also prune the folder
+            // itself ("C:\Windows"), or the whole subtree gets walked for nothing.
+            var folderPat = pat.EndsWith(@"\*", StringComparison.Ordinal) ? pat[..^2] : pat;
             return Filtering.WildcardMatcher.IsMatch(dir, pat)
-                || Filtering.WildcardMatcher.IsMatch(dir, pat + @"\*");
+                || Filtering.WildcardMatcher.IsMatch(dir, pat + @"\*")
+                || Filtering.WildcardMatcher.IsMatch(dir, folderPat)
+                || Filtering.WildcardMatcher.IsMatch(dir, folderPat + @"\*");
         }
         return IsUnder(dir, ex.Path.TrimEnd('\\', '/'));
     }
@@ -182,7 +301,9 @@ public class AppSettings
         try
         {
             using var reader = new StreamReader(path);
-            return (AppSettings?)Serializer.Deserialize(reader) ?? new AppSettings();
+            var settings = (AppSettings?)Serializer.Deserialize(reader) ?? new AppSettings();
+            settings.NormaliseCategoryFolders();
+            return settings;
         }
         catch { return new AppSettings(); }
     }

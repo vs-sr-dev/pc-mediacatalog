@@ -32,23 +32,62 @@ public static class ConsolidationPlanner
 
         var title = Title(file);
 
-        if (category == CategoryResolver.TvShow)
+        if (category is CategoryResolver.TvShow or CategoryResolver.TvExtra)
         {
             if (string.IsNullOrWhiteSpace(title)) return null;
             var showFolder = FindExistingShowFolder(dir, title) ?? ShowFolder(dir, title);
+
+            // Extras live beside the show — inside their season when one is known,
+            // otherwise in a show-level "Extras" folder.
+            if (category == CategoryResolver.TvExtra)
+                return file.Season is > 0
+                    ? Path.Combine(showFolder, SeasonFolder(file.Season.Value), ExtrasFolder)
+                    : Path.Combine(showFolder, ExtrasFolder);
+
             return Path.Combine(showFolder, SeasonFolder(file.Season ?? 1));
         }
 
-        if (category == CategoryResolver.Movie)
+        if (category is CategoryResolver.Movie or CategoryResolver.MovieExtra)
         {
             if (string.IsNullOrWhiteSpace(title)) return null;
             var folder = file.Year is { } y ? $"{title} ({y})" : title;
-            return Path.Combine(dir, Bucket(title), Sanitize(folder));
+            var movieFolder = Path.Combine(dir, Bucket(title), Sanitize(folder));
+            return category == CategoryResolver.MovieExtra
+                ? Path.Combine(movieFolder, ExtrasFolder)
+                : movieFolder;
         }
 
         // Custom category: files go straight into its consolidation folder.
         return dir;
     }
+
+    /// <summary>Where specials and featurettes are filed inside a show/film folder.</summary>
+    public const string ExtrasFolder = "Extras";
+
+    /// <summary>
+    /// The file name to use at the destination. Episodes are prefixed with their episode
+    /// number ("01 - Name.mkv") so a season folder sorts into broadcast order; everything
+    /// else keeps its name. Re-consolidating an already-prefixed file is a no-op.
+    /// </summary>
+    public static string PlanFileName(MediaFile file, string category)
+    {
+        if (category != CategoryResolver.TvShow || file.Episode is not { } episode || episode < 0)
+            return file.FileName;
+        if (EpisodePrefix.IsMatch(file.FileName)) return file.FileName;
+
+        var number = episode < 100 ? episode.ToString("D2") : episode.ToString();
+        return $"{number} - {file.FileName}";
+    }
+
+    /// <summary>The full destination path (directory + planned file name), or null.</summary>
+    public static string? PlanPath(MediaFile file, string category, AppSettings settings)
+    {
+        var dir = PlanDirectory(file, category, settings);
+        return dir == null ? null : Path.Combine(dir, PlanFileName(file, category));
+    }
+
+    // "01 - Name.mkv" / "101 - Name.mkv": already numbered for sorting.
+    private static readonly Regex EpisodePrefix = new(@"^\d{2,3}\s*-\s+", RegexOptions.Compiled);
 
     /// <summary>The canonical show folder: &lt;TvDir&gt;\&lt;bucket&gt;\&lt;Show&gt;.</summary>
     public static string ShowFolder(string tvDir, string title) =>

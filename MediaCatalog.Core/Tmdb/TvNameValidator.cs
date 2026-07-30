@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Naming;
 
 namespace MediaCatalog.Core.Tmdb;
 
@@ -38,15 +39,20 @@ public class TvNameValidator
         return false;
     }
 
-    /// <summary>Validate every not-yet-verified TV file, reporting progress.</summary>
+    /// <summary>
+    /// Validate every not-yet-verified TV file, reporting progress. A confirmed name is
+    /// shared with the other files that had the same title, which both fixes whole shows
+    /// in one lookup and spares the remaining episodes a query each.
+    /// </summary>
     public async Task<int> ValidateManyAsync(
         IEnumerable<MediaFile> files,
         IProgress<ValidationProgress>? progress = null,
         CancellationToken ct = default)
     {
-        var targets = files
+        var all = files as IList<MediaFile> ?? files.ToList();
+        var targets = all
             .Where(f => f.Kind == MediaKind.Video &&
-                        f.VideoCategory == VideoCategory.TvShow &&
+                        f.VideoCategory is VideoCategory.TvShow or VideoCategory.TvExtra &&
                         !f.TmdbVerified)
             .ToList();
 
@@ -56,7 +62,14 @@ public class TvNameValidator
             ct.ThrowIfCancellationRequested();
             var file = targets[i];
             progress?.Report(new ValidationProgress(i, targets.Count, file.ParsedTitle));
-            if (await ValidateAsync(file, ct)) validated++;
+
+            var previousTitle = file.EffectiveTitle;
+            if (!await ValidateAsync(file, ct)) continue;
+
+            validated++;
+            validated += TitleUpdater.Propagate(all, file, previousTitle, manual: false,
+                scope: f => f.Kind == MediaKind.Video &&
+                            f.VideoCategory is VideoCategory.TvShow or VideoCategory.TvExtra);
         }
         progress?.Report(new ValidationProgress(targets.Count, targets.Count, string.Empty));
         return validated;

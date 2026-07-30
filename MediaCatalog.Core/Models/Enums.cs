@@ -14,7 +14,11 @@ public enum VideoCategory
     Unknown = 0,
     Movie,
     TvShow,
-    Other
+    Other,
+    /// <summary>A special/featurette that belongs to a TV show.</summary>
+    TvExtra,
+    /// <summary>A special/featurette that belongs to a film.</summary>
+    MovieExtra
 }
 
 /// <summary>Result of the lightweight integrity check performed during a scan.</summary>
