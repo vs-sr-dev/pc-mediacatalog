@@ -26,6 +26,14 @@ public static class MediaClassifier
         @"\b(?:season|series)\s*\d{1,2}\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // A bare 3-digit number: "123" => season 1, episode 23 (a common compact scheme).
+    private static readonly Regex ThreeDigit = new(
+        @"(?<![0-9])(?<s>[1-9])(?<e>[0-9]{2})(?![0-9])",
+        RegexOptions.Compiled);
+
+    // 3-digit numbers that are really resolutions, not S/E codes.
+    private static readonly HashSet<int> ResolutionNumbers = new() { 240, 360, 480, 540, 576, 720 };
+
     // A plausible release year in brackets or standalone: 1900-2099
     private static readonly Regex Year = new(
         @"(?<![0-9])(?<y>(?:19|20)\d{2})(?![0-9])",
@@ -85,6 +93,15 @@ public static class MediaClassifier
             file.VideoCategory = VideoCategory.Movie;
             titleCut = yearMatch.Index;
         }
+        else if (TryThreeDigitEpisode(name, out var tdSeason, out var tdEpisode, out var tdIndex))
+        {
+            // No explicit markers and no year: a bare 3-digit number like "123" is
+            // read as season 1, episode 23.
+            file.VideoCategory = VideoCategory.TvShow;
+            file.Season = tdSeason;
+            file.Episode = tdEpisode;
+            titleCut = tdIndex;
+        }
         else
         {
             file.VideoCategory = VideoCategory.Unknown;
@@ -95,6 +112,27 @@ public static class MediaClassifier
 
     private static int? ParseInt(string s) =>
         int.TryParse(s, out var v) ? v : null;
+
+    /// <summary>
+    /// Find a bare 3-digit number to read as SxEyy. Rejects resolutions (720, 480, …)
+    /// and episode 00. Returns the season, episode and where the match starts.
+    /// </summary>
+    private static bool TryThreeDigitEpisode(string name, out int season, out int episode, out int index)
+    {
+        season = episode = 0; index = -1;
+        foreach (Match m in ThreeDigit.Matches(name))
+        {
+            var value = int.Parse(m.Value);
+            if (ResolutionNumbers.Contains(value)) continue;
+            var e = int.Parse(m.Groups["e"].Value);
+            if (e == 0) continue; // "100" -> episode 00 is not meaningful
+            season = int.Parse(m.Groups["s"].Value);
+            episode = e;
+            index = m.Index;
+            return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Turn "The.Movie.2010.1080p.BluRay" into "The Movie" by cutting at the first

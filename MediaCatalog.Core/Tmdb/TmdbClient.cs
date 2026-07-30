@@ -13,19 +13,24 @@ public class TmdbClient
     private const string SearchTvUrl = "https://api.themoviedb.org/3/search/tv";
 
     private readonly string _apiKey;
+    private readonly string _readToken;
     private readonly TmdbCache _cache;
     private readonly RateLimiter _limiter;
     private readonly HttpClient _http;
 
-    public TmdbClient(string apiKey, TmdbCache cache, RateLimiter limiter, HttpClient? http = null)
+    /// <param name="apiKey">TMDb v3 API Key (query parameter).</param>
+    /// <param name="readAccessToken">TMDb v4 Read Access Token (Bearer header); preferred.</param>
+    public TmdbClient(string apiKey, string readAccessToken, TmdbCache cache, RateLimiter limiter, HttpClient? http = null)
     {
         _apiKey = apiKey ?? string.Empty;
+        _readToken = readAccessToken ?? string.Empty;
         _cache = cache;
         _limiter = limiter;
         _http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
     }
 
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey);
+    public bool IsConfigured =>
+        !string.IsNullOrWhiteSpace(_apiKey) || !string.IsNullOrWhiteSpace(_readToken);
 
     /// <summary>
     /// Validate a TV show name. Returns the cached answer if present; otherwise queries
@@ -47,9 +52,18 @@ public class TmdbClient
 
         try
         {
-            var url = $"{SearchTvUrl}?api_key={Uri.EscapeDataString(_apiKey)}" +
-                      $"&query={Uri.EscapeDataString(name)}";
-            using var resp = await _http.GetAsync(url, ct);
+            // Prefer the v4 Bearer token; otherwise fall back to the v3 api_key query param.
+            var useBearer = !string.IsNullOrWhiteSpace(_readToken);
+            var url = $"{SearchTvUrl}?query={Uri.EscapeDataString(name)}";
+            if (!useBearer)
+                url += $"&api_key={Uri.EscapeDataString(_apiKey)}";
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("accept", "application/json");
+            if (useBearer)
+                request.Headers.Add("Authorization", "Bearer " + _readToken);
+
+            using var resp = await _http.SendAsync(request, ct);
             if (!resp.IsSuccessStatusCode)
                 return new TmdbResult(false, string.Empty); // transient — don't cache
 

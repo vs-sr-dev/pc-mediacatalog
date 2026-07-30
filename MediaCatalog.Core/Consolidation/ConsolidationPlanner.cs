@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using MediaCatalog.Core.Classification;
 using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Storage;
 
 namespace MediaCatalog.Core.Consolidation;
 
@@ -20,24 +21,61 @@ public static class ConsolidationPlanner
 
     /// <summary>
     /// The destination *directory* for a file given the effective category and the
-    /// configured roots, or null when it doesn't apply (missing root, no title, etc.).
+    /// configured folders, or null when it doesn't apply (no target, no title, etc.).
+    /// If an existing show folder matches the title it is reused (Burn Notice folder that
+    /// already exists is preferred over creating a near-duplicate).
     /// </summary>
-    public static string? PlanDirectory(MediaFile file, string category, string tvDir, string filmDir)
+    public static string? PlanDirectory(MediaFile file, string category, AppSettings settings)
     {
+        var dir = settings.ConsolidationDirFor(category);
+        if (string.IsNullOrWhiteSpace(dir)) return null;
+
         var title = Title(file);
-        if (string.IsNullOrWhiteSpace(title)) return null;
 
-        if (category == CategoryResolver.TvShow && !string.IsNullOrWhiteSpace(tvDir))
+        if (category == CategoryResolver.TvShow)
         {
-            var season = file.Season ?? 1;
-            return Path.Combine(tvDir, Bucket(title), Sanitize(title), SeasonFolder(season));
+            if (string.IsNullOrWhiteSpace(title)) return null;
+            var showFolder = FindExistingShowFolder(dir, title) ?? ShowFolder(dir, title);
+            return Path.Combine(showFolder, SeasonFolder(file.Season ?? 1));
         }
 
-        if (category == CategoryResolver.Movie && !string.IsNullOrWhiteSpace(filmDir))
+        if (category == CategoryResolver.Movie)
         {
+            if (string.IsNullOrWhiteSpace(title)) return null;
             var folder = file.Year is { } y ? $"{title} ({y})" : title;
-            return Path.Combine(filmDir, Bucket(title), Sanitize(folder));
+            return Path.Combine(dir, Bucket(title), Sanitize(folder));
         }
+
+        // Custom category: files go straight into its consolidation folder.
+        return dir;
+    }
+
+    /// <summary>The canonical show folder: &lt;TvDir&gt;\&lt;bucket&gt;\&lt;Show&gt;.</summary>
+    public static string ShowFolder(string tvDir, string title) =>
+        Path.Combine(tvDir, Bucket(title), Sanitize(title));
+
+    /// <summary>
+    /// Look for an existing folder matching the show title (exact path first, then any
+    /// case-insensitive match inside the bucket), so files join an existing library
+    /// folder instead of creating a slightly different one. Returns null if none exists.
+    /// </summary>
+    public static string? FindExistingShowFolder(string tvDir, string title)
+    {
+        var clean = Sanitize(title);
+        var bucketDir = Path.Combine(tvDir, Bucket(title));
+
+        var exact = Path.Combine(bucketDir, clean);
+        if (Directory.Exists(exact)) return exact;
+
+        try
+        {
+            if (Directory.Exists(bucketDir))
+                foreach (var d in Directory.GetDirectories(bucketDir))
+                    if (string.Equals(Path.GetFileName(d), clean, StringComparison.OrdinalIgnoreCase))
+                        return d;
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
 
         return null;
     }

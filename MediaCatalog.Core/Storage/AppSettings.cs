@@ -18,6 +18,13 @@ public class FolderCategoryRule
     public bool IncludeSubdirectories { get; set; } = true;
 }
 
+/// <summary>Maps a category to the consolidation folder its files should end up in.</summary>
+public class CategoryConsolidation
+{
+    public string Category { get; set; } = string.Empty;
+    public string Folder { get; set; } = string.Empty;
+}
+
 /// <summary>
 /// User preferences persisted to <c>settings.xml</c> in the app folder. Separate from
 /// <see cref="Tools.ToolSettings"/> (tools.xml) so existing installs keep working; this
@@ -26,12 +33,21 @@ public class FolderCategoryRule
 [XmlRoot("AppSettings")]
 public class AppSettings
 {
-    // --- TMDb ---
-    public string TmdbApiKey { get; set; } = string.Empty;
+    // --- TMDb (either credential works; the v4 read token is preferred when present) ---
+    public string TmdbApiKey { get; set; } = string.Empty;              // v3 API Key
+    public string TmdbReadAccessToken { get; set; } = string.Empty;     // v4 Read Access Token
 
     // --- Consolidation targets ---
     public string TvConsolidationDir { get; set; } = string.Empty;
     public string FilmConsolidationDir { get; set; } = string.Empty;
+
+    /// <summary>Per-category consolidation folders (for custom categories, etc.).</summary>
+    [XmlArray("CategoryFolders"), XmlArrayItem("CategoryFolder")]
+    public List<CategoryConsolidation> CategoryFolders { get; set; } = new();
+
+    // --- Startup / watching ---
+    public bool StartWithWindows { get; set; }
+    public bool WatchForNewFiles { get; set; }
 
     // --- Exclusions ---
     [XmlArray("IgnoredExtensions"), XmlArrayItem("Extension")]
@@ -59,30 +75,71 @@ public class AppSettings
         if (!IsExtensionIgnored(ext)) IgnoredExtensions.Add(ext.ToLowerInvariant());
     }
 
-    /// <summary>True if <paramref name="fullPath"/> falls under an excluded folder.</summary>
-    public bool IsPathExcluded(string fullPath)
+    /// <summary>The consolidation folder for a category, or null if none is configured.</summary>
+    public string? ConsolidationDirFor(string category)
     {
-        foreach (var ex in ExcludedFolders)
+        var m = CategoryFolders.FirstOrDefault(c =>
+            string.Equals(c.Category, category, StringComparison.OrdinalIgnoreCase));
+        if (m != null && !string.IsNullOrWhiteSpace(m.Folder)) return m.Folder;
+        if (string.Equals(category, "TvShow", StringComparison.OrdinalIgnoreCase))
+            return string.IsNullOrWhiteSpace(TvConsolidationDir) ? null : TvConsolidationDir;
+        if (string.Equals(category, "Movie", StringComparison.OrdinalIgnoreCase))
+            return string.IsNullOrWhiteSpace(FilmConsolidationDir) ? null : FilmConsolidationDir;
+        return null;
+    }
+
+    private static bool HasWildcard(string s) => s.IndexOf('*') >= 0 || s.IndexOf('?') >= 0;
+
+    /// <summary>True if <paramref name="fullPath"/> is excluded (literal or wildcard rule).</summary>
+    public bool IsPathExcluded(string fullPath) =>
+        ExcludedFolders.Any(ex => ExcludesFile(ex, fullPath));
+
+    private static bool ExcludesFile(ExcludedFolder ex, string fullPath)
+    {
+        if (string.IsNullOrEmpty(ex.Path)) return false;
+        if (HasWildcard(ex.Path))
         {
-            if (string.IsNullOrEmpty(ex.Path)) continue;
-            if (ex.IncludeSubdirectories)
-            {
-                if (IsUnder(fullPath, ex.Path)) return true;
-            }
-            else
-            {
-                var dir = System.IO.Path.GetDirectoryName(fullPath);
-                if (string.Equals(dir, ex.Path.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
+            var pat = ex.Path.TrimEnd('\\', '/');
+            if (Filtering.WildcardMatcher.IsMatch(fullPath, pat)) return true;
+            return ex.IncludeSubdirectories && Filtering.WildcardMatcher.IsMatch(fullPath, pat + @"\*");
         }
-        return false;
+        var root = ex.Path.TrimEnd('\\', '/');
+        if (ex.IncludeSubdirectories) return IsUnder(fullPath, root);
+        return string.Equals(System.IO.Path.GetDirectoryName(fullPath), root, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>True if descent into <paramref name="dir"/> should be pruned (subtree excluded).</summary>
     public bool IsDescentBlocked(string dir) =>
-        ExcludedFolders.Any(e => e.IncludeSubdirectories &&
-            !string.IsNullOrEmpty(e.Path) && IsUnder(dir, e.Path));
+        ExcludedFolders.Any(ex => ex.IncludeSubdirectories && BlocksDescent(ex, dir));
+
+    private static bool BlocksDescent(ExcludedFolder ex, string dir)
+    {
+        if (string.IsNullOrEmpty(ex.Path)) return false;
+        if (HasWildcard(ex.Path))
+        {
+            var pat = ex.Path.TrimEnd('\\', '/');
+            return Filtering.WildcardMatcher.IsMatch(dir, pat)
+                || Filtering.WildcardMatcher.IsMatch(dir, pat + @"\*");
+        }
+        return IsUnder(dir, ex.Path.TrimEnd('\\', '/'));
+    }
+
+    /// <summary>
+    /// Existing literal exclusions made redundant by <paramref name="candidate"/> (a
+    /// broader subtree rule that already covers them). Used to offer pruning old rules.
+    /// </summary>
+    public List<ExcludedFolder> FindSupersededBy(ExcludedFolder candidate)
+    {
+        if (HasWildcard(candidate.Path) || !candidate.IncludeSubdirectories)
+            return new List<ExcludedFolder>();
+        var root = candidate.Path.TrimEnd('\\', '/');
+        return ExcludedFolders.Where(ex =>
+            !ReferenceEquals(ex, candidate) &&
+            !HasWildcard(ex.Path) &&
+            !string.Equals(ex.Path.TrimEnd('\\', '/'), root, StringComparison.OrdinalIgnoreCase) &&
+            IsUnder(ex.Path.TrimEnd('\\', '/'), root)).ToList();
+    }
 
     /// <summary>Category rule matching a path, preferring the deepest (most specific) folder.</summary>
     public string? CategoryForPath(string fullPath)

@@ -688,8 +688,7 @@ public class MainViewModel : ObservableObject
             {
                 var row = rows[i];
                 var category = CategoryResolver.Effective(row.Model, _settings);
-                var destDir = ConsolidationPlanner.PlanDirectory(
-                    row.Model, category, _settings.TvConsolidationDir, _settings.FilmConsolidationDir);
+                var destDir = ConsolidationPlanner.PlanDirectory(row.Model, category, _settings);
                 if (destDir == null) { skipped++; continue; }
 
                 StatusText = $"Consolidating {i + 1}/{rows.Count}: {row.FileName}";
@@ -713,8 +712,9 @@ public class MainViewModel : ObservableObject
 
     public async Task<string> ValidateTvAsync(IReadOnlyList<FileRow> rows)
     {
-        if (string.IsNullOrWhiteSpace(_settings.TmdbApiKey))
-            return "Enter a TMDb API key in Settings first.";
+        if (string.IsNullOrWhiteSpace(_settings.TmdbApiKey) &&
+            string.IsNullOrWhiteSpace(_settings.TmdbReadAccessToken))
+            return "Enter a TMDb API key or Read Access Token in Settings first.";
 
         var models = (rows.Count > 0 ? rows.Select(r => r.Model) : _catalog.Files).ToList();
 
@@ -733,7 +733,7 @@ public class MainViewModel : ObservableObject
         try
         {
             var limiter = new RateLimiter(TimeSpan.FromSeconds(2)); // 1 query / 2s
-            var client = new TmdbClient(_settings.TmdbApiKey, _tmdbCache, limiter);
+            var client = new TmdbClient(_settings.TmdbApiKey, _settings.TmdbReadAccessToken, _tmdbCache, limiter);
             var validator = new TvNameValidator(client);
             var count = await validator.ValidateManyAsync(models, progress, _cts.Token);
             _tmdbCache.Save(_tmdbCachePath);
