@@ -107,9 +107,13 @@
                       SelectionMode="Extended" SelectionUnit="FullRow"
                       GridLinesVisibility="Horizontal" HeadersVisibility="Column"
                       CanUserSortColumns="True" EnableRowVirtualization="True"
-                      MouseDoubleClick="OnGridDoubleClick">
+                      MouseDoubleClick="OnGridDoubleClick" PreviewKeyDown="OnGridKeyDown">
                 <DataGrid.ContextMenu>
                     <ContextMenu Opened="OnContextMenuOpened">
+                        <MenuItem Header="Open file" Click="OnOpenFile"/>
+                        <MenuItem Header="Open containing folder" Click="OnOpenFolder"/>
+                        <MenuItem Header="Remove from results (keeps file on disk)" Click="OnRemoveFromResults"/>
+                        <Separator/>
                         <MenuItem Header="Set category" x:Name="CategoryMenu"/>
                         <MenuItem Header="Set category for this folder…" Click="OnSetCategoryFolder"/>
                         <MenuItem Header="Add new category…" Click="OnAddCategory"/>

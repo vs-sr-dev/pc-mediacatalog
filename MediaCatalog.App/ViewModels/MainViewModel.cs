@@ -653,6 +653,21 @@ public class MainViewModel : ObservableObject
         RebuildRows();
     }
 
+    /// <summary>
+    /// Remove entries from the catalogue/results without touching the files on disk.
+    /// (A later scan of the same location will re-add them unless excluded.)
+    /// </summary>
+    public void RemoveFromResults(IReadOnlyList<FileRow> rows)
+    {
+        if (rows.Count == 0) return;
+        var models = new HashSet<MediaFile>(rows.Select(r => r.Model));
+        _catalog.Files.RemoveAll(models.Contains);
+        _catalog.RebuildIndex();
+        CatalogStore.Save(_catalog, _catalogPath);
+        RebuildRows();
+        StatusText = $"Removed {rows.Count} file(s) from results (files left on disk).";
+    }
+
     // --- Consolidation ----------------------------------------------------
 
     /// <summary>

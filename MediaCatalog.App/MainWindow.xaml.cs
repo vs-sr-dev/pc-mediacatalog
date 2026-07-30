@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using MediaCatalog.App.ViewModels;
 using Microsoft.Win32;
 
@@ -256,10 +258,82 @@ public partial class MainWindow : Window
 
     // --- Duplicates -------------------------------------------------------
 
-    private void OnGridDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    private void OnGridDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FilesGrid.SelectedItem is FileRow row && row.IsDuplicate)
-            ShowDuplicatesFor(row);
+        // Double-click opens the file with its associated application.
+        if (FilesGrid.SelectedItem is FileRow row)
+            OpenFile(row);
+    }
+
+    // --- Open file / folder, remove from results --------------------------
+
+    private void OnGridKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Delete) return;
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count == 0) return;
+        _vm.RemoveFromResults(rows);
+        e.Handled = true;
+    }
+
+    private void OnRemoveFromResults(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count > 0) _vm.RemoveFromResults(rows);
+    }
+
+    private void OnOpenFile(object sender, RoutedEventArgs e)
+    {
+        if (FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault() is { } row)
+            OpenFile(row);
+    }
+
+    private void OpenFile(FileRow row)
+    {
+        if (!File.Exists(row.FullPath))
+        {
+            MessageBox.Show(this, "The file no longer exists on disk.",
+                "Open file", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo(row.FullPath) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not open the file:\n{ex.Message}",
+                "Open file", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void OnOpenFolder(object sender, RoutedEventArgs e)
+    {
+        var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
+        if (row == null) return;
+        try
+        {
+            if (File.Exists(row.FullPath))
+            {
+                // Open Explorer with the file selected.
+                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{row.FullPath}\"")
+                { UseShellExecute = true });
+            }
+            else
+            {
+                var dir = Path.GetDirectoryName(row.FullPath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true });
+                else
+                    MessageBox.Show(this, "The containing folder no longer exists.",
+                        "Open folder", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not open the folder:\n{ex.Message}",
+                "Open folder", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void OnShowDuplicates(object sender, RoutedEventArgs e)

@@ -82,7 +82,11 @@ full completion — a pause never deletes anything.
 - ✅ **Exclude folders / ignore file types** from results and future scans
 - ✅ **Wildcard column filters** (`*` and `?`) on any column
 - ✅ **Duplicate manager** — open any duplicated file to copy/move/delete its copies
+- ✅ **Open file / open containing folder** — double-click or right-click a result
+- ✅ **Remove from results** — select rows and press Delete to drop them from the view
+  (the file on disk is untouched)
 - ✅ **Resilient scans** — missing files never abort a scan; they're reported afterwards
+- ✅ **Schema migration** — older catalogues are upgraded to the current format on load
 - ✅ Integrity flags: zero-byte + in-progress downloads (`.part`/`.crdownload`), plus
   **deep corrupt-file detection** via full FFmpeg decode
 - ✅ XML persistence (catalogue, tool settings, app settings, scan state, TMDb cache)
@@ -146,8 +150,21 @@ characters, `?` = one character; plain text is a "contains" search.
 *Ignore this file type* to drop files from results and skip them in future scans. Manage
 these lists in **Settings…**.
 
-**Duplicates** — double-click a `DUP` file (or right-click → *Show duplicates*) to open a
-manager listing every identical copy, with copy / move / delete.
+**Opening files** — double-click a result to open it with its associated application, or
+right-click → *Open file* / *Open containing folder* (Explorer opens with the file selected).
+
+**Remove from results** — select one or more rows and press **Delete** (or right-click →
+*Remove from results*) to drop them from the view. This only removes them from the
+catalogue/results; the actual files are left on disk (a later scan re-adds them unless the
+folder or type is excluded).
+
+**Duplicates** — right-click → *Show duplicates* to open a manager listing every identical
+copy of a file, with copy / move / delete.
+
+### Backwards compatibility
+Catalogues from earlier versions load unchanged. New fields are optional, and anything the
+serialiser can't absorb is handled by a schema migration that upgrades the file on load and
+saves it back once — so an old library keeps working with the current program.
 
 **Missing files** — if files vanish between enumeration and scanning, the scan keeps going;
 ones under a `Temp` folder are ignored, the rest are listed via the **Missing files…**

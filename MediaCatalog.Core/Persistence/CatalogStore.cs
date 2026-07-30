@@ -19,9 +19,17 @@ public static class CatalogStore
 
         try
         {
-            using var reader = XmlReader.Create(path);
-            var catalog = (Catalog?)Serializer.Deserialize(reader) ?? new Catalog();
+            Catalog catalog;
+            using (var reader = XmlReader.Create(path))
+                catalog = (Catalog?)Serializer.Deserialize(reader) ?? new Catalog();
             catalog.RebuildIndex();
+
+            // Bring an older file up to the current schema, and persist the upgrade so it
+            // is only migrated once.
+            if (CatalogMigrator.Migrate(catalog))
+            {
+                try { Save(catalog, path); } catch { /* migration re-save is best-effort */ }
+            }
             return catalog;
         }
         catch (Exception ex) when (ex is InvalidOperationException or XmlException or IOException)
