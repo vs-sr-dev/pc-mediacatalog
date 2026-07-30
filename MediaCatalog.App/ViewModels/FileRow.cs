@@ -24,7 +24,9 @@ public class FileRow : ObservableObject
         set => SetProperty(ref _category, value);
     }
 
-    public string Title => Model.ParsedTitle;
+    /// <summary>The validated/edited title when there is one, else the parsed one.</summary>
+    public string Title => Model.EffectiveTitle;
+
     public string Year => Model.Year?.ToString() ?? "";
 
     public string SeasonEpisode =>
@@ -33,11 +35,15 @@ public class FileRow : ObservableObject
             : "";
 
     public string SizeDisplay => Format.Bytes(Model.SizeBytes);
+
+    /// <summary>Raw size, so the Size column sorts by magnitude rather than by text.</summary>
+    public long SizeBytes => Model.SizeBytes;
+
     public string Integrity => Model.Integrity.ToString();
     public string FullPath => Model.FullPath;
 
-    /// <summary>Whether this title has been confirmed against TMDb (shown as a flag).</summary>
-    public string TmdbFlag => Model.TmdbVerified ? "✓" : "";
+    /// <summary>Title provenance: ✓ confirmed by TMDb, ✎ typed by the user.</summary>
+    public string TmdbFlag => Model.TitleManuallySet ? "✎" : Model.TmdbVerified ? "✓" : "";
 
     /// <summary>Value of a named column, for wildcard column filtering.</summary>
     public string ColumnValue(string column) => column switch
@@ -45,7 +51,7 @@ public class FileRow : ObservableObject
         "Name" => FileName,
         "Kind" => Kind,
         "Category" => Category,
-        "Title" => Model.TmdbVerified && !string.IsNullOrEmpty(Model.TmdbName) ? Model.TmdbName : Title,
+        "Title" => Title,
         "Year" => Year,
         "S/E" => SeasonEpisode,
         "Size" => SizeDisplay,
@@ -76,5 +82,8 @@ public class FileRow : ObservableObject
         OnPropertyChanged(nameof(FileName));
         OnPropertyChanged(nameof(FullPath));
         OnPropertyChanged(nameof(SizeDisplay));
+        OnPropertyChanged(nameof(SizeBytes));
+        OnPropertyChanged(nameof(Title));
+        OnPropertyChanged(nameof(TmdbFlag));
     }
 }

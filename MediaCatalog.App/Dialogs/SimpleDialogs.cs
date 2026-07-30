@@ -16,7 +16,10 @@ public class PromptWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner; ResizeMode = ResizeMode.NoResize;
 
         var panel = new StackPanel { Margin = new Thickness(14) };
-        panel.Children.Add(new TextBlock { Text = prompt, Margin = new Thickness(0, 0, 0, 6) });
+        panel.Children.Add(new TextBlock
+        {
+            Text = prompt, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 6)
+        });
         panel.Children.Add(_box);
 
         var buttons = new StackPanel

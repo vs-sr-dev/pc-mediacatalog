@@ -20,7 +20,14 @@ using MediaCatalog.Core.Tools;
 
 namespace MediaCatalog.App.ViewModels;
 
-public enum FilterMode { All, Video, Audio, Movies, TvShows, Duplicates, NearDuplicates, Problems }
+public enum FilterMode { All, Video, Audio, Movies, TvShows, Extras, Duplicates, NearDuplicates, Problems }
+
+/// <summary>
+/// Result of a consolidation run. <paramref name="AlreadyPresent"/> holds sources whose
+/// file is already in the consolidation location, so they can be offered for deletion.
+/// </summary>
+public record ConsolidationOutcome(
+    int Moved, int Skipped, int Failed, List<MediaFile> AlreadyPresent, string Message);
 
 public class MainViewModel : ObservableObject
 {
@@ -426,6 +433,7 @@ public class MainViewModel : ObservableObject
             FilterMode.Audio => rows.Where(r => r.Model.Kind == MediaKind.Audio),
             FilterMode.Movies => rows.Where(r => r.Category == CategoryResolver.Movie),
             FilterMode.TvShows => rows.Where(r => r.Category == CategoryResolver.TvShow),
+            FilterMode.Extras => rows.Where(r => CategoryResolver.IsExtra(r.Category)),
             FilterMode.Duplicates => rows.Where(r => r.IsDuplicate),
             FilterMode.NearDuplicates => rows.Where(r => r.IsNearDuplicate),
             FilterMode.Problems => rows.Where(r =>
@@ -599,12 +607,62 @@ public class MainViewModel : ObservableObject
 
     // --- Categories -------------------------------------------------------
 
+    /// <summary>
+    /// Set a category on the chosen files and on every exact duplicate of them, so the
+    /// same content is never filed two different ways.
+    /// </summary>
     public void SetCategoryForFiles(IReadOnlyList<FileRow> rows, string category)
     {
-        foreach (var r in rows) r.Model.CategoryOverride = category;
+        if (rows.Count == 0) return;
+        var targets = rows.Select(r => r.Model).ToList();
+        var duplicates = DuplicatesOf(targets);
+
+        foreach (var f in targets.Concat(duplicates)) f.CategoryOverride = category;
         CatalogStore.Save(_catalog, _catalogPath);
         RebuildRows();
-        StatusText = $"Set category '{category}' on {rows.Count} file(s).";
+
+        StatusText = duplicates.Count > 0
+            ? $"Set category '{category}' on {targets.Count} file(s) and {duplicates.Count} duplicate(s)."
+            : $"Set category '{category}' on {targets.Count} file(s).";
+    }
+
+    /// <summary>Other catalogue entries that are byte-identical to any of these files.</summary>
+    private List<MediaFile> DuplicatesOf(IReadOnlyCollection<MediaFile> files)
+    {
+        var hashes = files.Where(f => f.HasHash).Select(f => f.Sha256)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (hashes.Count == 0) return new List<MediaFile>();
+
+        var chosen = new HashSet<MediaFile>(files);
+        return _catalog.Files
+            .Where(f => f.HasHash && hashes.Contains(f.Sha256) && !chosen.Contains(f))
+            .ToList();
+    }
+
+    // --- Titles -----------------------------------------------------------
+
+    /// <summary>How many other entries share this file's current title.</summary>
+    public int CountSharingTitle(MediaFile file) =>
+        TitleUpdater.SameTitleAs(_catalog.Files, file).Count;
+
+    /// <summary>
+    /// Apply a hand-typed title to the selected files and to everything that shared their
+    /// previous title. A corrected title counts as validated, like a TMDb result does.
+    /// </summary>
+    public string SetTitleForFiles(IReadOnlyList<FileRow> rows, string newTitle)
+    {
+        if (rows.Count == 0 || string.IsNullOrWhiteSpace(newTitle)) return "Nothing to update.";
+
+        var targets = rows.Select(r => r.Model).ToList();
+        var changed = TitleUpdater.Apply(_catalog.Files, targets, newTitle.Trim(), manual: true);
+
+        // Extras take their title from what they hang off, so refresh the links.
+        ExtraLinker.Link(_catalog.Files);
+        CatalogStore.Save(_catalog, _catalogPath);
+        RebuildRows();
+
+        StatusText = $"Title set to '{newTitle.Trim()}' on {changed} file(s).";
+        return StatusText;
     }
 
     public void SetCategoryForFolder(string folder, string category, bool includeSubdirs)
@@ -724,29 +782,56 @@ public class MainViewModel : ObservableObject
     // --- Consolidation ----------------------------------------------------
 
     /// <summary>
-    /// Move (or copy) selected TV/film files into the structured consolidation folders.
-    /// Files whose category/target isn't set are skipped.
+    /// The specials/featurettes attached to these files, which travel with them.
     /// </summary>
-    public async Task<string> ConsolidateAsync(IReadOnlyList<FileRow> rows, bool deleteOriginal)
+    public List<MediaFile> LinkedExtras(IEnumerable<MediaFile> files)
     {
-        if (string.IsNullOrWhiteSpace(_settings.TvConsolidationDir) &&
-            string.IsNullOrWhiteSpace(_settings.FilmConsolidationDir))
-            return "Set a TV and/or Film consolidation folder in Settings first.";
+        var ids = files.Select(f => f.Id).ToHashSet(StringComparer.Ordinal);
+        if (ids.Count == 0) return new List<MediaFile>();
+        return _catalog.Files
+            .Where(f => f.IsExtra && !string.IsNullOrEmpty(f.LinkedFileId) && ids.Contains(f.LinkedFileId))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Move (or copy) selected TV/film files into the structured consolidation folders,
+    /// bringing their extras along. Files whose category/target isn't set are skipped, and
+    /// files whose copy is already in the library are reported rather than duplicated.
+    /// </summary>
+    public async Task<ConsolidationOutcome> ConsolidateAsync(
+        IReadOnlyList<FileRow> rows, bool deleteOriginal)
+    {
+        var present = new List<MediaFile>();
+        if (!_settings.HasAnyConsolidationFolder)
+            return new ConsolidationOutcome(0, 0, 0, present,
+                "Set a consolidation folder for at least one category in Settings first.");
+
+        var selected = rows.Select(r => r.Model).ToList();
+        var files = selected.Concat(LinkedExtras(selected)).Distinct().ToList();
 
         IsScanning = true;
         int ok = 0, skipped = 0, failed = 0;
         try
         {
-            for (var i = 0; i < rows.Count; i++)
+            for (var i = 0; i < files.Count; i++)
             {
-                var row = rows[i];
-                var category = CategoryResolver.Effective(row.Model, _settings);
-                var destDir = ConsolidationPlanner.PlanDirectory(row.Model, category, _settings);
+                var file = files[i];
+                var category = CategoryResolver.Effective(file, _settings);
+                var destDir = ConsolidationPlanner.PlanDirectory(file, category, _settings);
                 if (destDir == null) { skipped++; continue; }
 
-                StatusText = $"Consolidating {i + 1}/{rows.Count}: {row.FileName}";
-                var result = await FileRelocator.RelocateAsync(row.Model, destDir, deleteOriginal);
-                if (result.Success) { ok++; row.Refresh(); } else failed++;
+                StatusText = $"Consolidating {i + 1}/{files.Count}: {file.FileName}";
+                var result = await FileRelocator.RelocateAsync(
+                    file, destDir, deleteOriginal,
+                    ConsolidationPlanner.PlanFileName(file, category), DuplicatePolicy.Skip);
+
+                if (result.AlreadyPresent)
+                {
+                    if (result.Success) skipped++;   // the file already *is* the destination
+                    else present.Add(file);          // a copy of it is — offer to delete this one
+                }
+                else if (result.Success) ok++;
+                else failed++;
             }
             CatalogStore.Save(_catalog, _catalogPath);
         }
@@ -756,9 +841,11 @@ public class MainViewModel : ObservableObject
             RebuildRows();
         }
 
-        var msg = $"Consolidation: {ok} moved, {skipped} skipped (no category/target), {failed} failed.";
+        var extras = files.Count - selected.Count;
+        var msg = $"Consolidation: {ok} moved{(extras > 0 ? $" (including {extras} extra(s))" : "")}, " +
+                  $"{skipped} skipped (no category/target), {present.Count} already in the library, {failed} failed.";
         StatusText = msg;
-        return msg;
+        return new ConsolidationOutcome(ok, skipped, failed, present, msg);
     }
 
     /// <summary>Propose consolidation moves for the whole catalogue.</summary>
@@ -767,9 +854,10 @@ public class MainViewModel : ObservableObject
             _catalog.Files, _settings, f => CategoryResolver.Effective(f, _settings));
 
     /// <summary>Apply chosen consolidation suggestions (copy-and-verify, optional delete).</summary>
-    public async Task<string> ApplyConsolidationAsync(
+    public async Task<ConsolidationOutcome> ApplyConsolidationAsync(
         IReadOnlyList<ConsolidationSuggestion> chosen, bool deleteOriginal)
     {
+        var present = new List<MediaFile>();
         IsScanning = true;
         int ok = 0, failed = 0;
         try
@@ -780,8 +868,16 @@ public class MainViewModel : ObservableObject
                 var destDir = System.IO.Path.GetDirectoryName(s.ProposedPath);
                 if (string.IsNullOrEmpty(destDir)) { failed++; continue; }
                 StatusText = $"Consolidating {i + 1}/{chosen.Count}: {s.File.FileName}";
-                var r = await FileRelocator.RelocateAsync(s.File, destDir, deleteOriginal);
-                if (r.Success) ok++; else failed++;
+                var r = await FileRelocator.RelocateAsync(
+                    s.File, destDir, deleteOriginal,
+                    System.IO.Path.GetFileName(s.ProposedPath), DuplicatePolicy.Skip);
+
+                if (r.AlreadyPresent)
+                {
+                    if (!r.Success) present.Add(s.File);
+                }
+                else if (r.Success) ok++;
+                else failed++;
             }
             CatalogStore.Save(_catalog, _catalogPath);
         }
@@ -790,9 +886,99 @@ public class MainViewModel : ObservableObject
             IsScanning = false;
             RebuildRows();
         }
-        var msg = $"Consolidation: {ok} moved, {failed} failed.";
+        var msg = $"Consolidation: {ok} moved, {present.Count} already in the library, {failed} failed.";
         StatusText = msg;
+        return new ConsolidationOutcome(ok, 0, failed, present, msg);
+    }
+
+    // --- Deleting files ---------------------------------------------------
+
+    /// <summary>
+    /// Delete files from disk (Recycle Bin unless <paramref name="toRecycleBin"/> is
+    /// false) and drop the ones that actually went from the catalogue.
+    /// </summary>
+    public async Task<string> DeleteFilesAsync(IReadOnlyList<MediaFile> files, bool toRecycleBin)
+    {
+        if (files.Count == 0) return "Nothing selected.";
+
+        IsScanning = true;
+        DeleteResult result;
+        try
+        {
+            var paths = files.Select(f => f.FullPath).ToList();
+            StatusText = $"Deleting {files.Count} file(s)…";
+            result = await Task.Run(() => FileDeleter.Delete(paths, toRecycleBin));
+
+            var gone = new HashSet<MediaFile>(files.Where(f => !File.Exists(f.FullPath)));
+            _catalog.Files.RemoveAll(gone.Contains);
+            _catalog.RebuildIndex();
+            ExtraLinker.Link(_catalog.Files);
+            CatalogStore.Save(_catalog, _catalogPath);
+        }
+        finally
+        {
+            IsScanning = false;
+            RebuildRows();
+        }
+
+        var where = toRecycleBin ? "sent to the Recycle Bin" : "permanently deleted";
+        var msg = $"{result.Deleted} file(s) {where}" +
+                  (result.Failed > 0 ? $", {result.Failed} could not be deleted." : ".");
+        if (result.Errors.Count > 0) msg += "\n\n" + string.Join("\n", result.Errors.Take(10));
+        StatusText = msg.Split('\n')[0];
         return msg;
+    }
+
+    // --- Catalogue refresh ------------------------------------------------
+
+    /// <summary>How many catalogue entries a refresh would re-derive.</summary>
+    public int StaleEntryCount => CatalogRefresher.CountStale(_catalog);
+
+    /// <summary>
+    /// Re-derive metadata for entries that predate the current feature set (new
+    /// categories, extras linking, title parsing) without re-walking drives or re-hashing.
+    /// </summary>
+    public async Task<string> RefreshCatalogAsync()
+    {
+        _cts = new CancellationTokenSource();
+        IsScanning = true;
+        ProgressValue = 0;
+        ProgressMax = Math.Max(1, StaleEntryCount);
+
+        var progress = new Progress<RefreshProgress>(p =>
+        {
+            ProgressMax = Math.Max(1, p.Total);
+            ProgressValue = p.Done;
+            StatusText = $"Refreshing catalogue {p.Done}/{p.Total} — {p.Current}";
+        });
+
+        try
+        {
+            var report = await Task.Run(() =>
+                CatalogRefresher.Refresh(_catalog, _settings, progress, _cts.Token));
+            CatalogStore.Save(_catalog, _catalogPath);
+            StatusText =
+                $"Catalogue refresh: {report.Refreshed} entr(ies) updated, {report.Skipped} already current, " +
+                $"{report.Linked} extra(s) linked" +
+                (report.Pruned > 0 ? $", {report.Pruned} dropped by exclusions." : ".");
+        }
+        catch (OperationCanceledException)
+        {
+            CatalogStore.Save(_catalog, _catalogPath);
+            StatusText = "Catalogue refresh cancelled. Partial results saved.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Catalogue refresh failed: {ex.Message}";
+        }
+        finally
+        {
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+            RebuildRows();
+        }
+        return StatusText;
     }
 
     // --- TMDb validation --------------------------------------------------
@@ -849,9 +1035,17 @@ public class MainViewModel : ObservableObject
 
     // --- Settings ---------------------------------------------------------
 
+    /// <summary>
+    /// Drive roots offered in Settings for watching. Taken from the list already loaded
+    /// for the drives panel — re-enumerating stalls on network/removable volumes.
+    /// </summary>
+    public IReadOnlyList<string> AvailableDriveRoots =>
+        Drives.Select(d => d.Path).ToList();
+
     public void ApplyAppSettings(AppSettings settings)
     {
         _settings = settings;
+        _settings.SyncLegacyFolders();
         _settings.Save(_settingsPath);
         StartupManager.Apply(_settings.StartWithWindows);
         StartWatchingIfEnabled(_lastRoots);
@@ -859,6 +1053,9 @@ public class MainViewModel : ObservableObject
         RebuildRows();
         StatusText = "Settings saved.";
     }
+
+    /// <summary>Persist a settings change made outside the dialog (e.g. column layout).</summary>
+    public void SaveSettings() => _settings.Save(_settingsPath);
 
     // --- New-file watching + notifications --------------------------------
 
@@ -868,6 +1065,11 @@ public class MainViewModel : ObservableObject
     {
         StopWatching();
         if (!_settings.WatchForNewFiles) return;
+
+        // An explicit list of drives to watch wins; otherwise fall back to whatever was
+        // scanned, which is what earlier versions did.
+        if (_settings.WatchedDrives.Count > 0)
+            roots = _settings.WatchedDrives;
 
         var rootList = roots.Where(r => !string.IsNullOrWhiteSpace(r)).Distinct().ToList();
         if (rootList.Count == 0)
@@ -900,11 +1102,13 @@ public class MainViewModel : ObservableObject
             {
                 FullPath = path, FileName = info.Name, Extension = info.Extension,
                 SizeBytes = info.Length, LastModifiedUtc = info.LastWriteTimeUtc,
-                IndexedUtc = DateTime.UtcNow, Integrity = IntegrityStatus.Ok
+                IndexedUtc = DateTime.UtcNow, Integrity = IntegrityStatus.Ok,
+                FeatureVersion = CatalogRefresher.CurrentFeatureVersion
             };
             MediaClassifier.Classify(entry);
             _catalog.Files.Add(entry);
             _catalog.ByPath[path] = entry;
+            ExtraLinker.Link(_catalog.Files);
             CatalogStore.Save(_catalog, _catalogPath);
             RebuildRows();
 

@@ -55,8 +55,11 @@
                         Click="OnValidateTvClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
                         ToolTip="Validate TV show names against themoviedb.org."/>
                 <Separator/>
-                <Button x:Name="ToolsButton" Content="Tools…" Click="OnToolsClick" Padding="8,2"/>
-                <Button x:Name="SettingsButton" Content="Settings…" Click="OnSettingsClick" Padding="8,2"/>
+                <!-- Pinned: these must never disappear into the toolbar's overflow arrow. -->
+                <Button x:Name="ToolsButton" Content="Tools…" Click="OnToolsClick" Padding="8,2"
+                        ToolBar.OverflowMode="Never"/>
+                <Button x:Name="SettingsButton" Content="Settings…" Click="OnSettingsClick" Padding="8,2"
+                        ToolBar.OverflowMode="Never"/>
             </ToolBar>
         </ToolBarTray>
 
@@ -78,6 +81,9 @@
                 <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
                 <Button Content="Suggest consolidation…" Click="OnSuggestConsolidationClick" Padding="8,1" Margin="2,0"
                         VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"/>
+                <Button x:Name="RefreshCatalogButton" Content="Refresh catalogue" Click="OnRefreshCatalogClick"
+                        Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Re-derive metadata for entries that predate the current features. Entries already up to date are skipped — nothing is re-scanned or re-hashed."/>
                 <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
                         VerticalAlignment="Center" Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
             </StackPanel>
@@ -127,12 +133,16 @@
                       CanUserSortColumns="True" CanUserResizeColumns="True" EnableRowVirtualization="True"
                       HorizontalScrollBarVisibility="Auto" ColumnWidth="SizeToHeader"
                       MouseDoubleClick="OnGridDoubleClick" PreviewKeyDown="OnGridKeyDown">
+                <!-- The header right-click menu is built in code: handlers written inside a
+                     Style setter are compiled into class handlers on the menu itself. -->
                 <DataGrid.ContextMenu>
                     <ContextMenu Opened="OnContextMenuOpened">
                         <MenuItem Header="Open file" Click="OnOpenFile"/>
                         <MenuItem Header="Open containing folder" Click="OnOpenFolder"/>
                         <MenuItem Header="Remove from results (keeps file on disk)" Click="OnRemoveFromResults"/>
+                        <MenuItem Header="Delete file(s) from disk…" Click="OnDeleteFiles"/>
                         <Separator/>
+                        <MenuItem Header="Edit title…" Click="OnEditTitle"/>
                         <MenuItem Header="Set category" x:Name="CategoryMenu"/>
                         <MenuItem Header="Set category for this folder…" Click="OnSetCategoryFolder"/>
                         <MenuItem Header="Add new category…" Click="OnAddCategory"/>
@@ -154,7 +164,9 @@
                     <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="46"/>
                     <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"/>
                     <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"/>
-                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"/>
+                    <!-- Sorted on the raw byte count, so 900 MB comes before 1.2 GB. -->
+                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"
+                                        SortMemberPath="SizeBytes"/>
                     <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"/>
                     <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="380"/>
                 </DataGrid.Columns>

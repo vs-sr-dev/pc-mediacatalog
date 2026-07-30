@@ -2,8 +2,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using MediaCatalog.App.ViewModels;
+using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Storage;
 using Microsoft.Win32;
 
 namespace MediaCatalog.App;
@@ -16,10 +19,16 @@ public partial class MainWindow : Window
 {
     private readonly MainViewModel _vm = new();
 
+    /// <summary>The open (non-modal) settings window, so a second click just focuses it.</summary>
+    private SettingsWindow? _settingsWindow;
+
     public MainWindow()
     {
         InitializeComponent();
         DataContext = _vm;
+        BuildColumnHeaderMenu();
+        ApplySavedColumnLayout();
+        Closing += (_, _) => SaveColumnLayout();
         Closed += (_, _) => _vm.Shutdown();
     }
 
@@ -136,11 +145,48 @@ public partial class MainWindow : Window
 
     // --- Settings & filter ------------------------------------------------
 
+    /// <summary>
+    /// Settings open non-modally so the catalogue stays usable while they are edited;
+    /// saving applies immediately through the <see cref="SettingsWindow.Saved"/> event.
+    /// </summary>
     private void OnSettingsClick(object sender, RoutedEventArgs e)
     {
-        var dlg = new SettingsWindow(_vm.Settings, _vm.Categories) { Owner = this };
-        if (dlg.ShowDialog() == true)
-            _vm.ApplyAppSettings(dlg.Result);
+        if (_settingsWindow != null)
+        {
+            if (_settingsWindow.WindowState == WindowState.Minimized)
+                _settingsWindow.WindowState = WindowState.Normal;
+            _settingsWindow.Activate();
+            return;
+        }
+
+        var dlg = new SettingsWindow(_vm.Settings, _vm.Categories, _vm.AvailableDriveRoots) { Owner = this };
+        dlg.Saved += settings => _vm.ApplyAppSettings(settings);
+        dlg.Closed += (_, _) => _settingsWindow = null;
+        _settingsWindow = dlg;
+        dlg.Show();
+    }
+
+    private async void OnRefreshCatalogClick(object sender, RoutedEventArgs e)
+    {
+        var stale = _vm.StaleEntryCount;
+        if (stale == 0)
+        {
+            MessageBox.Show(this,
+                "Every catalogue entry already has everything this version knows how to work out. " +
+                "Run a scan instead if you want to pick up new or changed files.",
+                "Refresh catalogue", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var confirm = MessageBox.Show(this,
+            $"Re-derive metadata for {stale} catalogue entr(ies) that predate the current features " +
+            "(extras detection, linking, title parsing)?\n\n" +
+            "Entries that are already up to date are skipped, and nothing is re-scanned or re-hashed.",
+            "Refresh catalogue", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.OK) return;
+
+        var result = await _vm.RefreshCatalogAsync();
+        MessageBox.Show(this, result, "Refresh catalogue", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void OnClearFilter(object sender, RoutedEventArgs e) => _vm.ClearFilters();
@@ -153,8 +199,11 @@ public partial class MainWindow : Window
             _vm.RemoveFilter(clause);
     }
 
-    private void OnColumnsClick(object sender, RoutedEventArgs e) =>
+    private void OnColumnsClick(object sender, RoutedEventArgs e)
+    {
         new ColumnChooserWindow(FilesGrid) { Owner = this }.ShowDialog();
+        SaveColumnLayout();
+    }
 
     private async void OnSuggestConsolidationClick(object sender, RoutedEventArgs e)
     {
@@ -176,8 +225,26 @@ public partial class MainWindow : Window
             "Yes = move (copy, verify, delete original). No = copy only.",
             "Consolidate", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
         if (deleteOriginal == MessageBoxResult.Cancel) return;
-        var result = await _vm.ApplyConsolidationAsync(chosen, deleteOriginal == MessageBoxResult.Yes);
-        MessageBox.Show(this, result, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
+        var outcome = await _vm.ApplyConsolidationAsync(chosen, deleteOriginal == MessageBoxResult.Yes);
+        MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
+        await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
+    }
+
+    /// <summary>
+    /// Files whose copy is already in the consolidation location were not moved — the
+    /// source is simply redundant, so offer to delete it.
+    /// </summary>
+    private async Task OfferToDeleteRedundantAsync(IReadOnlyList<MediaFile> present)
+    {
+        if (present.Count == 0) return;
+
+        var ask = MessageBox.Show(this,
+            $"{present.Count} file(s) are already in the consolidation location, so nothing was copied " +
+            "for them.\n\nDelete the redundant copies from where they are now?",
+            "Already in the library", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (ask != MessageBoxResult.Yes) return;
+
+        await DeleteAsync(present.ToList());
     }
 
     private void OnMissingFilesClick(object sender, RoutedEventArgs e)
@@ -201,15 +268,21 @@ public partial class MainWindow : Window
         }
         var deleteOriginal = DeleteOriginalCheck.IsChecked == true;
         var verb = deleteOriginal ? "MOVE (copy, verify, delete original)" : "COPY (verify)";
+        var extras = _vm.LinkedExtras(rows.Select(r => r.Model)).Count;
         var confirm = MessageBox.Show(this,
             $"{verb} {rows.Count} file(s) into the structured library folders?\n\n" +
-            "TV → <TvDir>\\<A-Z or #>\\<Show>\\Season NN\\\nFilms → <FilmDir>\\<A-Z or #>\\<Title (Year)>\\\n\n" +
-            "Files without a category or a configured target are skipped.",
+            "TV → <TvDir>\\<A-Z or #>\\<Show>\\Season NN\\NN - name.ext\n" +
+            "Films → <FilmDir>\\<A-Z or #>\\<Title (Year)>\\\n" +
+            "Specials/featurettes → the same folder, under \\Extras\\\n\n" +
+            (extras > 0 ? $"{extras} linked extra(s) will travel with the selection.\n" : "") +
+            "Files without a category or a configured target are skipped, and files already " +
+            "in the library are reported rather than copied again.",
             "Consolidate", MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (confirm != MessageBoxResult.OK) return;
 
-        var result = await _vm.ConsolidateAsync(rows, deleteOriginal);
-        MessageBox.Show(this, result, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
+        var outcome = await _vm.ConsolidateAsync(rows, deleteOriginal);
+        MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
+        await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
     }
 
     // --- TMDb -------------------------------------------------------------
@@ -295,6 +368,156 @@ public partial class MainWindow : Window
             $"Ignore all '{ext}' files? They'll be removed from the results and skipped in future scans.",
             "Ignore file type", MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (confirm == MessageBoxResult.OK) _vm.IgnoreExtension(ext);
+    }
+
+    // --- Titles -----------------------------------------------------------
+
+    private void OnEditTitle(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Select one or more files in the list first.",
+                "Edit title", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var sharing = rows.Count == 1 ? _vm.CountSharingTitle(rows[0].Model) : 0;
+        var note = sharing > 0
+            ? $"\n\n{sharing} other file(s) currently share this title and will be updated too."
+            : "";
+        var prompt = rows.Count == 1
+            ? $"Title for '{rows[0].FileName}':{note}"
+            : $"Title for the {rows.Count} selected file(s):";
+
+        var typed = PromptWindow.Ask(this, "Edit title", prompt, rows[0].Title);
+        if (string.IsNullOrWhiteSpace(typed)) return;
+
+        var result = _vm.SetTitleForFiles(rows, typed.Trim());
+        MessageBox.Show(this, result, "Edit title", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    // --- Deleting files ---------------------------------------------------
+
+    private async void OnDeleteFiles(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Select the files to delete first.",
+                "Delete files", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        await DeleteAsync(rows.Select(r => r.Model).ToList());
+    }
+
+    private async Task DeleteAsync(IReadOnlyList<MediaFile> files)
+    {
+        var dlg = new DeleteFilesWindow(files) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        var message = await _vm.DeleteFilesAsync(files, toRecycleBin: !dlg.DeletePermanently);
+        MessageBox.Show(this, message, "Delete files", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    // --- Column layout ----------------------------------------------------
+
+    /// <summary>
+    /// Right-click menu for the column headers. Built here rather than in XAML because
+    /// handlers declared inside a Style setter compile into class handlers on the menu,
+    /// which fire for every item instead of the one clicked.
+    /// </summary>
+    private void BuildColumnHeaderMenu()
+    {
+        static MenuItem Item(string header, RoutedEventHandler onClick)
+        {
+            var item = new MenuItem { Header = header };
+            item.Click += onClick;
+            return item;
+        }
+
+        var menu = new ContextMenu();
+        menu.Items.Add(Item("Set column width…", OnSetColumnWidth));
+        menu.Items.Add(Item("Fit width to contents", OnFitColumnWidth));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Item("Hide this column", OnHideColumn));
+        menu.Items.Add(Item("Choose columns…", OnColumnsClick));
+
+        // One shared menu for every header; PlacementTarget says which one opened it.
+        var style = new Style(typeof(DataGridColumnHeader));
+        style.Setters.Add(new Setter(ContextMenuProperty, menu));
+        FilesGrid.ColumnHeaderStyle = style;
+    }
+
+    /// <summary>The column whose header was right-clicked.</summary>
+    private static DataGridColumn? ColumnFrom(object sender)
+    {
+        if (sender is not MenuItem item) return null;
+        var menu = ItemsControl.ItemsControlFromItemContainer(item) as ContextMenu
+                   ?? item.Parent as ContextMenu;
+        return (menu?.PlacementTarget as DataGridColumnHeader)?.Column;
+    }
+
+    private void OnSetColumnWidth(object sender, RoutedEventArgs e)
+    {
+        if (ColumnFrom(sender) is not { } column) return;
+
+        var typed = PromptWindow.Ask(this, "Column width",
+            $"Width in pixels for the '{column.Header}' column:",
+            ((int)Math.Round(column.ActualWidth)).ToString());
+        if (string.IsNullOrWhiteSpace(typed)) return;
+
+        if (!double.TryParse(typed.Trim(), out var width) || width < 20 || width > 4000)
+        {
+            MessageBox.Show(this, "Enter a width between 20 and 4000 pixels.",
+                "Column width", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        column.Width = new DataGridLength(width);
+        SaveColumnLayout();
+    }
+
+    private void OnFitColumnWidth(object sender, RoutedEventArgs e)
+    {
+        if (ColumnFrom(sender) is not { } column) return;
+        column.Width = new DataGridLength(1, DataGridLengthUnitType.Auto);
+        // Let the grid measure, then remember the width it settled on.
+        Dispatcher.BeginInvoke(new Action(SaveColumnLayout),
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private void OnHideColumn(object sender, RoutedEventArgs e)
+    {
+        if (ColumnFrom(sender) is not { } column) return;
+        column.Visibility = Visibility.Collapsed;
+        SaveColumnLayout();
+    }
+
+    private void ApplySavedColumnLayout()
+    {
+        foreach (var column in FilesGrid.Columns)
+        {
+            var header = column.Header?.ToString() ?? "";
+            var saved = _vm.Settings.ColumnLayouts
+                .FirstOrDefault(c => string.Equals(c.Header, header, StringComparison.Ordinal));
+            if (saved == null) continue;
+
+            if (saved.Width >= 20) column.Width = new DataGridLength(saved.Width);
+            column.Visibility = saved.Visible ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>Remember column widths and visibility for the next run.</summary>
+    internal void SaveColumnLayout()
+    {
+        _vm.Settings.ColumnLayouts = FilesGrid.Columns.Select(c => new ColumnLayout
+        {
+            Header = c.Header?.ToString() ?? "",
+            Width = Math.Round(c.ActualWidth),
+            Visible = c.Visibility == Visibility.Visible
+        }).ToList();
+        _vm.SaveSettings();
     }
 
     // --- Duplicates -------------------------------------------------------

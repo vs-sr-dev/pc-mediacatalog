@@ -140,34 +140,78 @@ them manually; the status bar shows `ffmpeg ✓ ffprobe ✓ fpcalc ✓` for what
 
 **Categories** — right-click files in the grid → *Set category* (built-in or your own),
 *Set category for this folder…* (applies to a whole folder, optionally its subfolders),
-or *Add new category…*. Overrides win over the auto-detected category.
+or *Add new category…*. Overrides win over the auto-detected category, and setting one on a
+file sets it on **every exact duplicate of that file** too, so the same content is never
+filed two different ways.
+
+**Titles** — right-click → *Edit title…* to correct a title by hand. The correction is
+applied to the selected file **and to every other file that had the same title**, so one
+edit fixes a whole show. TMDb validation does the same with the name it confirms. A
+hand-typed title counts as validated (shown as ✎ in the TMDb column; ✓ means TMDb).
+
+**Extras** — specials, featurettes, deleted scenes and behind-the-scenes material are
+detected (by folder name, Plex/Kodi `-featurette` suffixes, or a season-zero code) and
+categorised as **TvExtra** / **MovieExtra**. Each extra is *linked* to the film or episode
+it belongs to: it adopts that title and travels with it whenever the main file is
+consolidated.
 
 **Consolidate** — select TV/film files and click **Consolidate…** to move (or copy) them
 into a tidy library:
-- TV → `<TV dir>\<A–Z or #>\<Show>\Season NN\` (season left-padded to ≥2 digits)
+- TV → `<TV dir>\<A–Z or #>\<Show>\Season NN\NN - name.ext`
 - Films → `<Film dir>\<A–Z or #>\<Title (Year)>\`
+- Extras → the same show/film folder, under `\Extras\`
 
-Set the TV/Film target folders in **Settings…** (custom categories get their own folders
-there too). Uses the same copy-and-verify as Relocate.
+Seasons are left-padded to ≥2 digits, and episodes are **prefixed with their episode
+number** so a season folder sorts into broadcast order in any file manager. Files that are
+already in the consolidation location are **never copied twice**: the redundant source is
+reported instead, and you are offered the chance to delete it. Target folders are set per
+category in **Settings…** — any number of categories, each with its own folder. Uses the
+same copy-and-verify as Relocate.
 
 **Suggest consolidation** — click **Suggest consolidation…** to scan the catalogue and get a
 reviewable list of proposed moves: current location → new location, with name-collision and
 duplicate flags. When several copies of the same film/episode exist, the **highest-quality**
 one (2160 > 1080 > 720 > 480) is preferred; TV items must have a TMDb-validated title and a
-season/episode to be recommended. Tick the ones to apply.
+season/episode to be recommended. Items already sitting in the consolidation location are
+flagged as such rather than proposed for another copy. Tick the ones to apply.
 
 **Filtering** — the filter bar matches any column with wildcards (`*` = any run, `?` = one
 char; plain text = contains). Tick **not** to exclude matches (e.g. *Category not Audio*),
-and **Add filter** to stack several filters at once. **Columns…** hides/shows columns, and
-the grid scrolls horizontally.
+and **Add filter** to stack several filters at once. The grid scrolls horizontally.
+
+**Columns** — click a header to sort (**Size** sorts by actual file size, not by its
+printed text). Right-click a header to *set its width in pixels*, fit it to its contents,
+hide it, or open the column chooser. Widths and visibility are remembered between runs.
+
+**Settings** — the settings window is **non-modal**: it can stay open while you keep
+scanning, filtering and working in the main window. *Save* applies the changes immediately
+and closes it.
 
 **Watching & startup** — in **Settings…**, enable *Watch for new files* to have new media
 auto-added to the catalogue with a taskbar notification, and *Start with Windows* to launch
-at sign-in.
+at sign-in. You can tick **exactly which drives to watch** — useful when only one or two of
+the scanned drives ever gain new files. Leaving them all unticked watches everything that
+was scanned.
 
 **Excluding** — right-click → *Exclude this folder…* (optionally including subfolders) or
 *Ignore this file type* to drop files from results and skip them in future scans. Manage
-these lists in **Settings…**.
+these lists in **Settings…**, where a rule can be either a real folder or a **pattern**:
+`*\Windows\*` excludes every Windows folder on every drive, `?:\$Recycle.Bin` the bin on
+all of them. A pattern also prunes the scan, so excluded trees are never walked. A plain
+path that doesn't exist (and has no wildcard) is confirmed before it is added, since that
+is usually a typo. **Exclude system directories** — on by default — covers Windows,
+Program Files, ProgramData, `$Recycle.Bin`, System Volume Information and friends.
+
+**Deleting files** — right-click → *Delete file(s) from disk…*. Files go to the **Recycle
+Bin** by default. Bypassing the bin is offered as a tick, and it arms a second confirmation
+checkbox that must be ticked **every time** before the delete button becomes available.
+(Plain **Delete** on the keyboard still only removes rows from the results and leaves the
+files alone.)
+
+**Refresh catalogue** — when a new version learns to work something out from data already
+in the catalogue (new categories, extras linking, better title parsing), **Refresh
+catalogue** re-derives it in place. Entries already stamped with the current feature set are
+skipped, and nothing is re-scanned or re-hashed, so it is near-instant on a large library.
 
 **Opening files** — double-click a result to open it with its associated application, or
 right-click → *Open file* / *Open containing folder* (Explorer opens with the file selected).
@@ -194,7 +238,9 @@ Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** in **Settings…*
 preferred if both are given), then **Validate TV (TMDb)** confirms show names against TMDb. Lookups are **rate-limited to one every two seconds** and **cached**
 (`tmdb-cache.xml`) so names are never queried twice. If the episode title doesn't match,
 the containing folder names are tried in turn (e.g. `…\Bewitched\Season 01\ep.avi` falls
-back to "Bewitched"). Validated titles show a ✓ in the TMDb column.
+back to "Bewitched"). Validated titles show a ✓ in the TMDb column (✎ marks one you typed
+yourself). A confirmed name is also **shared with every file that had the same title**, so
+one lookup fixes — and spares a query for — the rest of the show.
 
 ## Roadmap / possible extensions
 - Film metadata validation against TMDb (TV is validated today).
