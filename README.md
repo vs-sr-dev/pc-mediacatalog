@@ -19,6 +19,12 @@ to XML.
 -->
 _Add a screenshot of the main window here._
 
+## Undo
+The last **ten** operations are reversible from the **Undo** button: moves and
+consolidations (files go back where they came from), renames, title / category /
+season-episode edits, and deletes that went to the Recycle Bin. Deletes that bypassed the
+bin are gone for good and are not offered.
+
 ## Requirements
 - Windows
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (to build) — or the
@@ -142,11 +148,14 @@ them manually; the status bar shows `ffmpeg ✓ ffprobe ✓ fpcalc ✓` for what
 *Set category for this folder…* (applies to a whole folder, optionally its subfolders),
 or *Add new category…*. Overrides win over the auto-detected category, and setting one on a
 file sets it on **every exact duplicate of that file** too, so the same content is never
-filed two different ways.
+filed two different ways. A season/episode code beats the extension: anything that says
+`S02E05` — whatever it is called or however it is packaged — is categorised as **TvShow**.
 
-**Titles** — right-click → *Edit title…* to correct a title by hand. The correction is
-applied to the selected file **and to every other file that had the same title**, so one
-edit fixes a whole show. TMDb validation does the same with the name it confirms. A
+**Titles** — right-click → *Edit title…* to correct a title by hand; the box starts from
+the current title, or from the file name without its extension when there isn't one. The
+correction is applied to the selected file, **to every other file that had the same
+title**, and **to its exact duplicates** — so one edit fixes a whole show, and a copy that
+never had a title gets one too. TMDb validation does the same with the name it confirms. A
 hand-typed title counts as validated (shown as ✎ in the TMDb column; ✓ means TMDb).
 
 **Extras** — specials, featurettes, deleted scenes and behind-the-scenes material are
@@ -164,9 +173,11 @@ into a tidy library:
 Seasons are left-padded to ≥2 digits, and episodes are **prefixed with their episode
 number** so a season folder sorts into broadcast order in any file manager. Files that are
 already in the consolidation location are **never copied twice**: the redundant source is
-reported instead, and you are offered the chance to delete it. Target folders are set per
-category in **Settings…** — any number of categories, each with its own folder. Uses the
-same copy-and-verify as Relocate.
+reported instead, and you are offered the chance to delete it. A file with **no title** has
+nowhere to be filed, so you are asked for one before the move rather than having it quietly
+skipped. Target folders are set per category in **Settings…** — any number of categories,
+each with its own folder. Uses the same copy-and-verify as Relocate, with a progress bar and
+an ETA.
 
 **Suggest consolidation** — click **Suggest consolidation…** to scan the catalogue and get a
 reviewable list of proposed moves: current location → new location, with name-collision and
@@ -193,6 +204,29 @@ at sign-in. You can tick **exactly which drives to watch** — useful when only 
 the scanned drives ever gain new files. Leaving them all unticked watches everything that
 was scanned.
 
+Started at sign-in, the app comes up **in the notification area with no window**, ready to
+catch new files without getting in the way; double-click the tray icon (or *Open Media
+Catalog* on its menu) to bring it up, and *Exit* to quit properly. While watching is on,
+closing the window hides it back to the tray rather than quitting.
+
+**Files still downloading** — the watcher can spot a file long before it has finished
+arriving, so a newly seen file is hashed only once its size has stopped changing and it can
+be opened for reading. Anything that never settled is flagged, and **Re-hash pending**
+refreshes size and hash for all of them in one go — duplicate detection depends on it.
+
+**Scan folder…** — add a single folder (a downloads folder, say) to an existing catalogue
+without re-walking whole drives. Nothing outside it is touched or pruned, and the folder is
+remembered: it is watched along with the drives and listed in Settings.
+
+**Filed** — the grid's *Filed* column ticks once a file lives in its consolidation
+location, and the **View** dropdown can show just what is *Consolidated* or *Not
+consolidated*, so it is easy to see what is left to sort out.
+
+**Progress and ETA** — long jobs (consolidating, moving, deep checking, re-hashing) show a
+progress bar with an estimated time remaining in the status bar. For copies and deep checks
+the estimate is driven by **bytes**, not file count: a 20 GB remux and a 200 MB episode are
+not the same job.
+
 **Excluding** — right-click → *Exclude this folder…* (optionally including subfolders) or
 *Ignore this file type* to drop files from results and skip them in future scans. Manage
 these lists in **Settings…**, where a rule can be either a real folder or a **pattern**:
@@ -208,6 +242,23 @@ checkbox that must be ticked **every time** before the delete button becomes ava
 (Plain **Delete** on the keyboard still only removes rows from the results and leaves the
 files alone.)
 
+A refusal is not taken at face value:
+- a **read-only** file has the attribute cleared and the delete retried;
+- a file **held open by another application** is reported with *which* applications are
+  holding it (via the Restart Manager, the same mechanism installers use), so you know
+  what to close;
+- a **permissions** refusal is offered a retry with administrative rights, which relaunches
+  the program elevated for that job alone;
+- anything still refusing is explained in full — file, reason, holders and path.
+
+**Moving files** — right-click → *Move to folder…* picks a destination, and can take the
+**rest of the containing folder** along with the selection, which is what you usually want
+for a download folder holding a film plus its subtitles and extras.
+
+**Renaming, season/episode** — right-click → *Rename file…* renames on disk (and re-derives
+what the name implies), and *Edit season / episode…* sets or clears the numbering by hand.
+Both apply to duplicates of the same content as well.
+
 **Refresh catalogue** — when a new version learns to work something out from data already
 in the catalogue (new categories, extras linking, better title parsing), **Refresh
 catalogue** re-derives it in place. Entries already stamped with the current feature set are
@@ -222,7 +273,12 @@ catalogue/results; the actual files are left on disk (a later scan re-adds them 
 folder or type is excluded).
 
 **Duplicates** — right-click → *Show duplicates* to open a manager listing every identical
-copy of a file, with copy / move / delete.
+copy of a file, with copy / move / **consolidate** / delete. *Consolidate selected* files
+the chosen copies straight into the library, asking for a title first if they have none.
+
+**Deep check a folder** — **Deep check folder…** decodes every media file under a folder
+and its subfolders, whether or not they are catalogued (new ones are added so their verdict
+is kept). Useful for vetting a freshly copied drive in one pass.
 
 ### Backwards compatibility
 Catalogues from earlier versions load unchanged. New fields are optional, and anything the
@@ -238,9 +294,12 @@ Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** in **Settings…*
 preferred if both are given), then **Validate TV (TMDb)** confirms show names against TMDb. Lookups are **rate-limited to one every two seconds** and **cached**
 (`tmdb-cache.xml`) so names are never queried twice. If the episode title doesn't match,
 the containing folder names are tried in turn (e.g. `…\Bewitched\Season 01\ep.avi` falls
-back to "Bewitched"). Validated titles show a ✓ in the TMDb column (✎ marks one you typed
-yourself). A confirmed name is also **shared with every file that had the same title**, so
-one lookup fixes — and spares a query for — the rest of the show.
+back to "Bewitched"). **Every** folder up to the drive root is tried, each one also without
+its trailing decoration — `Yes Minister (1980)` is offered as `Yes Minister` too — with
+season folders and single-letter buckets kept for last rather than skipped, since a show
+really can be called *Ed*. Validated titles show a ✓ in the TMDb column (✎ marks one you
+typed yourself). A confirmed name is also **shared with every file that had the same
+title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Roadmap / possible extensions
 - Film metadata validation against TMDb (TV is validated today).

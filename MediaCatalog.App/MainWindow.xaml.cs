@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using MediaCatalog.App.Infrastructure;
 using MediaCatalog.App.ViewModels;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Storage;
@@ -22,14 +23,93 @@ public partial class MainWindow : Window
     /// <summary>The open (non-modal) settings window, so a second click just focuses it.</summary>
     private SettingsWindow? _settingsWindow;
 
-    public MainWindow()
+    private readonly TrayIcon _tray;
+
+    /// <summary>Set once the user really means to quit, as opposed to closing the window.</summary>
+    private bool _exiting;
+
+    /// <param name="startHidden">
+    /// True when Windows launched us at sign-in: the app lives in the notification area
+    /// and only opens its window when asked.
+    /// </param>
+    public MainWindow(bool startHidden = false)
     {
         InitializeComponent();
         DataContext = _vm;
+
+        _tray = new TrayIcon(ShowFromTray, ExitApplication);
+        _vm.Notify = _tray.Notify;
+        _vm.Undo.Changed += UpdateUndoButton;
+        UpdateUndoButton();
+
         BuildColumnHeaderMenu();
         ApplySavedColumnLayout();
-        Closing += (_, _) => SaveColumnLayout();
-        Closed += (_, _) => _vm.Shutdown();
+
+        // Closing the window hides it while the app is watching for new files; quitting is
+        // then an explicit choice from the tray menu.
+        Closing += OnWindowClosing;
+        if (startHidden) ShowInTaskbar = false;
+    }
+
+    private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        SaveColumnLayout();
+
+        if (!_exiting && _vm.Settings.WatchForNewFiles)
+        {
+            // Still needed in the background: hide rather than quit.
+            e.Cancel = true;
+            Hide();
+            ShowInTaskbar = false;
+            _tray.Notify("Media Catalog", "Still watching for new files. Right-click the tray icon to quit.");
+            return;
+        }
+
+        _vm.Shutdown();
+        _tray.Dispose();
+        Application.Current.Shutdown();
+    }
+
+    private void ShowFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void ExitApplication()
+    {
+        _exiting = true;
+        Close();
+    }
+
+    private void UpdateUndoButton()
+    {
+        var next = _vm.Undo.NextDescription;
+        UndoButton.IsEnabled = _vm.Undo.CanUndo;
+        UndoButton.ToolTip = next == null
+            ? "Nothing to undo."
+            : $"Undo {next} (up to ten operations are remembered).";
+    }
+
+    private async void OnUndoClick(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.Undo.CanUndo)
+        {
+            MessageBox.Show(this, "There is nothing to undo.",
+                "Undo", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var what = _vm.Undo.NextDescription;
+        var confirm = MessageBox.Show(this, $"Undo {what}?",
+            "Undo", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.OK) return;
+
+        var result = await _vm.Undo.UndoAsync();
+        UpdateUndoButton();
+        MessageBox.Show(this, result, "Undo", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private async void OnRelocateClick(object sender, RoutedEventArgs e)
@@ -231,6 +311,38 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// A file with no title has nowhere to be filed, so ask for one before consolidating
+    /// rather than silently skipping it. Returns false if the user backs out.
+    /// </summary>
+    private Task<bool> EnsureTitlesAsync(IReadOnlyList<MediaFile> files)
+    {
+        var untitled = _vm.WithoutTitle(files);
+        if (untitled.Count == 0) return Task.FromResult(true);
+
+        var ask = MessageBox.Show(this,
+            $"{untitled.Count} of the selected file(s) have no title yet, and a title is what " +
+            "decides where they are filed.\n\nEnter the missing titles now?",
+            "Consolidate", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (ask == MessageBoxResult.Cancel) return Task.FromResult(false);
+        if (ask == MessageBoxResult.No) return Task.FromResult(true);   // they'll be skipped
+
+        foreach (var file in untitled)
+        {
+            // Re-check: naming one file can supply the title for its duplicates too.
+            if (!string.IsNullOrWhiteSpace(file.EffectiveTitle)) continue;
+
+            var typed = PromptWindow.Ask(this, "Title needed",
+                $"Title for this file:\n\n{file.FullPath}", TitleSeed(file));
+            if (typed == null) return Task.FromResult(false);            // cancelled the run
+            if (string.IsNullOrWhiteSpace(typed)) continue;              // skip just this one
+
+            _vm.SetTitleForModels(new[] { file }, typed.Trim());
+        }
+        UpdateUndoButton();
+        return Task.FromResult(true);
+    }
+
+    /// <summary>
     /// Files whose copy is already in the consolidation location were not moved — the
     /// source is simply redundant, so offer to delete it.
     /// </summary>
@@ -266,6 +378,8 @@ public partial class MainWindow : Window
                 "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+        if (!await EnsureTitlesAsync(rows.Select(r => r.Model).ToList())) return;
+
         var deleteOriginal = DeleteOriginalCheck.IsChecked == true;
         var verb = deleteOriginal ? "MOVE (copy, verify, delete original)" : "COPY (verify)";
         var extras = _vm.LinkedExtras(rows.Select(r => r.Model)).Count;
@@ -370,7 +484,7 @@ public partial class MainWindow : Window
         if (confirm == MessageBoxResult.OK) _vm.IgnoreExtension(ext);
     }
 
-    // --- Titles -----------------------------------------------------------
+    // --- Titles, season/episode, file names --------------------------------
 
     private void OnEditTitle(object sender, RoutedEventArgs e)
     {
@@ -390,11 +504,141 @@ public partial class MainWindow : Window
             ? $"Title for '{rows[0].FileName}':{note}"
             : $"Title for the {rows.Count} selected file(s):";
 
-        var typed = PromptWindow.Ask(this, "Edit title", prompt, rows[0].Title);
+        var typed = PromptWindow.Ask(this, "Edit title", prompt, TitleSeed(rows[0].Model));
         if (string.IsNullOrWhiteSpace(typed)) return;
 
         var result = _vm.SetTitleForFiles(rows, typed.Trim());
+        UpdateUndoButton();
         MessageBox.Show(this, result, "Edit title", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// What to put in the title box: the title it already has, or failing that the file
+    /// name without its extension — a far better starting point than an empty box.
+    /// </summary>
+    private static string TitleSeed(MediaFile file) =>
+        !string.IsNullOrWhiteSpace(file.EffectiveTitle)
+            ? file.EffectiveTitle
+            : Path.GetFileNameWithoutExtension(file.FileName);
+
+    private void OnEditSeasonEpisode(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Select one or more files in the list first.",
+                "Season / episode", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var dlg = new SeasonEpisodeWindow(rows.Select(r => r.Model).ToList()) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        var result = _vm.SetSeasonEpisode(rows, dlg.Season, dlg.Episode);
+        UpdateUndoButton();
+        MessageBox.Show(this, result, "Season / episode", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private void OnRenameFile(object sender, RoutedEventArgs e)
+    {
+        var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
+        if (row == null)
+        {
+            MessageBox.Show(this, "Select the file to rename first.",
+                "Rename file", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var typed = PromptWindow.Ask(this, "Rename file",
+            $"New name for the file (keep the extension):\n\n{row.FullPath}", row.FileName);
+        if (string.IsNullOrWhiteSpace(typed) || typed.Trim() == row.FileName) return;
+
+        var result = _vm.RenameFile(row, typed.Trim());
+        UpdateUndoButton();
+        MessageBox.Show(this, result, "Rename file", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    // --- Moving, scanning and checking folders -----------------------------
+
+    private async void OnMoveToFolder(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Select the files to move first.",
+                "Move files", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var chosen = rows.Select(r => r.Model).ToList();
+        var siblings = _vm.SiblingsOf(chosen);
+        var folders = chosen.Select(f => Path.GetDirectoryName(f.FullPath) ?? "")
+            .Where(d => d.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        var dlg = new MoveFilesWindow(chosen.Count, folders, siblings.Count) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        var files = dlg.IncludeContainingFolder ? chosen.Concat(siblings).ToList() : chosen;
+        var result = await _vm.MoveFilesAsync(files, dlg.Destination, dlg.DeleteOriginal);
+        UpdateUndoButton();
+        MessageBox.Show(this, result, "Move files", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private async void OnScanFolderClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog { Title = "Choose a folder to add to the catalogue" };
+        if (dialog.ShowDialog(this) != true) return;
+
+        var result = await _vm.ScanFolderAsync(dialog.FolderName);
+        MessageBox.Show(this, result, "Scan folder", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private async void OnDeepCheckFolderClick(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.CanDoVideo)
+        {
+            PromptForTools("Deep integrity checks need FFmpeg and ffprobe.");
+            return;
+        }
+
+        // Start from the selected file's folder when there is one — usually what is meant.
+        var start = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
+        var dialog = new OpenFolderDialog { Title = "Choose a folder to deep check (including subfolders)" };
+        if (start != null && Path.GetDirectoryName(start.FullPath) is { Length: > 0 } dir && Directory.Exists(dir))
+            dialog.InitialDirectory = dir;
+        if (dialog.ShowDialog(this) != true) return;
+
+        var confirm = MessageBox.Show(this,
+            $"Fully decode every media file under this folder to detect corruption?\n\n{dialog.FolderName}\n\n" +
+            "This is thorough but SLOW. Files not yet in the catalogue are added so their results are kept. " +
+            "Progress and an estimated time are shown in the status bar, and Cancel stops it at any point.",
+            "Deep check folder", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+        if (confirm != MessageBoxResult.OK) return;
+
+        var result = await _vm.DeepCheckFolderAsync(dialog.FolderName);
+        MessageBox.Show(this, result, "Deep check folder", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private async void OnRehashClick(object sender, RoutedEventArgs e)
+    {
+        var pending = _vm.PendingRehashCount;
+        if (pending == 0)
+        {
+            MessageBox.Show(this, "Every catalogued file already has a trustworthy hash.",
+                "Re-hash", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var confirm = MessageBox.Show(this,
+            $"Re-hash {pending} file(s)?\n\nThese were added while they may still have been downloading, " +
+            "or never got a hash. Re-hashing refreshes their size and content hash so duplicate " +
+            "detection is reliable.",
+            "Re-hash", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.OK) return;
+
+        var result = await _vm.RehashPendingAsync();
+        MessageBox.Show(this, result, "Re-hash", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     // --- Deleting files ---------------------------------------------------
@@ -416,8 +660,34 @@ public partial class MainWindow : Window
         var dlg = new DeleteFilesWindow(files) { Owner = this };
         if (dlg.ShowDialog() != true) return;
 
-        var message = await _vm.DeleteFilesAsync(files, toRecycleBin: !dlg.DeletePermanently);
-        MessageBox.Show(this, message, "Delete files", MessageBoxButton.OK, MessageBoxImage.Information);
+        var recycle = !dlg.DeletePermanently;
+        var outcome = await _vm.DeleteFilesAsync(files, recycle);
+        UpdateUndoButton();
+
+        // Files that refused over permissions are worth one more go with more rights;
+        // ones held open by another application need that application closed instead.
+        var denied = outcome.AccessDeniedPaths;
+        if (denied.Count > 0)
+        {
+            var retry = MessageBox.Show(this,
+                outcome.Message +
+                $"\n\n{denied.Count} file(s) were refused for permission reasons. " +
+                "Retry those with administrative rights? Windows will ask you to confirm.",
+                "Delete files", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (retry == MessageBoxResult.Yes)
+            {
+                var stillThere = files.Where(f => denied.Contains(f.FullPath)).ToList();
+                var elevated = await _vm.RetryDeleteElevatedAsync(stillThere, recycle);
+                UpdateUndoButton();
+                MessageBox.Show(this, elevated.Message, "Delete files",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+        }
+
+        MessageBox.Show(this, outcome.Message, "Delete files",
+            MessageBoxButton.OK,
+            outcome.Result.Failed > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
     }
 
     // --- Column layout ----------------------------------------------------

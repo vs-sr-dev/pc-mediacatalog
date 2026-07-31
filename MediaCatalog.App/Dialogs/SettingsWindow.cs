@@ -43,7 +43,16 @@ public class SettingsWindow : Window
     private readonly TextBox _apiKey = new();
     private readonly TextBox _readToken = new();
     private readonly CheckBox _startup = new() { Content = "Start Media Catalog when Windows starts" };
+    private readonly CheckBox _startInTray = new()
+    {
+        Content = "…and start hidden in the notification area, without opening the window",
+        Margin = new Thickness(20, 2, 0, 2)
+    };
     private readonly CheckBox _watch = new() { Content = "Watch for new files and add them (with a taskbar notification)" };
+    private readonly CheckBox _rememberFilters = new()
+    {
+        Content = "Remember the view and filters between sessions"
+    };
     private readonly CheckBox _excludeSystem = new()
     {
         Content = "Automatically exclude system directories (Windows, Program Files, $Recycle.Bin, …)"
@@ -52,6 +61,7 @@ public class SettingsWindow : Window
     private readonly ObservableCollection<string> _exts = new();
     private readonly ObservableCollection<ExclRow> _excluded = new();
     private readonly ObservableCollection<string> _categories = new();
+    private readonly ObservableCollection<string> _scanFolders = new();
     private readonly List<CatFolderRow> _catFolders = new();
     private readonly List<CheckBox> _driveChecks = new();
     private readonly StackPanel _catFolderPanel = new();
@@ -72,11 +82,17 @@ public class SettingsWindow : Window
         _apiKey.Text = settings.TmdbApiKey;
         _readToken.Text = settings.TmdbReadAccessToken;
         _startup.IsChecked = settings.StartWithWindows;
+        _startInTray.IsChecked = settings.StartInTray;
+        _startInTray.IsEnabled = settings.StartWithWindows;
+        _startup.Checked += (_, _) => _startInTray.IsEnabled = true;
+        _startup.Unchecked += (_, _) => _startInTray.IsEnabled = false;
         _watch.IsChecked = settings.WatchForNewFiles;
+        _rememberFilters.IsChecked = settings.RememberFilters;
         _excludeSystem.IsChecked = settings.ExcludeSystemDirectories;
         foreach (var e in settings.IgnoredExtensions) _exts.Add(e);
         foreach (var f in settings.ExcludedFolders) _excluded.Add(new ExclRow { Model = f });
         foreach (var c in settings.CustomCategories) _categories.Add(c);
+        foreach (var f in settings.AdditionalScanFolders) _scanFolders.Add(f);
 
         var root = new DockPanel { Margin = new Thickness(14) };
 
@@ -106,9 +122,17 @@ public class SettingsWindow : Window
         panel.Children.Add(Section("Startup & watching"));
         _startup.Margin = new Thickness(0, 2, 0, 2);
         _watch.Margin = new Thickness(0, 2, 0, 2);
+        _rememberFilters.Margin = new Thickness(0, 2, 0, 2);
         panel.Children.Add(_startup);
+        panel.Children.Add(_startInTray);
         panel.Children.Add(_watch);
         panel.Children.Add(DriveWatchEditor(settings));
+        panel.Children.Add(_rememberFilters);
+
+        panel.Children.Add(Section("Folders scanned in addition to whole drives"));
+        panel.Children.Add(ScanFolderEditor());
+        panel.Children.Add(Hint("A download folder, say. These are watched along with the drives, and can be " +
+                                "rescanned on their own with \"Scan folder…\" without re-walking a whole drive."));
 
         panel.Children.Add(Section("Consolidation folders (one per category)"));
         panel.Children.Add(CategoryFolderEditor(settings));
@@ -222,6 +246,30 @@ public class SettingsWindow : Window
         if (roots.Count == 0)
             panel.Children.Add(new TextBlock { Text = "(no drives available)", Foreground = System.Windows.Media.Brushes.Gray });
         wrap.Children.Add(panel);
+        return wrap;
+    }
+
+    private FrameworkElement ScanFolderEditor()
+    {
+        var wrap = new StackPanel();
+        var list = new ListBox { Height = 70, ItemsSource = _scanFolders };
+        wrap.Children.Add(list);
+
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        var add = new Button { Content = "Add folder…", Width = 100 };
+        add.Click += (_, _) =>
+        {
+            var dlg = new OpenFolderDialog { Title = "Choose a folder to scan" };
+            if (dlg.ShowDialog(this) == true &&
+                !_scanFolders.Contains(dlg.FolderName, StringComparer.OrdinalIgnoreCase))
+                _scanFolders.Add(dlg.FolderName);
+        };
+        controls.Children.Add(add);
+
+        var remove = new Button { Content = "Remove", Width = 80, Margin = new Thickness(6, 0, 0, 0) };
+        remove.Click += (_, _) => { if (list.SelectedItem is string s) _scanFolders.Remove(s); };
+        controls.Children.Add(remove);
+        wrap.Children.Add(controls);
         return wrap;
     }
 
@@ -427,15 +475,20 @@ public class SettingsWindow : Window
             TmdbApiKey = _apiKey.Text.Trim(),
             TmdbReadAccessToken = _readToken.Text.Trim(),
             StartWithWindows = _startup.IsChecked == true,
+            StartInTray = _startInTray.IsChecked == true,
             WatchForNewFiles = _watch.IsChecked == true,
             WatchedDrives = _driveChecks.Where(c => c.IsChecked == true)
                 .Select(c => (string)c.Tag).ToList(),
+            RememberFilters = _rememberFilters.IsChecked == true,
             ExcludeSystemDirectories = _excludeSystem.IsChecked == true,
             IgnoredExtensions = _exts.ToList(),
             ExcludedFolders = _excluded.Select(r => r.Model).ToList(),
             CustomCategories = _categories.ToList(),
             CategoryFolders = folders,
-            ColumnLayouts = _incoming.ColumnLayouts,          // owned by the grid
+            AdditionalScanFolders = _scanFolders.ToList(),
+            ColumnLayouts = _incoming.ColumnLayouts,            // owned by the grid
+            LastFilterMode = _incoming.LastFilterMode,          // owned by the filter bar
+            SavedFilters = _incoming.SavedFilters,
             FolderCategoryRules = _incoming.FolderCategoryRules // preserved
         };
         result.SyncLegacyFolders();

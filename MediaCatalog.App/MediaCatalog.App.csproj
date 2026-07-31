@@ -19,6 +19,12 @@
     <UseWPF>true</UseWPF>
     <!-- WinForms enabled only for the NotifyIcon taskbar notification. -->
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\MediaCatalog.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <!-- Also embedded, so the window and the tray icon can load it at runtime. -->
+  <ItemGroup>
+    <Resource Include="Assets\MediaCatalog.ico" />
+  </ItemGroup>
 
 </Project>

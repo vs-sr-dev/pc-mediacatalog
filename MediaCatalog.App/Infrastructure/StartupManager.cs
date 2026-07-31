@@ -8,8 +8,13 @@ public static class StartupManager
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "MediaCatalog";
+    private const string TrayArgument = App.TrayArgument;
 
-    public static void Apply(bool enabled)
+    /// <param name="startInTray">
+    /// Launch hidden in the notification area rather than opening the window — the usual
+    /// choice for something that runs at sign-in to watch for new files.
+    /// </param>
+    public static void Apply(bool enabled, bool startInTray = true)
     {
         try
         {
@@ -20,7 +25,8 @@ public static class StartupManager
             {
                 var exe = Process.GetCurrentProcess().MainModule?.FileName;
                 if (!string.IsNullOrEmpty(exe))
-                    key.SetValue(ValueName, $"\"{exe}\"");
+                    key.SetValue(ValueName,
+                        startInTray ? $"\"{exe}\" {TrayArgument}" : $"\"{exe}\"");
             }
             else if (key.GetValue(ValueName) != null)
             {

@@ -45,6 +45,9 @@ public class FileRow : ObservableObject
     /// <summary>Title provenance: ✓ confirmed by TMDb, ✎ typed by the user.</summary>
     public string TmdbFlag => Model.TitleManuallySet ? "✎" : Model.TmdbVerified ? "✓" : "";
 
+    /// <summary>Whether the file has been filed into its consolidation location.</summary>
+    public string FiledFlag => Model.Consolidated ? "✓" : "";
+
     /// <summary>Value of a named column, for wildcard column filtering.</summary>
     public string ColumnValue(string column) => column switch
     {
@@ -59,6 +62,7 @@ public class FileRow : ObservableObject
         "Path" => FullPath,
         "Dup" => DuplicateFlag,
         "TMDb" => TmdbFlag,
+        "Filed" => Model.Consolidated ? "yes" : "no",
         _ => ""
     };
 
@@ -85,5 +89,7 @@ public class FileRow : ObservableObject
         OnPropertyChanged(nameof(SizeBytes));
         OnPropertyChanged(nameof(Title));
         OnPropertyChanged(nameof(TmdbFlag));
+        OnPropertyChanged(nameof(FiledFlag));
+        OnPropertyChanged(nameof(SeasonEpisode));
     }
 }

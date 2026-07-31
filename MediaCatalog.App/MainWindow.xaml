@@ -7,6 +7,7 @@
         xmlns:vm="clr-namespace:MediaCatalog.App.ViewModels"
         mc:Ignorable="d"
         Title="Media Catalog" Height="680" Width="1160"
+        Icon="Assets/MediaCatalog.ico"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
@@ -34,6 +35,13 @@
                 <ComboBox ItemsSource="{Binding FilterModes}"
                           SelectedItem="{Binding SelectedFilter}"
                           Width="120" VerticalAlignment="Center"/>
+                <Button x:Name="ScanFolderButton" Content="Scan folder…"
+                        Click="OnScanFolderClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Add one folder to the catalogue without re-scanning whole drives."/>
+                <Separator/>
+                <Button x:Name="UndoButton" Content="Undo" Click="OnUndoClick" Padding="8,2"
+                        IsEnabled="{Binding IsIdle}"
+                        ToolTip="Reverse the last operation (up to ten are remembered)."/>
                 <Separator/>
                 <Button x:Name="RelocateButton" Content="Relocate…"
                         Click="OnRelocateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
@@ -51,6 +59,9 @@
                 <Button x:Name="DeepCheckButton" Content="Deep check"
                         Click="OnDeepCheckClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
                         ToolTip="Fully decode files with FFmpeg to detect corruption (slow)."/>
+                <Button x:Name="DeepCheckFolderButton" Content="Deep check folder…"
+                        Click="OnDeepCheckFolderClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Deep check every media file in a folder and its subfolders, catalogued or not."/>
                 <Button x:Name="ValidateTvButton" Content="Validate TV (TMDb)"
                         Click="OnValidateTvClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
                         ToolTip="Validate TV show names against themoviedb.org."/>
@@ -84,6 +95,9 @@
                 <Button x:Name="RefreshCatalogButton" Content="Refresh catalogue" Click="OnRefreshCatalogClick"
                         Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
                         ToolTip="Re-derive metadata for entries that predate the current features. Entries already up to date are skipped — nothing is re-scanned or re-hashed."/>
+                <Button x:Name="RehashButton" Content="Re-hash pending" Click="OnRehashClick"
+                        Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Re-hash files that were catalogued while they may still have been downloading."/>
                 <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
                         VerticalAlignment="Center" Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
             </StackPanel>
@@ -139,10 +153,13 @@
                     <ContextMenu Opened="OnContextMenuOpened">
                         <MenuItem Header="Open file" Click="OnOpenFile"/>
                         <MenuItem Header="Open containing folder" Click="OnOpenFolder"/>
+                        <MenuItem Header="Move to folder…" Click="OnMoveToFolder"/>
                         <MenuItem Header="Remove from results (keeps file on disk)" Click="OnRemoveFromResults"/>
                         <MenuItem Header="Delete file(s) from disk…" Click="OnDeleteFiles"/>
                         <Separator/>
                         <MenuItem Header="Edit title…" Click="OnEditTitle"/>
+                        <MenuItem Header="Edit season / episode…" Click="OnEditSeasonEpisode"/>
+                        <MenuItem Header="Rename file…" Click="OnRenameFile"/>
                         <MenuItem Header="Set category" x:Name="CategoryMenu"/>
                         <MenuItem Header="Set category for this folder…" Click="OnSetCategoryFolder"/>
                         <MenuItem Header="Add new category…" Click="OnAddCategory"/>
@@ -164,6 +181,9 @@
                     <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="46"/>
                     <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"/>
                     <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"/>
+                    <DataGridTextColumn Header="Filed" Binding="{Binding FiledFlag}" Width="46"
+                                        SortMemberPath="Model.Consolidated"
+                                        ToolTipService.ToolTip="Ticked once the file is in its consolidation location."/>
                     <!-- Sorted on the raw byte count, so 900 MB comes before 1.2 GB. -->
                     <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"
                                         SortMemberPath="SizeBytes"/>
@@ -184,8 +204,12 @@
             </StatusBarItem>
             <Separator/>
             <StatusBarItem>
-                <ProgressBar Width="180" Height="16"
-                             Minimum="0" Maximum="{Binding ProgressMax}" Value="{Binding ProgressValue}"/>
+                <StackPanel Orientation="Horizontal">
+                    <ProgressBar Width="180" Height="16"
+                                 Minimum="0" Maximum="{Binding ProgressMax}" Value="{Binding ProgressValue}"/>
+                    <TextBlock Text="{Binding EtaText}" Margin="6,0,0,0" MinWidth="90"
+                               VerticalAlignment="Center" Foreground="DimGray"/>
+                </StackPanel>
             </StatusBarItem>
             <StatusBarItem HorizontalAlignment="Right">
                 <TextBlock Text="{Binding StatusText}" TextTrimming="CharacterEllipsis"/>

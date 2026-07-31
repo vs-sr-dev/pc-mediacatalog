@@ -53,6 +53,7 @@ public class DuplicateManagerWindow : Window
         DockPanel.SetDock(buttons, Dock.Bottom);
         buttons.Children.Add(MakeButton("Copy selected to…", async () => await RelocateAsync(delete: false)));
         buttons.Children.Add(MakeButton("Move selected to…", async () => await RelocateAsync(delete: true)));
+        buttons.Children.Add(MakeButton("Consolidate selected", async () => await ConsolidateAsync()));
         buttons.Children.Add(MakeButton("Delete selected", OnDelete));
         buttons.Children.Add(new Button
         {
@@ -87,6 +88,37 @@ public class DuplicateManagerWindow : Window
 
         var msg = await _vm.RelocateModelsAsync(files, dlg.FolderName, delete);
         MessageBox.Show(this, msg, "Duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
+        Reload();
+    }
+
+    /// <summary>
+    /// File the selected copies where their category says they belong, without the user
+    /// having to work out the destination folder themselves.
+    /// </summary>
+    private async System.Threading.Tasks.Task ConsolidateAsync()
+    {
+        var files = Selected();
+        if (files.Count == 0) { WarnNoSelection(); return; }
+
+        var untitled = _vm.WithoutTitle(files);
+        if (untitled.Count > 0)
+        {
+            var typed = PromptWindow.Ask(this, "Title needed",
+                "These copies have no title yet, and the title decides where they are filed.\n\n" +
+                "Title for them:",
+                System.IO.Path.GetFileNameWithoutExtension(untitled[0].FileName));
+            if (string.IsNullOrWhiteSpace(typed)) return;
+            _vm.SetTitleForModels(untitled, typed.Trim());
+        }
+
+        var move = MessageBox.Show(this,
+            $"Consolidate {files.Count} selected file(s) into the library?\n\n" +
+            "Yes = move (copy, verify, delete original). No = copy only.",
+            "Consolidate", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (move == MessageBoxResult.Cancel) return;
+
+        var outcome = await _vm.ConsolidateModelsAsync(files, move == MessageBoxResult.Yes);
+        MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         Reload();
     }
 
