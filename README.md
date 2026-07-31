@@ -46,7 +46,10 @@ dotnet run --project MediaCatalog.App
 4. To move files: select one or more rows, click **Relocate selected…**, pick a
    destination folder. Files are **copied and hash-verified** first; the original is
    only deleted if you tick *Delete original after verify* (and only after the copy
-   verifies successfully).
+   verifies successfully). Moving **within one volume** skips all that: the file is
+   renamed in place, so a terabyte lands as fast as a byte. The volume is identified by
+   its GUID rather than by drive letter, so a volume mounted at two letters — or into a
+   folder — is still recognised as one drive.
 
 All data is written to **the folder the app runs from** (portable-app style) — the
 catalogue (`catalog.xml`), tool paths (`tools.xml`), and scan state — not to
@@ -155,7 +158,9 @@ filed two different ways. A season/episode code beats the extension: anything th
 the current title, or from the file name without its extension when there isn't one. The
 correction is applied to the selected file, **to every other file that had the same
 title**, and **to its exact duplicates** — so one edit fixes a whole show, and a copy that
-never had a title gets one too. TMDb validation does the same with the name it confirms. A
+never had a title gets one too. *Set title for this folder…* names a whole folder (or a
+parent) at once: the rule sticks, so files scanned into it later inherit the title, and a
+rule on a season folder beats one on the show above it. TMDb validation does the same with the name it confirms. A
 hand-typed title counts as validated (shown as ✎ in the TMDb column; ✓ means TMDb).
 
 **Extras** — specials, featurettes, deleted scenes and behind-the-scenes material are
@@ -189,6 +194,10 @@ flagged as such rather than proposed for another copy. Tick the ones to apply.
 **Filtering** — the filter bar matches any column with wildcards (`*` = any run, `?` = one
 char; plain text = contains). Tick **not** to exclude matches (e.g. *Category not Audio*),
 and **Add filter** to stack several filters at once. The grid scrolls horizontally.
+
+The **view, the filter box and every stacked filter are remembered**, written out as they
+change rather than only at exit, so they come back whatever happened to the app. Turn it
+off with *Remember the view and filters* in Settings.
 
 **Columns** — click a header to sort (**Size** sorts by actual file size, not by its
 printed text). Right-click a header to *set its width in pixels*, fit it to its contents,
@@ -259,6 +268,12 @@ for a download folder holding a film plus its subtitles and extras.
 what the name implies), and *Edit season / episode…* sets or clears the numbering by hand.
 Both apply to duplicates of the same content as well.
 
+Episode numbering is read from any of the ways people write it — `S01E02`, `s01.e02`,
+`1x02`, `S04 E 01`, `Season 1 Episode 01`, `Series 1 Episode 1`, `S1 Episode 1`,
+`Season 2 Ep 3` — while still leaving `Cars 3 (2017)` alone. Whatever any copy of a file
+works out is shared with its duplicates, whether it came from a scan, a catalogue refresh
+or an edit by hand.
+
 **Refresh catalogue** — when a new version learns to work something out from data already
 in the catalogue (new categories, extras linking, better title parsing), **Refresh
 catalogue** re-derives it in place. Entries already stamped with the current feature set are
@@ -272,7 +287,15 @@ right-click → *Open file* / *Open containing folder* (Explorer opens with the 
 catalogue/results; the actual files are left on disk (a later scan re-adds them unless the
 folder or type is excluded).
 
-**Duplicates** — right-click → *Show duplicates* to open a manager listing every identical
+**Duplicates** — matched purely on the **SHA-256 of the contents**, so two copies are one
+duplicate set however differently they are named. A file that is renamed or moved is
+recognised as the same file (same size and timestamp) and keeps its hash, title and
+season/episode rather than being re-read as a stranger — and whatever any copy knows is
+shared with the others, so naming one episode names its twin. Files that have no hash yet
+can't be compared at all, so the status bar says how many there are and **Re-hash pending**
+fixes them.
+
+Right-click → *Show duplicates* opens a manager listing every identical
 copy of a file, with copy / move / **consolidate** / delete. *Consolidate selected* files
 the chosen copies straight into the library, asking for a title first if they have none.
 

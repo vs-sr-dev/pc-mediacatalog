@@ -198,8 +198,9 @@ public class MainViewModel : ObservableObject
         get => _selectedFilter;
         set
         {
-            if (SetProperty(ref _selectedFilter, value))
-                ApplyFilter();
+            if (!SetProperty(ref _selectedFilter, value)) return;
+            ApplyFilter();
+            SaveFilters();
         }
     }
 
@@ -244,18 +245,21 @@ public class MainViewModel : ObservableObject
             Column = _filterColumn, Pattern = _filterPattern, Negate = _filterNegate
         });
         FilterPattern = ""; // clears and re-applies
+        SaveFilters();
     }
 
     public void RemoveFilter(FilterClause clause)
     {
         ActiveFilters.Remove(clause);
         ApplyFilter();
+        SaveFilters();
     }
 
     public void ClearFilters()
     {
         ActiveFilters.Clear();
         FilterPattern = "";
+        SaveFilters();
     }
 
     /// <summary>Put back the view and filters the last session closed with.</summary>
@@ -263,8 +267,14 @@ public class MainViewModel : ObservableObject
     {
         if (!_settings.RememberFilters) return;
 
+        // Set the fields rather than the properties: the rows do not exist yet, and
+        // saving here would simply write back what we are reading.
         if (Enum.TryParse<FilterMode>(_settings.LastFilterMode, out var mode))
-            _selectedFilter = mode;   // set the field: the rows aren't built yet
+            _selectedFilter = mode;
+        if (FilterColumns.Contains(_settings.LastFilterColumn))
+            _filterColumn = _settings.LastFilterColumn;
+        _filterPattern = _settings.LastFilterPattern;
+        _filterNegate = _settings.LastFilterNegate;
 
         foreach (var f in _settings.SavedFilters)
         {
@@ -276,12 +286,18 @@ public class MainViewModel : ObservableObject
         }
     }
 
-    /// <summary>Remember the current view and filters for the next run.</summary>
+    /// <summary>
+    /// Remember the view, the filter box and the committed filters. Called whenever they
+    /// change rather than only at shutdown, so they survive however the app ends.
+    /// </summary>
     public void SaveFilters()
     {
         if (!_settings.RememberFilters) return;
 
         _settings.LastFilterMode = SelectedFilter.ToString();
+        _settings.LastFilterColumn = _filterColumn;
+        _settings.LastFilterPattern = _filterPattern;
+        _settings.LastFilterNegate = _filterNegate;
         _settings.SavedFilters = ActiveFilters
             .Select(f => new SavedFilter { Column = f.Column, Pattern = f.Pattern, Negate = f.Negate })
             .ToList();
@@ -591,9 +607,17 @@ public class MainViewModel : ObservableObject
         var video = _catalog.Files.Count(f => f.Kind == MediaKind.Video);
         var audio = _catalog.Files.Count(f => f.Kind == MediaKind.Audio);
         var nearPart = nearGroups.Count > 0 ? $"  •  {nearGroups.Count} near-dup sets" : "";
+
+        // Duplicate detection is by content hash, so anything unhashed is invisible to it.
+        // Say so rather than quietly under-reporting.
+        var unhashed = _catalog.Files.Count(f => !f.HasHash);
+        var unhashedPart = unhashed > 0
+            ? $"  •  ⚠ {unhashed} not hashed (use Re-hash pending)"
+            : "";
+
         SummaryText =
             $"{_catalog.Files.Count} files  •  {video} video, {audio} audio  •  " +
-            $"{groups.Count} duplicate sets ({Format.Bytes(reclaimable)} reclaimable){nearPart}";
+            $"{groups.Count} duplicate sets ({Format.Bytes(reclaimable)} reclaimable){nearPart}{unhashedPart}";
 
         ApplyFilter();
     }
@@ -1060,6 +1084,67 @@ public class MainViewModel : ObservableObject
         });
 
         StatusText = $"Renamed to '{name}'.";
+        return StatusText;
+    }
+
+    /// <summary>
+    /// Give everything under a folder the same title — a whole show in one go. The rule is
+    /// remembered so files scanned later inherit it, and applied to what is already here.
+    /// </summary>
+    public string SetTitleForFolder(string folder, string title, bool includeSubdirs)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(title))
+            return "Choose a folder and a title first.";
+
+        var clean = title.Trim();
+        var rules = _settings.FolderTitleRules;
+        var previous = rules.Where(r => string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        rules.RemoveAll(r => string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
+        rules.Add(new FolderTitleRule
+        {
+            Path = folder, Title = clean, IncludeSubdirectories = includeSubdirs
+        });
+        _settings.Save(_settingsPath);
+
+        // Apply to the files already catalogued under the folder.
+        var affected = _catalog.Files
+            .Where(f => includeSubdirs
+                ? f.FullPath.StartsWith(folder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase)
+                : string.Equals(Path.GetDirectoryName(f.FullPath), folder.TrimEnd('\\', '/'),
+                    StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var snapshot = affected
+            .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.TitleManuallySet))
+            .ToList();
+
+        var changed = TitleUpdater.Apply(_catalog.Files, affected, clean, manual: true);
+        DuplicateMetadata.Propagate(_catalog.Files);
+        ExtraLinker.Link(_catalog.Files);
+        CatalogStore.Save(_catalog, _catalogPath);
+        RebuildRows();
+
+        Undo.Push($"folder title '{clean}'", () =>
+        {
+            foreach (var s in snapshot)
+            {
+                s.File.TmdbName = s.TmdbName;
+                s.File.TmdbVerified = s.TmdbVerified;
+                s.File.TitleManuallySet = s.TitleManuallySet;
+            }
+            _settings.FolderTitleRules.RemoveAll(r =>
+                string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
+            _settings.FolderTitleRules.AddRange(previous);
+            _settings.Save(_settingsPath);
+            ExtraLinker.Link(_catalog.Files);
+            PersistAndRefresh();
+            return Task.FromResult($"Reverted the folder title '{clean}'.");
+        });
+
+        StatusText = $"Title '{clean}' set for {folder}{(includeSubdirs ? " and its subfolders" : "")} " +
+                     $"— {changed} file(s) updated.";
         return StatusText;
     }
 
@@ -1600,7 +1685,7 @@ public class MainViewModel : ObservableObject
             CatalogStore.Save(_catalog, _catalogPath);
             StatusText =
                 $"Catalogue refresh: {report.Refreshed} entr(ies) updated, {report.Skipped} already current, " +
-                $"{report.Linked} extra(s) linked" +
+                $"{report.Linked} extra(s) linked, {report.Shared} value(s) shared with duplicates" +
                 (report.Pruned > 0 ? $", {report.Pruned} dropped by exclusions." : ".");
         }
         catch (OperationCanceledException)

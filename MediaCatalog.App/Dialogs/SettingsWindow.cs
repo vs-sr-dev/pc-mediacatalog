@@ -488,8 +488,12 @@ public class SettingsWindow : Window
             AdditionalScanFolders = _scanFolders.ToList(),
             ColumnLayouts = _incoming.ColumnLayouts,            // owned by the grid
             LastFilterMode = _incoming.LastFilterMode,          // owned by the filter bar
+            LastFilterColumn = _incoming.LastFilterColumn,
+            LastFilterPattern = _incoming.LastFilterPattern,
+            LastFilterNegate = _incoming.LastFilterNegate,
             SavedFilters = _incoming.SavedFilters,
-            FolderCategoryRules = _incoming.FolderCategoryRules // preserved
+            FolderCategoryRules = _incoming.FolderCategoryRules, // preserved
+            FolderTitleRules = _incoming.FolderTitleRules
         };
         result.SyncLegacyFolders();
 

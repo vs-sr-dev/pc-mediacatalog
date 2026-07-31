@@ -158,6 +158,7 @@
                         <MenuItem Header="Delete file(s) from disk…" Click="OnDeleteFiles"/>
                         <Separator/>
                         <MenuItem Header="Edit title…" Click="OnEditTitle"/>
+                        <MenuItem Header="Set title for this folder…" Click="OnSetTitleFolder"/>
                         <MenuItem Header="Edit season / episode…" Click="OnEditSeasonEpisode"/>
                         <MenuItem Header="Rename file…" Click="OnRenameFile"/>
                         <MenuItem Header="Set category" x:Name="CategoryMenu"/>

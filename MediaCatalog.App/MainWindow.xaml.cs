@@ -521,6 +521,32 @@ public partial class MainWindow : Window
             ? file.EffectiveTitle
             : Path.GetFileNameWithoutExtension(file.FileName);
 
+    private void OnSetTitleFolder(object sender, RoutedEventArgs e)
+    {
+        var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
+        if (row == null)
+        {
+            MessageBox.Show(this, "Select a file in the folder you want to title first.",
+                "Set title for folder", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var folder = Path.GetDirectoryName(row.Model.FullPath);
+        if (string.IsNullOrEmpty(folder)) return;
+
+        // The folder's own name is usually the show name, so offer it as the starting point.
+        var suggestion = !string.IsNullOrWhiteSpace(row.Model.EffectiveTitle)
+            ? row.Model.EffectiveTitle
+            : Path.GetFileName(folder);
+
+        var dlg = new TitleFolderWindow(folder, suggestion) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        var result = _vm.SetTitleForFolder(dlg.SelectedFolder, dlg.Title_, dlg.IncludeSubdirectories);
+        UpdateUndoButton();
+        MessageBox.Show(this, result, "Set title for folder", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
     private void OnEditSeasonEpisode(object sender, RoutedEventArgs e)
     {
         var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
