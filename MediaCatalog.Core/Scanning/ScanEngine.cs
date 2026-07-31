@@ -86,6 +86,10 @@ public class ScanEngine
             }.Save(enumPath);
         }
 
+        // Entries whose file is no longer where we left it: a file that turns up under a
+        // new name with the same size and timestamp is that file, renamed.
+        PrepareMoveDetection(paths);
+
         var total = paths.Count;
         var interval = checkpointInterval ?? TimeSpan.FromSeconds(30);
         var sw = Stopwatch.StartNew();
@@ -120,6 +124,7 @@ public class ScanEngine
 
             var entry = MergeEntry(info);
             MediaClassifier.Classify(entry);
+            Classification.DuplicateMetadata.ApplyFolderTitle(entry, settings);
             QuickIntegrityCheck(entry, info);
 
             // Hash only when needed (new file or content changed). Skip obvious junk.
@@ -153,7 +158,9 @@ public class ScanEngine
         }
         _catalog.RebuildIndex();
 
-        // Specials/featurettes can only be attached once every file is known.
+        // These can only run once every file is known: identical files share what each of
+        // them worked out, and specials attach to the show or film they belong to.
+        Classification.DuplicateMetadata.Propagate(_catalog.Files);
         ExtraLinker.Link(_catalog.Files);
         _catalog.LastScanUtc = DateTime.UtcNow;
 
@@ -169,6 +176,47 @@ public class ScanEngine
     }
 
     /// <summary>
+    /// Catalogue entries whose file is missing from this scan, indexed by size and
+    /// timestamp, so a renamed file can be recognised as the one that vanished.
+    /// </summary>
+    private Dictionary<(long Size, DateTime Modified), List<MediaFile>> _possiblyMoved = new();
+
+    private void PrepareMoveDetection(IReadOnlyCollection<string> paths)
+    {
+        _possiblyMoved = new Dictionary<(long, DateTime), List<MediaFile>>();
+        var seen = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var file in _catalog.Files)
+        {
+            // Only entries worth carrying: still where they were, or never hashed, and
+            // there is nothing to save by matching them up.
+            if (seen.Contains(file.FullPath) || !file.HasHash) continue;
+
+            var key = (file.SizeBytes, file.LastModifiedUtc);
+            if (_possiblyMoved.TryGetValue(key, out var list)) list.Add(file);
+            else _possiblyMoved[key] = new List<MediaFile> { file };
+        }
+    }
+
+    /// <summary>
+    /// The catalogue entry for a file that has been renamed or moved to
+    /// <paramref name="info"/>, or null. Only an unambiguous match counts: if two missing
+    /// files share a size and timestamp, we cannot tell which one this is, and a wrong
+    /// guess would attach the wrong hash.
+    /// </summary>
+    private MediaFile? TakeMovedEntry(FileInfo info)
+    {
+        var key = (info.Length, info.LastWriteTimeUtc);
+        if (!_possiblyMoved.TryGetValue(key, out var candidates) || candidates.Count != 1)
+            return null;
+
+        var entry = candidates[0];
+        _possiblyMoved.Remove(key);
+        _catalog.ByPath.Remove(entry.FullPath);
+        return entry;
+    }
+
+    /// <summary>
     /// Find or create the catalogue entry for a path, refreshing basic attributes.
     /// If the file changed size/date since last scan, invalidate the stored hash.
     /// </summary>
@@ -176,8 +224,18 @@ public class ScanEngine
     {
         if (!_catalog.ByPath.TryGetValue(info.FullName, out var entry))
         {
-            entry = new MediaFile { FullPath = info.FullName };
-            _catalog.Files.Add(entry);
+            // A renamed file keeps everything already known about it — hash included, so
+            // it is still recognised as a duplicate of its copies without being re-read.
+            entry = TakeMovedEntry(info);
+            if (entry == null)
+            {
+                entry = new MediaFile { FullPath = info.FullName };
+                _catalog.Files.Add(entry);
+            }
+            else
+            {
+                entry.FullPath = info.FullName;
+            }
             _catalog.ByPath[info.FullName] = entry;
         }
 

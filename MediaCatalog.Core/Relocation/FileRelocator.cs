@@ -69,6 +69,16 @@ public static class FileRelocator
             if (PathsEqual(destPath, file.FullPath))
                 return new RelocationResult(true, "Already in place.", file.FullPath, AlreadyPresent: true);
 
+            // Moving within one volume is a rename: the data never moves, so a terabyte
+            // lands as fast as a byte. Only worth it when the original is going anyway.
+            if (deleteOriginal && VolumeInfo.SameVolume(file.FullPath, destinationDir) &&
+                TryRename(file.FullPath, destPath))
+            {
+                copiedBytes?.Report(file.SizeBytes);
+                UpdateFile(file, destPath, sourceHash);
+                return new RelocationResult(true, "Moved on the same drive (no copy needed).", destPath);
+            }
+
             await CopyAsync(file.FullPath, destPath, copiedBytes, ct);
 
             var copyHash = await FileHasher.ComputeSha256Async(destPath, ct);
@@ -105,6 +115,24 @@ public static class FileRelocator
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return new RelocationResult(false, $"Relocation failed: {ex.Message}", file.FullPath);
+        }
+    }
+
+    /// <summary>
+    /// Rename the file into place. Returns false — without throwing — if the filesystem
+    /// won't do it (a junction crossing volumes, a permissions problem), leaving the
+    /// caller to fall back on copy-and-verify.
+    /// </summary>
+    private static bool TryRename(string source, string destination)
+    {
+        try
+        {
+            File.Move(source, destination, overwrite: false);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
         }
     }
 

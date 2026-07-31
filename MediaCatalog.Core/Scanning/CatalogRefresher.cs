@@ -10,7 +10,8 @@ public record RefreshProgress(int Done, int Total, string Current);
 /// <param name="Skipped">Entries that already had everything this build knows about.</param>
 /// <param name="Linked">Extras attached to the film/episode they belong to.</param>
 /// <param name="Pruned">Entries dropped because they now sit under an exclusion.</param>
-public record RefreshReport(int Refreshed, int Skipped, int Linked, int Pruned);
+/// <param name="Shared">Values copied between identical files (titles, season/episode).</param>
+public record RefreshReport(int Refreshed, int Skipped, int Linked, int Pruned, int Shared = 0);
 
 /// <summary>
 /// Brings an existing catalogue up to date with features added since it was built —
@@ -59,15 +60,18 @@ public static class CatalogRefresher
             // TMDb results, hashes and fingerprints are all stored elsewhere on the
             // entry and survive untouched.
             MediaClassifier.Classify(file);
+            DuplicateMetadata.ApplyFolderTitle(file, settings);
             file.FeatureVersion = CurrentFeatureVersion;
         }
 
-        // Linking needs the whole catalogue: an extra's owner may be an entry that was
-        // already up to date and therefore skipped above.
+        // Both of these need the whole catalogue: an extra's owner — or the copy that
+        // knows which episode this is — may be an entry that was already up to date and
+        // therefore skipped above.
+        var shared = DuplicateMetadata.Propagate(catalog.Files);
         var linked = ExtraLinker.Link(catalog.Files);
 
         catalog.RebuildIndex();
         progress?.Report(new RefreshProgress(stale.Count, stale.Count, string.Empty));
-        return new RefreshReport(stale.Count, skipped, linked, pruned);
+        return new RefreshReport(stale.Count, skipped, linked, pruned, shared);
     }
 }

@@ -18,6 +18,14 @@ public class FolderCategoryRule
     public bool IncludeSubdirectories { get; set; } = true;
 }
 
+/// <summary>A rule giving everything under a folder the same programme/film title.</summary>
+public class FolderTitleRule
+{
+    public string Path { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public bool IncludeSubdirectories { get; set; } = true;
+}
+
 /// <summary>Maps a category to the consolidation folder its files should end up in.</summary>
 public class CategoryConsolidation
 {
@@ -92,6 +100,12 @@ public class AppSettings
     /// <summary>The view (All/Video/Movies/…) that was selected when the app last closed.</summary>
     public string LastFilterMode { get; set; } = string.Empty;
 
+    // The filter box as it was left: the column, what was typed in it, and whether it
+    // was negated. Stored apart from the committed clauses below.
+    public string LastFilterColumn { get; set; } = string.Empty;
+    public string LastFilterPattern { get; set; } = string.Empty;
+    public bool LastFilterNegate { get; set; }
+
     [XmlArray("SavedFilters"), XmlArrayItem("Filter")]
     public List<SavedFilter> SavedFilters { get; set; } = new();
 
@@ -112,6 +126,10 @@ public class AppSettings
 
     [XmlArray("FolderCategoryRules"), XmlArrayItem("Rule")]
     public List<FolderCategoryRule> FolderCategoryRules { get; set; } = new();
+
+    /// <summary>Titles applied to everything under a folder — a whole show in one go.</summary>
+    [XmlArray("FolderTitleRules"), XmlArrayItem("Rule")]
+    public List<FolderTitleRule> FolderTitleRules { get; set; } = new();
 
     // --- Helpers -----------------------------------------------------------
 
@@ -289,20 +307,32 @@ public class AppSettings
     }
 
     /// <summary>Category rule matching a path, preferring the deepest (most specific) folder.</summary>
-    public string? CategoryForPath(string fullPath)
+    public string? CategoryForPath(string fullPath) =>
+        BestRule(FolderCategoryRules.Select(r => (r.Path, r.IncludeSubdirectories, Value: r.Category)), fullPath);
+
+    /// <summary>Title rule matching a path, preferring the deepest (most specific) folder.</summary>
+    public string? TitleForPath(string fullPath) =>
+        BestRule(FolderTitleRules.Select(r => (r.Path, r.IncludeSubdirectories, Value: r.Title)), fullPath);
+
+    /// <summary>
+    /// The value of the deepest folder rule covering <paramref name="fullPath"/>: a rule
+    /// on a season folder beats one on the show, which beats one on the whole library.
+    /// </summary>
+    private static string? BestRule(
+        IEnumerable<(string Path, bool IncludeSubdirectories, string Value)> rules, string fullPath)
     {
         string? best = null;
         var bestLen = -1;
-        foreach (var rule in FolderCategoryRules)
+        foreach (var rule in rules)
         {
-            if (string.IsNullOrEmpty(rule.Path)) continue;
+            if (string.IsNullOrEmpty(rule.Path) || string.IsNullOrWhiteSpace(rule.Value)) continue;
             var matches = rule.IncludeSubdirectories
                 ? IsUnder(fullPath, rule.Path)
                 : string.Equals(System.IO.Path.GetDirectoryName(fullPath),
                     rule.Path.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
             if (matches && rule.Path.Length > bestLen)
             {
-                best = rule.Category;
+                best = rule.Value;
                 bestLen = rule.Path.Length;
             }
         }

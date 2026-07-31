@@ -11,10 +11,14 @@ namespace MediaCatalog.Core.Classification;
 /// </summary>
 public static class MediaClassifier
 {
-    // S01E02 / s1e2 / S01.E02 / S01 E02
+    // Every way people write a season and episode together:
+    //   S01E02, s1e2, S01.E02, S01 E02, "S04 E 01",
+    //   "Season 1 Episode 01", "Series 1 Episode 1", "S1 Episode 1", "Season 2 Ep 3".
+    // The word forms are matched at a word boundary so "Friends 1 e 2" cannot look like
+    // season 1 episode 2 on the strength of a trailing "s".
     private static readonly Regex SeasonEpisode = new(
-        @"[Ss](?<s>\d{1,2})[\s._-]*[Ee](?<e>\d{1,3})",
-        RegexOptions.Compiled);
+        @"\b(?:s|se|season|series)\s*\.?\s*(?<s>\d{1,3})\s*[._\-]?\s*(?:e|ep|eps|episode|episodes|pt|part)\s*\.?\s*(?<e>\d{1,3})\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // 1x02 / 01x02
     private static readonly Regex XFormat = new(
