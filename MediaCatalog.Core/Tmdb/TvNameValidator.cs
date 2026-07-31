@@ -75,35 +75,59 @@ public class TvNameValidator
         return validated;
     }
 
+    // Trailing "(2004)" / "[1080p]" and similar decoration on a folder name.
+    private static readonly Regex TrailingBracket = new(
+        @"[\(\[\{][^\)\]\}]*[\)\]\}]\s*$", RegexOptions.Compiled);
+
     /// <summary>
-    /// Names to try, in order: the parsed episode title, then each ancestor directory
-    /// name (skipping season folders, single-letter buckets and the drive root).
+    /// Names to try, in order: the parsed episode title, then **every** ancestor directory
+    /// name up to the drive root. Season folders and single-letter buckets are tried last
+    /// rather than skipped, so a show that really is called "Ed" or "Season 9" can still be
+    /// found. Each name is also offered with trailing decoration — "(2004)", "[1080p]" —
+    /// stripped, since folders are commonly annotated that way.
     /// </summary>
     public static IEnumerable<string> Candidates(MediaFile file)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var deferred = new List<string>();
 
-        string? Clean(string s)
+        static string? Clean(string s)
         {
             var t = s.Replace('.', ' ').Replace('_', ' ').Trim();
             return string.IsNullOrWhiteSpace(t) ? null : t;
         }
 
-        if (Clean(file.ParsedTitle) is { } title && seen.Add(title))
-            yield return title;
+        IEnumerable<string> Variants(string raw)
+        {
+            if (Clean(raw) is not { } cleaned) yield break;
+            if (seen.Add(cleaned)) yield return cleaned;
+
+            var stripped = TrailingBracket.Replace(cleaned, "").Trim();
+            if (stripped.Length > 0 && seen.Add(stripped)) yield return stripped;
+        }
+
+        foreach (var candidate in Variants(file.ParsedTitle)) yield return candidate;
 
         var dir = Path.GetDirectoryName(file.FullPath);
         while (!string.IsNullOrEmpty(dir))
         {
             var name = Path.GetFileName(dir);
             dir = Path.GetDirectoryName(dir);
-
             if (string.IsNullOrEmpty(name)) continue;   // drive root (e.g. "X:\")
-            if (name.Length <= 1) continue;             // single-letter bucket
-            if (SeasonFolder.IsMatch(name)) continue;   // "Season 01"
 
-            if (Clean(name) is { } candidate && seen.Add(candidate))
-                yield return candidate;
+            // Unlikely names are held back rather than dropped: if nothing else matches,
+            // they are still better than giving up.
+            if (name.Length <= 1 || SeasonFolder.IsMatch(name))
+            {
+                deferred.Add(name);
+                continue;
+            }
+
+            foreach (var candidate in Variants(name)) yield return candidate;
         }
+
+        foreach (var name in deferred)
+            foreach (var candidate in Variants(name))
+                yield return candidate;
     }
 }

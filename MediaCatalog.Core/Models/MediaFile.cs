@@ -59,6 +59,18 @@ public class MediaFile
     /// </summary>
     public int FeatureVersion { get; set; }
 
+    /// <summary>
+    /// True once the file lives in its consolidation location. Kept on the entry so the
+    /// results can be filtered by what has and hasn't been filed yet.
+    /// </summary>
+    public bool Consolidated { get; set; }
+
+    /// <summary>
+    /// Set for files the watcher picked up that may still have been downloading, so their
+    /// hash (and size) cannot be trusted until they are re-checked.
+    /// </summary>
+    public bool AwaitingDownload { get; set; }
+
     // --- Content analysis (populated on demand via external tools) ---
     /// <summary>Media duration in seconds, from ffprobe. 0 if unknown.</summary>
     public double DurationSeconds { get; set; }

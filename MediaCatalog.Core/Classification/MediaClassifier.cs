@@ -63,16 +63,34 @@ public static class MediaClassifier
         if (yearMatch.Success && int.TryParse(yearMatch.Groups["y"].Value, out var y))
             file.Year = y;
 
+        var se = SeasonEpisode.Match(name);
+        var xf = XFormat.Match(name);
+
         if (file.Kind != MediaKind.Video)
         {
-            // Audio: just derive a cleaned title.
+            // Not a video by extension, but an explicit episode code still identifies the
+            // content — record it so the category can pick it up.
+            if (se.Success)
+            {
+                file.Season = ParseInt(se.Groups["s"].Value);
+                file.Episode = ParseInt(se.Groups["e"].Value);
+                file.ParsedTitle = CleanTitle(name, se.Index);
+                return;
+            }
+            if (xf.Success)
+            {
+                file.Season = ParseInt(xf.Groups["s"].Value);
+                file.Episode = ParseInt(xf.Groups["e"].Value);
+                file.ParsedTitle = CleanTitle(name, xf.Index);
+                return;
+            }
+
+            // Audio and friends: just derive a cleaned title.
             file.ParsedTitle = CleanTitle(name, cutAt: -1);
             return;
         }
 
         int titleCut = -1;
-        var se = SeasonEpisode.Match(name);
-        var xf = XFormat.Match(name);
 
         if (se.Success)
         {

@@ -4,7 +4,10 @@ using MediaCatalog.Core.Tools;
 
 namespace MediaCatalog.Core.Fingerprinting;
 
-public record AnalysisProgress(int Done, int Total, string CurrentFile);
+/// <param name="BytesDone">Bytes of media already processed — a far better basis for an
+/// ETA than the file count, since decode time tracks size rather than number of files.</param>
+public record AnalysisProgress(
+    int Done, int Total, string CurrentFile, long BytesDone = 0, long BytesTotal = 0);
 
 /// <summary>
 /// Batch content analysis backed by the external tools: probe duration/integrity,
@@ -34,11 +37,15 @@ public class ContentAnalysisEngine
         CancellationToken ct = default)
     {
         var total = files.Count;
+        var totalBytes = files.Sum(f => f.SizeBytes);
+        long doneBytes = 0;
+
         for (var i = 0; i < total; i++)
         {
             ct.ThrowIfCancellationRequested();
             var file = files[i];
-            progress?.Report(new AnalysisProgress(i, total, file.FileName));
+            progress?.Report(new AnalysisProgress(i, total, file.FileName, doneBytes, totalBytes));
+            doneBytes += file.SizeBytes;
 
             if (!File.Exists(file.FullPath)) continue;
 
@@ -74,6 +81,6 @@ public class ContentAnalysisEngine
             }
         }
 
-        progress?.Report(new AnalysisProgress(total, total, string.Empty));
+        progress?.Report(new AnalysisProgress(total, total, string.Empty, totalBytes, totalBytes));
     }
 }

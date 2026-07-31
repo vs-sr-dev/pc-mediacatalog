@@ -33,6 +33,14 @@ public class ColumnLayout
     public bool Visible { get; set; } = true;
 }
 
+/// <summary>A results filter as persisted between runs.</summary>
+public class SavedFilter
+{
+    public string Column { get; set; } = string.Empty;
+    public string Pattern { get; set; } = string.Empty;
+    public bool Negate { get; set; }
+}
+
 /// <summary>
 /// User preferences persisted to <c>settings.xml</c> in the app folder. Separate from
 /// <see cref="Tools.ToolSettings"/> (tools.xml) so existing installs keep working; this
@@ -77,6 +85,26 @@ public class AppSettings
     // --- Results grid ---
     [XmlArray("Columns"), XmlArrayItem("Column")]
     public List<ColumnLayout> ColumnLayouts { get; set; } = new();
+
+    /// <summary>Restore the previous session's filters when the app starts.</summary>
+    public bool RememberFilters { get; set; } = true;
+
+    /// <summary>The view (All/Video/Movies/…) that was selected when the app last closed.</summary>
+    public string LastFilterMode { get; set; } = string.Empty;
+
+    [XmlArray("SavedFilters"), XmlArrayItem("Filter")]
+    public List<SavedFilter> SavedFilters { get; set; } = new();
+
+    // --- Extra locations ---
+    /// <summary>
+    /// Folders scanned in addition to whole drives — a downloads folder, say — so new
+    /// arrivals can be picked up without re-walking a drive.
+    /// </summary>
+    [XmlArray("ScanFolders"), XmlArrayItem("Folder")]
+    public List<string> AdditionalScanFolders { get; set; } = new();
+
+    /// <summary>Start hidden in the notification area when launched at Windows sign-in.</summary>
+    public bool StartInTray { get; set; } = true;
 
     // --- Categories ---
     [XmlArray("CustomCategories"), XmlArrayItem("Category")]

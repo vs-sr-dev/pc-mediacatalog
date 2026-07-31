@@ -65,6 +65,26 @@ public static class ConsolidationPlanner
     public const string ExtrasFolder = "Extras";
 
     /// <summary>
+    /// True when the file already sits somewhere under one of the configured
+    /// consolidation folders — i.e. it has been filed into the library.
+    /// </summary>
+    public static bool IsInConsolidationLocation(MediaFile file, AppSettings settings)
+    {
+        if (string.IsNullOrEmpty(file.FullPath)) return false;
+
+        foreach (var folder in settings.CategoryFolders.Select(c => c.Folder)
+                     .Concat(new[] { settings.TvConsolidationDir, settings.FilmConsolidationDir }))
+        {
+            if (string.IsNullOrWhiteSpace(folder)) continue;
+            var root = folder.TrimEnd('\\', '/');
+            if (file.FullPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                file.FullPath.StartsWith(root + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// The file name to use at the destination. Episodes are prefixed with their episode
     /// number ("01 - Name.mkv") so a season folder sorts into broadcast order; everything
     /// else keeps its name. Re-consolidating an already-prefixed file is a no-op.

@@ -56,12 +56,20 @@ public static class CategoryResolver
     }
 
     /// <summary>The auto-detected category, ignoring any user override.</summary>
-    public static string Auto(MediaFile file) => file.Kind switch
+    public static string Auto(MediaFile file)
     {
-        MediaKind.Video => file.VideoCategory.ToString(),
-        MediaKind.Audio => Audio,
-        _ => Unknown
-    };
+        // A season/episode code is the strongest signal there is: whatever the extension
+        // suggests, a file that says S02E05 is an episode of something.
+        if (file is { Season: not null, Episode: not null } && !file.IsExtra)
+            return TvShow;
+
+        return file.Kind switch
+        {
+            MediaKind.Video => file.VideoCategory.ToString(),
+            MediaKind.Audio => Audio,
+            _ => Unknown
+        };
+    }
 
     /// <summary>Built-in categories plus the user's custom ones, de-duplicated.</summary>
     public static IReadOnlyList<string> All(AppSettings settings)

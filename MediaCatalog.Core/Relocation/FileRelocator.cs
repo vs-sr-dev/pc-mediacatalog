@@ -27,12 +27,14 @@ public static class FileRelocator
 {
     /// <param name="newFileName">Rename on arrival (e.g. an episode-numbered name); null keeps the current name.</param>
     /// <param name="onDuplicate">What to do when something already occupies the destination name.</param>
+    /// <param name="copiedBytes">Reports bytes as they are copied, for progress and ETA.</param>
     public static async Task<RelocationResult> RelocateAsync(
         MediaFile file,
         string destinationDir,
         bool deleteOriginal,
         string? newFileName = null,
         DuplicatePolicy onDuplicate = DuplicatePolicy.Rename,
+        IProgress<long>? copiedBytes = null,
         CancellationToken ct = default)
     {
         if (!File.Exists(file.FullPath))
@@ -67,7 +69,7 @@ public static class FileRelocator
             if (PathsEqual(destPath, file.FullPath))
                 return new RelocationResult(true, "Already in place.", file.FullPath, AlreadyPresent: true);
 
-            await CopyAsync(file.FullPath, destPath, ct);
+            await CopyAsync(file.FullPath, destPath, copiedBytes, ct);
 
             var copyHash = await FileHasher.ComputeSha256Async(destPath, ct);
             if (!string.Equals(copyHash, sourceHash, StringComparison.OrdinalIgnoreCase))
@@ -113,14 +115,30 @@ public static class FileRelocator
         file.Sha256 = hash;
     }
 
-    private static async Task CopyAsync(string source, string dest, CancellationToken ct)
+    private static async Task CopyAsync(
+        string source, string dest, IProgress<long>? copiedBytes, CancellationToken ct)
     {
         const int bufferSize = 1 << 20;
         await using var src = new FileStream(source, FileMode.Open, FileAccess.Read,
             FileShare.Read, bufferSize, useAsync: true);
         await using var dst = new FileStream(dest, FileMode.CreateNew, FileAccess.Write,
             FileShare.None, bufferSize, useAsync: true);
-        await src.CopyToAsync(dst, bufferSize, ct);
+
+        if (copiedBytes == null)
+        {
+            await src.CopyToAsync(dst, bufferSize, ct);
+            return;
+        }
+
+        // Copy by hand so progress can be reported as it goes: on multi-gigabyte files a
+        // per-file progress bar would sit still for minutes at a time.
+        var buffer = new byte[bufferSize];
+        int read;
+        while ((read = await src.ReadAsync(buffer, ct)) > 0)
+        {
+            await dst.WriteAsync(buffer.AsMemory(0, read), ct);
+            copiedBytes.Report(read);
+        }
     }
 
     /// <summary>

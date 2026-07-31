@@ -39,6 +39,11 @@ public class ScanEngine
     /// When true, reuse the on-disk enumeration snapshot (if it matches the roots) and
     /// continue from <paramref name="resumeFromIndex"/> instead of re-walking the drives.
     /// </param>
+    /// <param name="pruneMissing">
+    /// When true (a full drive scan) catalogue entries that were not seen are removed, as
+    /// the roots are authoritative. Set false when scanning one folder into an existing
+    /// catalogue: everything outside that folder is simply not in scope.
+    /// </param>
     public async Task<ScanReport> ScanAsync(
         IReadOnlyList<string> roots,
         IProgress<ScanProgress>? progress = null,
@@ -47,6 +52,7 @@ public class ScanEngine
         bool resume = false,
         int resumeFromIndex = 0,
         AppSettings? settings = null,
+        bool pruneMissing = true,
         CancellationToken ct = default)
     {
         settings ??= new AppSettings();
@@ -139,9 +145,12 @@ public class ScanEngine
         // Full pass completed. The enumeration snapshot (minus anything that turned out to
         // be missing) is the authoritative set of files that exist, so pruning here is
         // correct even across a restart. A partial/paused pass never reaches this point.
-        var existing = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
-        foreach (var m in missing) existing.Remove(m);
-        _catalog.Files.RemoveAll(f => !existing.Contains(f.FullPath));
+        if (pruneMissing)
+        {
+            var existing = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+            foreach (var m in missing) existing.Remove(m);
+            _catalog.Files.RemoveAll(f => !existing.Contains(f.FullPath));
+        }
         _catalog.RebuildIndex();
 
         // Specials/featurettes can only be attached once every file is known.
