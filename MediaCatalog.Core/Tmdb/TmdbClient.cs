@@ -4,13 +4,14 @@ using System.Text.Json;
 namespace MediaCatalog.Core.Tmdb;
 
 /// <summary>
-/// Minimal TMDb (themoviedb.org) v3 client for validating TV show names. Uses the
-/// shared <see cref="RateLimiter"/> and <see cref="TmdbCache"/>: cached queries never
+/// Minimal TMDb (themoviedb.org) v3 client for validating programme and film names. Uses
+/// the shared <see cref="RateLimiter"/> and <see cref="TmdbCache"/>: cached queries never
 /// hit the network, and live queries are spaced by the rate limit.
 /// </summary>
 public class TmdbClient
 {
     private const string SearchTvUrl = "https://api.themoviedb.org/3/search/tv";
+    private const string SearchMovieUrl = "https://api.themoviedb.org/3/search/movie";
 
     private readonly string _apiKey;
     private readonly string _readToken;
@@ -37,12 +38,24 @@ public class TmdbClient
     /// TMDb (rate-limited) and caches the outcome. Network/HTTP errors are returned as a
     /// non-result and *not* cached, so they can be retried later.
     /// </summary>
-    public async Task<TmdbResult> ValidateTvAsync(string name, CancellationToken ct = default)
+    public Task<TmdbResult> ValidateTvAsync(string name, CancellationToken ct = default) =>
+        SearchAsync(SearchTvUrl, TmdbCache.Tv, "name", name, ct);
+
+    /// <summary>
+    /// The same for a film. TMDb keeps films and programmes in separate indexes and calls
+    /// the field <c>title</c> rather than <c>name</c>, which is the only real difference.
+    /// </summary>
+    public Task<TmdbResult> ValidateMovieAsync(string name, CancellationToken ct = default) =>
+        SearchAsync(SearchMovieUrl, TmdbCache.Movie, "title", name, ct);
+
+    /// <param name="nameField">Which field of a result carries the canonical name.</param>
+    private async Task<TmdbResult> SearchAsync(
+        string endpoint, string kind, string nameField, string name, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(name))
             return new TmdbResult(false, string.Empty);
 
-        if (_cache.TryGet(name, out var cached))
+        if (_cache.TryGet(name, kind, out var cached))
             return cached;
 
         if (!IsConfigured)
@@ -54,7 +67,7 @@ public class TmdbClient
         {
             // Prefer the v4 Bearer token; otherwise fall back to the v3 api_key query param.
             var useBearer = !string.IsNullOrWhiteSpace(_readToken);
-            var url = $"{SearchTvUrl}?query={Uri.EscapeDataString(name)}";
+            var url = $"{endpoint}?query={Uri.EscapeDataString(name)}";
             if (!useBearer)
                 url += $"&api_key={Uri.EscapeDataString(_apiKey)}";
 
@@ -75,7 +88,7 @@ public class TmdbClient
                 results.ValueKind == JsonValueKind.Array &&
                 results.GetArrayLength() > 0)
             {
-                var canonical = results[0].TryGetProperty("name", out var n)
+                var canonical = results[0].TryGetProperty(nameField, out var n)
                     ? n.GetString() ?? name
                     : name;
                 result = new TmdbResult(true, canonical);
@@ -85,7 +98,7 @@ public class TmdbClient
                 result = new TmdbResult(false, string.Empty);
             }
 
-            _cache.Put(name, result); // cache definitive hits and misses
+            _cache.Put(name, kind, result); // cache definitive hits and misses
             return result;
         }
         catch (OperationCanceledException)

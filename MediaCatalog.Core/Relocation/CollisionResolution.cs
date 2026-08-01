@@ -28,13 +28,18 @@ public enum CollisionChoice
 /// <param name="IncomingDuplicates">Other catalogued copies of the incoming file.</param>
 /// <param name="ExistingDuplicates">Other catalogued copies of the destination file.</param>
 /// <param name="SameContent">True when the two are byte-for-byte the same file.</param>
+/// <param name="Operation">
+/// What was being done, as a past participle — "moved", "consolidated" — so the dialog can
+/// name the operation the user actually started rather than guessing at it.
+/// </param>
 public record CollisionRequest(
     MediaFile Incoming,
     string DestinationPath,
     MediaFile? Existing,
     IReadOnlyList<MediaFile> IncomingDuplicates,
     IReadOnlyList<MediaFile> ExistingDuplicates,
-    bool SameContent);
+    bool SameContent,
+    string Operation = "moved");
 
 /// <param name="DeleteDuplicates">
 /// Delete every other copy of both files once the keeper has been decided — the tidy-up

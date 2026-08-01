@@ -1105,15 +1105,10 @@ public class MainViewModel : ObservableObject
 
     // --- Titles -----------------------------------------------------------
 
-    /// <summary>How many other entries share this file's current title.</summary>
-    public int CountSharingTitle(MediaFile file) =>
-        TitleUpdater.SameTitleAs(_catalog.Files, file).Count;
-
     /// <summary>
-    /// Apply a hand-typed title to the selected files, to everything that shared their
-    /// previous title, and to their exact duplicates — a copy of a file that had no title
-    /// yet would otherwise be left behind. A corrected title counts as validated, like a
-    /// TMDb result does.
+    /// Apply a hand-typed title to the selected files and to their byte-identical copies —
+    /// a copy of a file that had no title yet would otherwise be left behind. A corrected
+    /// title counts as validated, like a TMDb result does.
     /// </summary>
     public string SetTitleForFiles(IReadOnlyList<FileRow> rows, string newTitle)
     {
@@ -1126,22 +1121,16 @@ public class MainViewModel : ObservableObject
         if (targets.Count == 0 || string.IsNullOrWhiteSpace(newTitle)) return "Nothing to update.";
         var title = newTitle.Trim();
 
-        // Duplicates are the same content, so they get the title whether or not they
-        // currently share the (possibly empty) old one.
+        // The selected files and their byte-identical copies — and nothing else. Two files
+        // can carry the same title and still be different things, so sharing a title is no
+        // reason to be renamed together; sharing a hash is.
         var withDuplicates = targets.Concat(DuplicatesOf(targets)).Distinct().ToList();
 
-        var snapshot = _catalog.Files
+        var snapshot = withDuplicates
             .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified, f.TitleManuallySet, f.ParsedTitle))
             .ToList();
 
-        // Every file that ends up carrying the new title, not only the ones selected: the
-        // rest of the show is swept along by the title change and should be swept along by
-        // the rename that follows it.
-        var before = _catalog.Files
-            .Where(f => !string.Equals(f.EffectiveTitle.Trim(), title, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        var changed = TitleUpdater.Apply(_catalog.Files, withDuplicates, title, manual: true);
+        var changed = TitleUpdater.Set(withDuplicates, title, manual: true);
 
         // Extras take their title from what they hang off, so refresh the links.
         ExtraLinker.Link(_catalog.Files);
@@ -1149,8 +1138,7 @@ public class MainViewModel : ObservableObject
         // The name on disk follows the title. A corrected title that leaves the old name
         // in place is only half a correction — and the old name is what the next scan
         // would read the title back out of.
-        var renamed = RenameToMatchTitles(
-            before.Where(f => string.Equals(f.EffectiveTitle.Trim(), title, StringComparison.OrdinalIgnoreCase)));
+        var renamed = RenameToMatchTitles(withDuplicates);
 
         CatalogStore.Save(_catalog, _catalogPath);
         RebuildRows();
@@ -1474,18 +1462,21 @@ public class MainViewModel : ObservableObject
             return StatusText;
         }
 
-        var snapshot = _catalog.Files
+        // The folder's files and their identical copies wherever those live — but not
+        // files elsewhere that merely share the old title, which may be something else.
+        var withDuplicates = affected.Concat(DuplicatesOf(affected)).Distinct().ToList();
+
+        var snapshot = withDuplicates
             .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified, f.TitleManuallySet))
             .ToList();
 
-        var changed = TitleUpdater.Apply(_catalog.Files, affected, clean, manual: true);
+        var changed = TitleUpdater.Set(withDuplicates, clean, manual: true);
         DuplicateMetadata.Propagate(_catalog.Files);
         ExtraLinker.Link(_catalog.Files);
 
         // Names on disk follow the title here too, so a whole show renamed in one go comes
         // out consistent rather than half-corrected.
-        var renamed = RenameToMatchTitles(_catalog.Files
-            .Where(f => string.Equals(f.EffectiveTitle.Trim(), clean, StringComparison.OrdinalIgnoreCase)));
+        var renamed = RenameToMatchTitles(withDuplicates);
 
         // Any leftover rule for this folder has just been made redundant.
         var previous = _settings.FolderTitleRules
@@ -1732,22 +1723,29 @@ public class MainViewModel : ObservableObject
 
         var skipped = 0;
         var origins = toFile.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
+        var run = new CollisionRun("consolidated");
 
         var report = toFile.Count == 0
             ? new OperationReport(0, 0, new List<MediaFile>())
-            : await RunFileOperationAsync(toFile, "Consolidating", (file, bytes) =>
+            : await RunFileOperationAsync(toFile, "Consolidating", async (file, bytes) =>
             {
+                if (run.Cancelled)
+                    return new RelocationResult(false, "Cancelled.", file.FullPath);
+
                 var category = CategoryResolver.Effective(file, _settings);
                 var destDir = ConsolidationPlanner.PlanDirectory(file, category, _settings);
                 if (destDir == null)
                 {
                     skipped++;
-                    return Task.FromResult(new RelocationResult(false, "No category or target folder.", file.FullPath));
+                    return new RelocationResult(false, "No category or target folder.", file.FullPath);
                 }
-                return FileRelocator.RelocateAsync(
-                    file, destDir, deleteOriginal,
-                    ConsolidationPlanner.PlanFileName(file, category), DuplicatePolicy.Skip, bytes);
+
+                var name = ConsolidationPlanner.PlanFileName(file, category);
+                return await FileInLibraryAsync(file, destDir, name, deleteOriginal, run, bytes);
             });
+
+        var tidied = await FinishCollisionRunAsync(run);
+        skipped += run.Skipped;
 
         // Anything that arrived is now filed; anything that moved for a corrected title is
         // filed under the new one.
@@ -1762,12 +1760,14 @@ public class MainViewModel : ObservableObject
 
         var failed = Math.Max(0, report.Failed - skipped);
         var parts = new List<string> { $"{report.Succeeded} moved" };
-        if (skipped > 0) parts.Add($"{skipped} skipped (no category/target)");
+        if (skipped > 0) parts.Add($"{skipped} skipped");
         if (alreadyConsolidated.Count > 0) parts.Add($"{alreadyConsolidated.Count} already consolidated");
         if (report.AlreadyPresent.Count > 0) parts.Add($"{report.AlreadyPresent.Count} already in the library");
+        if (tidied > 0) parts.Add($"{tidied} duplicate(s) removed");
         if (failed > 0) parts.Add($"{failed} failed");
 
-        var msg = "Consolidation: " + string.Join(", ", parts) + ".";
+        var msg = "Consolidation: " + string.Join(", ", parts) +
+                  (run.Cancelled ? " (cancelled part-way)." : ".");
         StatusText = msg;
         return new ConsolidationOutcome(
             report.Succeeded, skipped, failed, report.AlreadyPresent, msg, alreadyConsolidated);
@@ -1824,16 +1824,22 @@ public class MainViewModel : ObservableObject
         var byFile = chosen.ToDictionary(s => s.File, s => s.ProposedPath);
         var files = chosen.Select(s => s.File).ToList();
         var origins = files.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
+        var run = new CollisionRun("consolidated");
 
-        var report = await RunFileOperationAsync(files, "Consolidating", (file, bytes) =>
+        var report = await RunFileOperationAsync(files, "Consolidating", async (file, bytes) =>
         {
+            if (run.Cancelled)
+                return new RelocationResult(false, "Cancelled.", file.FullPath);
+
             var proposed = byFile[file];
             var destDir = Path.GetDirectoryName(proposed);
             return string.IsNullOrEmpty(destDir)
-                ? Task.FromResult(new RelocationResult(false, "No destination folder.", file.FullPath))
-                : FileRelocator.RelocateAsync(file, destDir, deleteOriginal,
-                    Path.GetFileName(proposed), DuplicatePolicy.Skip, bytes);
+                ? new RelocationResult(false, "No destination folder.", file.FullPath)
+                : await FileInLibraryAsync(file, destDir, Path.GetFileName(proposed),
+                    deleteOriginal, run, bytes);
         });
+
+        var tidied = await FinishCollisionRunAsync(run);
 
         foreach (var file in files)
             file.Consolidated = ConsolidationPlanner.IsCorrectlyFiled(
@@ -1844,8 +1850,14 @@ public class MainViewModel : ObservableObject
             PushMoveUndo(origins.Where(o => !string.Equals(o.File.FullPath, o.FullPath,
                 StringComparison.OrdinalIgnoreCase)).ToList());
 
-        var msg = $"Consolidation: {report.Succeeded} moved, {report.AlreadyPresent.Count} " +
-                  $"already in the library, {report.Failed} failed.";
+        var parts = new List<string> { $"{report.Succeeded} moved" };
+        if (report.AlreadyPresent.Count > 0) parts.Add($"{report.AlreadyPresent.Count} already in the library");
+        if (run.Skipped > 0) parts.Add($"{run.Skipped} skipped");
+        if (tidied > 0) parts.Add($"{tidied} duplicate(s) removed");
+        if (report.Failed > 0) parts.Add($"{report.Failed} failed");
+
+        var msg = "Consolidation: " + string.Join(", ", parts) +
+                  (run.Cancelled ? " (cancelled part-way)." : ".");
         StatusText = msg;
         return new ConsolidationOutcome(report.Succeeded, 0, report.Failed, report.AlreadyPresent, msg);
     }
@@ -2043,104 +2055,179 @@ public class MainViewModel : ObservableObject
         var origins = files.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
         var verb = deleteOriginal ? "Moving" : "Copying";
 
-        CollisionResolution? standing = null;    // an answer the user asked to reuse
-        var cancelled = false;
-        var skipped = 0;
-        var tidyUp = new List<string>();          // copies to remove once the batch is done
-        var survivors = new List<MediaFile>();    // entries the tidy-up must not touch
-        var survivorPaths = new List<string>();   // ditto, for files not in the catalogue
+        var run = new CollisionRun("moved");
 
         var report = await RunFileOperationAsync(files, verb, async (file, bytes) =>
         {
-            if (cancelled)
+            if (run.Cancelled)
                 return new RelocationResult(false, "Cancelled.", file.FullPath);
 
-            var policy = DuplicatePolicy.Rename;
-            var desired = Path.Combine(destinationDir, file.FileName);
+            // Skip first, so a taken name is reported rather than worked around, and the
+            // question is only asked when there is genuinely something to decide.
+            var result = await FileRelocator.RelocateAsync(file, destinationDir, deleteOriginal,
+                newFileName: null, DuplicatePolicy.Skip, bytes);
+            if (!result.NameTaken) return result;
 
-            if (CollisionResolver != null &&
-                !ConsolidationPlanner.PathsEqual(desired, file.FullPath) &&
-                File.Exists(desired))
-            {
-                var existing = EntryAt(desired);
-                var resolution = standing ?? await CollisionResolver(BuildCollisionRequest(file, desired));
-                if (resolution.ApplyToRemaining) standing = resolution;
-
-                // Gathered before anything is deleted: once the loser is gone from the
-                // catalogue there is no longer any way to ask what its other copies were.
-                if (resolution.DeleteDuplicates &&
-                    resolution.Choice is CollisionChoice.KeepExisting or
-                        CollisionChoice.KeepIncoming or CollisionChoice.KeepBoth)
-                {
-                    tidyUp.AddRange(CopiesOf(file).Select(c => c.FullPath));
-                    if (existing != null) tidyUp.AddRange(CopiesOf(existing).Select(c => c.FullPath));
-                }
-
-                switch (resolution.Choice)
-                {
-                    case CollisionChoice.Cancel:
-                        cancelled = true;
-                        return new RelocationResult(false, "Cancelled.", file.FullPath);
-
-                    case CollisionChoice.Skip:
-                        skipped++;
-                        return new RelocationResult(false, "Skipped — that name is taken.", file.FullPath);
-
-                    case CollisionChoice.KeepExisting:
-                        // The copy at the destination is the one to keep, so this file does
-                        // not move — and is itself one of the copies to clear away.
-                        if (existing != null) survivors.Add(existing); else survivorPaths.Add(desired);
-                        if (resolution.DeleteDuplicates) tidyUp.Add(file.FullPath);
-                        return new RelocationResult(false,
-                            "Kept the file already there.", desired, AlreadyPresent: true);
-
-                    case CollisionChoice.KeepIncoming:
-                        // Clear the way, then move in. Recycled rather than destroyed: the
-                        // user is choosing between two files, not throwing one away.
-                        await DeleteQuietlyAsync(new[] { desired }, toRecycleBin: true);
-                        survivors.Add(file);
-                        break;
-
-                    case CollisionChoice.KeepBoth:
-                        // Both stay, so both are spared by the tidy-up.
-                        survivors.Add(file);
-                        if (existing != null) survivors.Add(existing); else survivorPaths.Add(desired);
-                        policy = DuplicatePolicy.Rename;
-                        break;
-                }
-            }
+            var (policy, decided) = await AskAboutCollisionAsync(file, result.NewPath, run);
+            if (decided != null) return decided;
 
             return await FileRelocator.RelocateAsync(file, destinationDir, deleteOriginal,
                 newFileName: null, policy, bytes);
         });
 
-        // Tidy-up happens after the batch: deleting copies mid-move would pull entries out
-        // from under the operation that is still walking the list. The survivors' paths are
-        // read now, after the moves, since that is where they have ended up.
-        var keep = survivors.Select(f => f.FullPath)
-            .Concat(survivorPaths)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var removed = await DeleteQuietlyAsync(
-            tidyUp.Where(p => !keep.Contains(p)), toRecycleBin: true);
-        if (removed > 0) PersistAndRefresh();
+        var removed = await FinishCollisionRunAsync(run);
 
         if (report.Succeeded > 0 && deleteOriginal)
             PushMoveUndo(origins.Where(o => o.File.FullPath != o.FullPath).ToList());
 
         var parts = new List<string> { $"{report.Succeeded} done" };
         if (report.AlreadyPresent.Count > 0) parts.Add($"{report.AlreadyPresent.Count} already there");
-        if (skipped > 0) parts.Add($"{skipped} skipped");
+        if (run.Skipped > 0) parts.Add($"{run.Skipped} skipped");
         if (removed > 0) parts.Add($"{removed} duplicate(s) removed");
         if (report.Failed > 0) parts.Add($"{report.Failed} failed");
 
         var message = $"{(deleteOriginal ? "Move" : "Copy")} finished: " + string.Join(", ", parts) +
-                      (cancelled ? " (cancelled part-way)." : ".");
+                      (run.Cancelled ? " (cancelled part-way)." : ".");
         StatusText = message;
         return message;
     }
 
+    // --- Name collisions --------------------------------------------------
+
+    /// <summary>
+    /// The state of one batch's collision conversation: an answer the user asked to reuse,
+    /// the copies to clear away afterwards, and the files that must survive that clear-out.
+    /// </summary>
+    private sealed class CollisionRun
+    {
+        public CollisionRun(string operation) => Operation = operation;
+
+        /// <summary>What the user started, as a past participle: "moved", "consolidated".</summary>
+        public string Operation { get; }
+
+        public CollisionResolution? Standing { get; set; }
+        public bool Cancelled { get; set; }
+        public int Skipped { get; set; }
+
+        /// <summary>Copies to remove once the batch has finished walking its list.</summary>
+        public List<string> TidyUp { get; } = new();
+
+        /// <summary>Entries the clear-out must leave alone, read at the end from where they ended up.</summary>
+        public List<MediaFile> Survivors { get; } = new();
+
+        /// <summary>The same, for files the catalogue has never seen.</summary>
+        public List<string> SurvivorPaths { get; } = new();
+    }
+
+    /// <summary>
+    /// Put a taken destination name to the user and carry out everything the answer implies
+    /// except the relocation itself.
+    /// </summary>
+    /// <returns>
+    /// The policy to relocate under, or — when the file should not move at all — the result
+    /// to hand back to the batch.
+    /// </returns>
+    private async Task<(DuplicatePolicy Policy, RelocationResult? Result)> AskAboutCollisionAsync(
+        MediaFile file, string desired, CollisionRun run)
+    {
+        // Nobody to ask: keep both, which is what the program did before it asked anyone.
+        if (CollisionResolver == null) return (DuplicatePolicy.Rename, null);
+
+        var existing = EntryAt(desired);
+        var resolution = run.Standing ??
+                         await CollisionResolver(BuildCollisionRequest(file, desired, run.Operation));
+        if (resolution.ApplyToRemaining) run.Standing = resolution;
+
+        // Gathered before anything is deleted: once the loser is gone from the catalogue
+        // there is no longer any way to ask what its other copies were.
+        if (resolution.DeleteDuplicates &&
+            resolution.Choice is CollisionChoice.KeepExisting or
+                CollisionChoice.KeepIncoming or CollisionChoice.KeepBoth)
+        {
+            run.TidyUp.AddRange(CopiesOf(file).Select(c => c.FullPath));
+            if (existing != null) run.TidyUp.AddRange(CopiesOf(existing).Select(c => c.FullPath));
+        }
+
+        switch (resolution.Choice)
+        {
+            case CollisionChoice.Cancel:
+                run.Cancelled = true;
+                return (DuplicatePolicy.Skip,
+                    new RelocationResult(false, "Cancelled.", file.FullPath));
+
+            case CollisionChoice.Skip:
+                run.Skipped++;
+                return (DuplicatePolicy.Skip,
+                    new RelocationResult(false, "Skipped — that name is taken.", file.FullPath));
+
+            case CollisionChoice.KeepExisting:
+                // The file at the destination is the one to keep, so this one does not move
+                // — and is itself one of the copies to clear away.
+                if (existing != null) run.Survivors.Add(existing); else run.SurvivorPaths.Add(desired);
+                if (resolution.DeleteDuplicates) run.TidyUp.Add(file.FullPath);
+                return (DuplicatePolicy.Skip, new RelocationResult(false,
+                    "Kept the file already there.", desired, AlreadyPresent: true));
+
+            case CollisionChoice.KeepIncoming:
+                // Clear the way, then move in. Recycled rather than destroyed: the user is
+                // choosing between two files, not throwing one away.
+                await DeleteQuietlyAsync(new[] { desired }, toRecycleBin: true);
+                run.Survivors.Add(file);
+                return (DuplicatePolicy.Rename, null);
+
+            default: // KeepBoth — the arrival takes a free name and both are spared.
+                run.Survivors.Add(file);
+                if (existing != null) run.Survivors.Add(existing); else run.SurvivorPaths.Add(desired);
+                return (DuplicatePolicy.Rename, null);
+        }
+    }
+
+    /// <summary>
+    /// Clear away the copies the collision answers marked as redundant. Left until the end
+    /// of the batch: deleting entries mid-run would pull them out from under an operation
+    /// that is still walking its list. Returns how many went.
+    /// </summary>
+    private async Task<int> FinishCollisionRunAsync(CollisionRun run)
+    {
+        if (run.TidyUp.Count == 0) return 0;
+
+        // Read the survivors' paths now, after the moves, since that is where they are.
+        var keep = run.Survivors.Select(f => f.FullPath)
+            .Concat(run.SurvivorPaths)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var removed = await DeleteQuietlyAsync(
+            run.TidyUp.Where(p => !keep.Contains(p)), toRecycleBin: true);
+        if (removed > 0) PersistAndRefresh();
+        return removed;
+    }
+
+    /// <summary>
+    /// Move one file into the library, putting a name already held by something *else* to
+    /// the user rather than giving up on it.
+    ///
+    /// A copy of the same file already sitting there is not a collision: that comes back as
+    /// already-present, which is what the offer to delete the redundant source is for. Only
+    /// a genuinely different file with the same name is worth stopping for.
+    /// </summary>
+    private async Task<RelocationResult> FileInLibraryAsync(
+        MediaFile file, string destDir, string? newName, bool deleteOriginal,
+        CollisionRun run, IProgress<long> bytes)
+    {
+        var result = await FileRelocator.RelocateAsync(
+            file, destDir, deleteOriginal, newName, DuplicatePolicy.Skip, bytes);
+        if (!result.NameTaken) return result;
+
+        var (policy, decided) = await AskAboutCollisionAsync(file, result.NewPath, run);
+        if (decided != null) return decided;
+
+        return await FileRelocator.RelocateAsync(
+            file, destDir, deleteOriginal, newName, policy, bytes);
+    }
+
     /// <summary>Everything the user needs to decide a collision: both files and all their copies.</summary>
-    private CollisionRequest BuildCollisionRequest(MediaFile incoming, string destinationPath)
+    private CollisionRequest BuildCollisionRequest(
+        MediaFile incoming, string destinationPath, string operation)
     {
         var existing = EntryAt(destinationPath);
         var sameContent = existing != null && incoming.HasHash && existing.HasHash &&
@@ -2152,7 +2239,8 @@ public class MainViewModel : ObservableObject
             existing,
             CopiesOf(incoming),
             existing != null ? CopiesOf(existing) : new List<MediaFile>(),
-            sameContent);
+            sameContent,
+            operation);
     }
 
     /// <summary>

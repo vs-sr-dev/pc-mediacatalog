@@ -69,6 +69,8 @@ public class FileCollisionWindow : Window
     public FileCollisionWindow(CollisionRequest request, Func<MediaFile, Task<string>> deepCheck)
     {
         _deepCheck = deepCheck;
+        // "moved" or "consolidated" — name the operation the user actually started.
+        var verb = string.IsNullOrWhiteSpace(request.Operation) ? "moved" : request.Operation;
 
         Title = "Two files, one name"; Width = 980; Height = 560;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
@@ -77,7 +79,8 @@ public class FileCollisionWindow : Window
 
         var heading = new TextBlock
         {
-            Text = $"'{Path.GetFileName(request.DestinationPath)}' already exists at the destination.",
+            Text = $"'{Path.GetFileName(request.DestinationPath)}' already exists where this file " +
+                   $"is being {verb}.",
             FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 4)
         };
@@ -98,21 +101,21 @@ public class FileCollisionWindow : Window
         DockPanel.SetDock(explain, Dock.Top);
         dock.Children.Add(explain);
 
-        BuildRows(request);
+        BuildRows(request, verb);
 
         var options = new StackPanel();
         options.Children.Add(_deleteDuplicates);
         options.Children.Add(_applyToRest);
 
         var buttons = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
-        buttons.Children.Add(Choice("Keep the one being moved", CollisionChoice.KeepIncoming,
+        buttons.Children.Add(Choice($"Keep the one being {verb}", CollisionChoice.KeepIncoming,
             "Send the file at the destination to the Recycle Bin, then move this one in."));
         buttons.Children.Add(Choice("Keep the one already there", CollisionChoice.KeepExisting,
-            "Leave the destination alone; the file being moved stays where it is."));
-        buttons.Children.Add(Choice("Keep both", CollisionChoice.KeepBoth,
+            $"Leave the destination alone; the file being {verb} stays where it is."));
+        buttons.Children.Add(Choice("Keep both — rename the arrival", CollisionChoice.KeepBoth,
             "The arriving file is given a free name — \"name (1).ext\"."));
         buttons.Children.Add(Choice("Skip this file", CollisionChoice.Skip,
-            "Leave both alone and carry on with the rest of the move."));
+            "Leave both alone and carry on with the rest of the batch."));
 
         var deep = new Button
         {
@@ -146,9 +149,9 @@ public class FileCollisionWindow : Window
         Content = dock;
     }
 
-    private void BuildRows(CollisionRequest request)
+    private void BuildRows(CollisionRequest request, string verb)
     {
-        _rows.Add(new Row { File = request.Incoming, Role = "being moved" });
+        _rows.Add(new Row { File = request.Incoming, Role = "being " + verb });
 
         if (request.Existing != null)
             _rows.Add(new Row { File = request.Existing, Role = "at the destination" });
@@ -161,9 +164,9 @@ public class FileCollisionWindow : Window
             });
 
         foreach (var copy in request.IncomingDuplicates)
-            _rows.Add(new Row { File = copy, Role = "copy of the mover" });
+            _rows.Add(new Row { File = copy, Role = "copy of the first" });
         foreach (var copy in request.ExistingDuplicates)
-            _rows.Add(new Row { File = copy, Role = "copy of the other" });
+            _rows.Add(new Row { File = copy, Role = "copy of the second" });
     }
 
     /// <summary>

@@ -109,13 +109,15 @@ public class TitleVerifier
             imdbVerified++;
         }
 
-        // --- Pass two: TMDb for what is left (TV only; that is all it is asked about) ---
+        // --- Pass two: TMDb for what is left ---
+        // Films go to the film index and programmes to the programme one: TMDb keeps them
+        // apart, and *Fargo* is both. Each is tried under the name parsed from the file and
+        // then under its containing folders — the folder is often the only place a film's
+        // name survives, a release called "xvid-grp.avi" sitting inside "Blade Runner (1982)".
         var tmdbVerified = 0;
         if (_tmdb is { IsConfigured: true })
         {
-            var online = unresolved
-                .Where(f => f.VideoCategory is VideoCategory.TvShow or VideoCategory.TvExtra)
-                .ToList();
+            var online = unresolved.ToList();
 
             for (var i = 0; i < online.Count; i++)
             {
@@ -123,9 +125,13 @@ public class TitleVerifier
                 var file = online[i];
                 progress?.Report(new VerifyProgress(i, online.Count, file.FileName, "Checking TMDb titles"));
 
+                var isFilm = file.VideoCategory is VideoCategory.Movie or VideoCategory.MovieExtra;
+
                 foreach (var candidate in candidatesOf[file])
                 {
-                    var result = await _tmdb.ValidateTvAsync(candidate, ct);
+                    var result = isFilm
+                        ? await _tmdb.ValidateMovieAsync(candidate, ct)
+                        : await _tmdb.ValidateTvAsync(candidate, ct);
                     if (!result.Found) continue;
 
                     file.TmdbName = result.CanonicalName;

@@ -177,7 +177,7 @@ public static class CatalogRefresher
                 .ToList();
             if (covered.Count == 0) continue;
 
-            adopted += TitleUpdater.Apply(covered, covered, rule.Title, manual: true);
+            adopted += TitleUpdater.Set(covered, rule.Title, manual: true);
             settings.FolderTitleRules.Remove(rule);
             retired++;
         }

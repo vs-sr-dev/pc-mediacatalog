@@ -9,15 +9,27 @@ public class TmdbCacheEntry
     public string Query { get; set; } = string.Empty;
     public bool Found { get; set; }
     public string CanonicalName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Which search answered this: "tv" or "movie". Blank in caches written before films
+    /// were searched for at all, where every entry was a TV lookup.
+    /// </summary>
+    public string Kind { get; set; } = string.Empty;
 }
 
 /// <summary>
 /// Persistent cache of TMDb lookups (both hits and misses) so a validated — or
 /// known-invalid — name is never queried twice. Backed by XML in the app folder.
+///
+/// Entries are keyed by the search as well as the name: *Fargo* is both a film and a
+/// programme, and one answer must not be handed back in place of the other.
 /// </summary>
 [XmlRoot("TmdbCache")]
 public class TmdbCache
 {
+    public const string Tv = "tv";
+    public const string Movie = "movie";
+
     [XmlArray("Entries"), XmlArrayItem("Entry")]
     public List<TmdbCacheEntry> Entries { get; set; } = new();
 
@@ -27,25 +39,37 @@ public class TmdbCache
     public static string Normalize(string query) =>
         (query ?? string.Empty).Trim();
 
-    public bool TryGet(string query, out TmdbResult result)
+    private static string Key(string query, string kind) => kind + "|" + Normalize(query);
+
+    public bool TryGet(string query, string kind, out TmdbResult result)
     {
-        if (_index.TryGetValue(Normalize(query), out var r))
+        if (_index.TryGetValue(Key(query, kind), out var r))
         {
             result = r;
             return true;
         }
+
+        // Caches written before films were searched for hold bare keys, and every one of
+        // them was a TV lookup — so they still answer TV questions and nothing else.
+        if (kind == Tv && _index.TryGetValue(Key(query, string.Empty), out var legacy))
+        {
+            result = legacy;
+            return true;
+        }
+
         result = new TmdbResult(false, string.Empty);
         return false;
     }
 
-    public void Put(string query, TmdbResult result)
+    public void Put(string query, string kind, TmdbResult result)
     {
-        var key = Normalize(query);
+        var key = Key(query, kind);
         if (_index.ContainsKey(key)) return;
         _index[key] = result;
         Entries.Add(new TmdbCacheEntry
         {
-            Query = key,
+            Query = Normalize(query),
+            Kind = kind,
             Found = result.Found,
             CanonicalName = result.CanonicalName
         });
@@ -55,7 +79,7 @@ public class TmdbCache
     {
         _index.Clear();
         foreach (var e in Entries)
-            _index[Normalize(e.Query)] = new TmdbResult(e.Found, e.CanonicalName);
+            _index[Key(e.Query, e.Kind ?? string.Empty)] = new TmdbResult(e.Found, e.CanonicalName);
     }
 
     private static readonly XmlSerializer Serializer = new(typeof(TmdbCache));

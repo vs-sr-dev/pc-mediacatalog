@@ -109,9 +109,13 @@ full completion — a pause never deletes anything.
   media filter and size limits, and decide what to do about drives that aren't connected
 - ✅ **Tabbed settings**, ordered by how often each thing changes — General first, API keys
   last — with the external-tool paths folded in as a tab of their own
-- ✅ **Name-collision dialog on moves** — both files side by side with every known copy of
-  either, sizes, dates and integrity, a deep check on demand, and the option to delete all
-  the duplicates of both once you've said which to keep
+- ✅ **Name-collision dialog on moves and consolidation** — both files side by side with every
+  known copy of either, sizes, dates and integrity, a deep check on demand, rename/replace/
+  keep-both/skip, and the option to delete all the duplicates of both once you've decided
+- ✅ **Titles travel by content hash**, never by matching title — two files called *xyz* may
+  be two different things, and one of them may already be right
+- ✅ **Films identified from their folder** when the file name cannot do it, against IMDb and
+  now TMDb's film index too
 - ✅ **Re-consolidation after a title correction** — a file filed under the wrong title stops
   counting as filed and is moved to where the corrected title puts it
 - ✅ **"Already consolidated"** rather than a second copy — with the option to delete every
@@ -227,12 +231,18 @@ straight back and treat the file as changed.
 
 **Titles** — right-click → *Edit title…* to correct a title by hand; the box starts from
 the current title, or from the file name without its extension when there isn't one. The
-correction is applied to the selected file, **to every other file that had the same
-title**, and **to its exact duplicates** — so one edit fixes a whole show, and a copy that
-never had a title gets one too. *Set title for this folder…* names a whole folder (or a
-parent) at once: the rule sticks, so files scanned into it later inherit the title, and a
-rule on a season folder beats one on the show above it. TMDb validation does the same with the name it confirms. A
-hand-typed title counts as validated (shown as ✎ in the TMDb column; ✓ means TMDb).
+correction is applied to the selected file and **to its byte-identical copies** — so a copy
+that never had a title gets one too — and to nothing else. *Set title for this folder…*
+names a whole folder (or a parent) at once, again reaching the copies of those files
+wherever they live. A hand-typed title counts as validated (shown as ✎ in the TMDb column;
+✓ means confirmed by IMDb or TMDb).
+
+> **Titles travel by hash, never by matching title.** Two files can both be called *xyz* and
+> still be two different things — and one of them may already be correct. Sharing a name is
+> no evidence of sharing an identity; sharing a content hash is. (The one title-based spread
+> that remains is verification replacing a guessed spelling with the canonical spelling of
+> *the same* name — `king of the hill` becoming *King of the Hill* — which is a correction
+> every file carrying that guess wants.)
 
 Correcting a title also **renames the file on disk** to match the scheme for its category —
 `Show - S01E02.mkv`, `Title (Year).mkv` — because a corrected title that leaves the old name
@@ -306,15 +316,22 @@ revisited regularly, so it comes first. The external-tool paths, which used to b
 *Tools…* dialog on the toolbar, are a tab here now — the main window is for the catalogue,
 not for configuration.
 
-**Moving into a name that is taken** — when a move would land on a name that already exists,
+**Moving or consolidating into a name that is taken** — when the destination name already
+exists,
 you are shown **both files side by side**, together with **every catalogued copy of either**:
 sizes, dates and integrity, so there is something to decide on. A **deep check** can be run
 on any of them from that dialog — whether a file actually decodes is often exactly the fact
 that settles which of two identically named copies is worth keeping. Then choose to keep the
-one being moved, keep the one already there, keep both (the arrival gets a free name), skip
-it, or cancel the whole move. Tick *Delete every other copy of both files* and the losers and
-all their copies go to the Recycle Bin once the choice is made; tick *Answer the rest of this
-move the same way* and you're only asked once.
+arriving file, keep the one already there, keep both (the arrival is renamed to a free name),
+skip it, or cancel the batch. Tick *Delete every other copy of both files* and the losers and
+all their copies go to the Recycle Bin once the choice is made; tick *Answer the rest the same
+way* and you're only asked once.
+
+**Consolidation asks the same question.** Filing into the library used to give up on a
+clash and report a failure; now it offers exactly the same choice — rename, replace, keep
+both or skip. A copy of the *same* file already sitting at the destination is not treated as
+a clash: that is the "already in the library" case, which offers to delete the redundant
+source instead.
 
 **Deleting** — every delete in the program goes through **one** implementation, so the
 results grid, the duplicate manager, the unhashed-files list and a verified move discarding
@@ -520,7 +537,12 @@ placeholder rows for untitled episodes — `Episode #1.4`, `Episode dated 3 May 
 is already there the raw file is left alone.
 
 **Verify titles** then confirms film and programme names against it and fills in any
-**missing years**. There is no rate limit and no network involved, so the whole catalogue is
+**missing years**. A name that cannot be identified from the file itself is looked up under
+**the folder the file sits in**, and then under each folder above it — which is usually the
+only place a film's name survives, a release called `xvid-grp.avi` sitting inside
+`Blade Runner (1982)`. Folder names are tried undecorated as well: `(1982)`, `[1080p]` and a
+bare trailing year are each stripped for an extra attempt, always *after* the full name, so
+a film genuinely called *Blade Runner 2049* is not mistaken for *Blade Runner*. There is no rate limit and no network involved, so the whole catalogue is
 answered in a single pass; **TMDb is only asked about what IMDb could not identify**, which
 matters when TMDb allows one query every two seconds. Titles are matched ignoring case,
 punctuation and spacing, so `King Of The Hill` finds *King of the Hill*; where a name has
@@ -531,10 +553,15 @@ Turn *Keep the IMDb data in memory* off in **Settings…** and it is read from d
 slower, but free. Even then a whole run is answered in one pass over the file, not one pass
 per title.
 
-### TMDb (themoviedb.org) TV validation
-Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** in **Settings…** (the token is
-preferred if both are given), then **Validate TV (TMDb)** confirms show names against TMDb. Lookups are **rate-limited to one every two seconds** and **cached**
-(`tmdb-cache.xml`) so names are never queried twice. If the episode title doesn't match,
+### TMDb (themoviedb.org) validation
+Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** on **Settings… → Data
+sources** (the token is preferred if both are given), then **Validate TV (TMDb)** confirms
+show names against TMDb. **Verify titles** also falls back to TMDb for anything the local
+IMDb data could not identify — films against the film index, programmes against the
+programme one, since TMDb keeps them apart and *Fargo* is both. Lookups are **rate-limited to
+one every two seconds** and **cached** (`tmdb-cache.xml`) so names are never queried twice;
+the cache records which index answered, so a film's answer is never handed back for a
+programme's question. Caches written by earlier versions are read as the TV lookups they were. If the episode title doesn't match,
 the containing folder names are tried in turn (e.g. `…\Bewitched\Season 01\ep.avi` falls
 back to "Bewitched"). **Every** folder up to the drive root is tried, each one also without
 its trailing decoration — `Yes Minister (1980)` is offered as `Yes Minister` too — with
@@ -556,8 +583,7 @@ in the toolbar shows both, next to the program icon.
 - Acting on near-duplicate groups directly (keep-best / bulk delete) from the UI — the
   exact-duplicate manager already does this; the perceptual groups do not yet.
 - Retiring folder rules altogether, once existing catalogues have migrated off them.
-- Collision handling for consolidation the way moves now have it: consolidation currently
-  refuses a clash rather than asking about it.
+- Using a folder's year as well as its name when a film is identified from the folder.
 
 ## Project layout
 - `MediaCatalog.Core` — engine (scanning, hashing, classification, duplicates,

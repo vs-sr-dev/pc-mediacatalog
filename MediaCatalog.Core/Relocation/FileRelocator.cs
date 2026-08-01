@@ -16,7 +16,14 @@ public enum DuplicatePolicy
 /// The identical file is already at the destination, so nothing was copied — the caller
 /// can offer to delete the redundant source copy.
 /// </param>
-public record RelocationResult(bool Success, string Message, string NewPath, bool AlreadyPresent = false);
+/// <param name="NameTaken">
+/// A <em>different</em> file holds the destination name and the policy was not to work
+/// around it. Distinct from any other failure, so the caller can put the two files to the
+/// user and try again on the answer rather than simply reporting that it did not work.
+/// </param>
+public record RelocationResult(
+    bool Success, string Message, string NewPath,
+    bool AlreadyPresent = false, bool NameTaken = false);
 
 /// <summary>
 /// Moves files safely: copy to the destination, verify the copy hashes identically
@@ -81,7 +88,8 @@ public static class FileRelocator
 
                 if (onDuplicate == DuplicatePolicy.Skip)
                     return new RelocationResult(false,
-                        "A different file already uses that name at the destination.", desired);
+                        "A different file already uses that name at the destination.", desired,
+                        NameTaken: true);
             }
 
             var destPath = MakeUniquePath(desired);

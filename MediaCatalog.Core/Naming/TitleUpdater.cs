@@ -3,47 +3,30 @@ using MediaCatalog.Core.Models;
 namespace MediaCatalog.Core.Naming;
 
 /// <summary>
-/// Applies a confirmed title — typed by the user or returned by TMDb — to a file and to
-/// every other catalogue entry that shared its previous title, so a single correction
-/// fixes a whole show or film in one go.
+/// Applies a confirmed title — typed by the user or returned by TMDb — to the files it
+/// belongs to.
+///
+/// A correction is written to exactly the files chosen, plus whatever the caller has
+/// worked out is the *same content* (byte-identical copies). It is deliberately **not**
+/// spread to everything that happened to carry the same title: two files can both be
+/// called "xyz" and still be two different things, and one of them may already be right.
+/// Sharing a name is not evidence of sharing an identity; sharing a hash is.
 /// </summary>
 public static class TitleUpdater
 {
     /// <summary>
-    /// Set <paramref name="newTitle"/> on <paramref name="targets"/> and on every file in
-    /// <paramref name="catalogue"/> whose current title matches a target's previous one.
-    /// Returns the number of entries changed.
+    /// Set <paramref name="newTitle"/> on exactly these files and nothing else. Returns
+    /// how many entries actually changed.
     /// </summary>
-    /// <param name="manual">True when the user typed the title rather than TMDb supplying it.</param>
-    /// <param name="scope">Optional restriction on which other files may be updated.</param>
-    public static int Apply(
-        IEnumerable<MediaFile> catalogue,
-        IReadOnlyList<MediaFile> targets,
-        string newTitle,
-        bool manual,
-        Func<MediaFile, bool>? scope = null)
+    /// <param name="manual">True when the user typed the title rather than a source supplying it.</param>
+    public static int Set(IEnumerable<MediaFile> files, string newTitle, bool manual)
     {
         var title = (newTitle ?? string.Empty).Trim();
-        if (title.Length == 0 || targets.Count == 0) return 0;
-
-        // Snapshot the titles being replaced *before* touching anything, otherwise the
-        // first update would change what the rest are compared against.
-        var previous = new HashSet<string>(
-            targets.Select(t => t.EffectiveTitle.Trim()).Where(t => t.Length > 0),
-            StringComparer.OrdinalIgnoreCase);
-        var chosen = new HashSet<MediaFile>(targets);
+        if (title.Length == 0) return 0;
 
         var changed = 0;
-        foreach (var file in catalogue)
-        {
-            var isTarget = chosen.Contains(file);
-            if (!isTarget)
-            {
-                if (!previous.Contains(file.EffectiveTitle.Trim())) continue;
-                if (scope != null && !scope(file)) continue;
-            }
-            if (Set(file, title, manual)) changed++;
-        }
+        foreach (var file in files)
+            if (SetOne(file, title, manual)) changed++;
         return changed;
     }
 
@@ -51,6 +34,11 @@ public static class TitleUpdater
     /// Spread a title already set on <paramref name="source"/> to every other file that
     /// still carries <paramref name="previousTitle"/>. Used after a TMDb lookup, where the
     /// source has been updated before we get a chance to compare.
+    ///
+    /// This one *is* title-based, and deliberately so: it replaces a guessed spelling with
+    /// the canonical spelling of the same name — "king of the hill" becoming *King of the
+    /// Hill* — which is a correction every file carrying that guess wants. It is not a way
+    /// to give a file a different title, which is why editing a title by hand does not use it.
     /// </summary>
     public static int Propagate(
         IEnumerable<MediaFile> catalogue,
@@ -71,24 +59,12 @@ public static class TitleUpdater
             if (!string.Equals(file.EffectiveTitle.Trim(), previous, StringComparison.OrdinalIgnoreCase))
                 continue;
             if (scope != null && !scope(file)) continue;
-            if (Set(file, title, manual)) changed++;
+            if (SetOne(file, title, manual)) changed++;
         }
         return changed;
     }
 
-    /// <summary>Files that would be swept up by editing this file's title.</summary>
-    public static List<MediaFile> SameTitleAs(
-        IEnumerable<MediaFile> catalogue, MediaFile file)
-    {
-        var title = file.EffectiveTitle.Trim();
-        if (title.Length == 0) return new List<MediaFile>();
-        return catalogue
-            .Where(f => !ReferenceEquals(f, file) &&
-                        string.Equals(f.EffectiveTitle.Trim(), title, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-    }
-
-    private static bool Set(MediaFile file, string title, bool manual)
+    private static bool SetOne(MediaFile file, string title, bool manual)
     {
         var changed = !string.Equals(file.TmdbName, title, StringComparison.Ordinal) ||
                       !file.TitleVerified ||

@@ -569,15 +569,17 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task OfferToDeleteRedundantAsync(IReadOnlyList<MediaFile> present)
     {
-        if (present.Count == 0) return;
+        // Anything a collision answer already cleared away is not worth offering again.
+        var left = present.Where(f => File.Exists(f.FullPath)).ToList();
+        if (left.Count == 0) return;
 
         var ask = MessageBox.Show(this,
-            $"{present.Count} file(s) are already in the consolidation location, so nothing was copied " +
+            $"{left.Count} file(s) are already in the consolidation location, so nothing was copied " +
             "for them.\n\nDelete the redundant copies from where they are now?",
             "Already in the library", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (ask != MessageBoxResult.Yes) return;
 
-        await DeleteAsync(present.ToList());
+        await DeleteAsync(left);
     }
 
     /// <summary>
@@ -812,9 +814,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        var sharing = rows.Count == 1 ? _vm.CountSharingTitle(rows[0].Model) : 0;
-        var note = sharing > 0
-            ? $"\n\n{sharing} other file(s) currently share this title and will be updated too."
+        // Only the byte-identical copies come along. Another file that happens to carry the
+        // same title may well be something else entirely, and is left alone.
+        var copies = rows.Count == 1 ? _vm.CopiesOf(rows[0].Model).Count : 0;
+        var note = copies > 0
+            ? $"\n\n{copies} identical copy(ies) of this file will be given the same title."
             : "";
         var prompt = rows.Count == 1
             ? $"Title for '{rows[0].FileName}':{note}"

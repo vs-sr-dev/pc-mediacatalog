@@ -79,12 +79,26 @@ public class TvNameValidator
     private static readonly Regex TrailingBracket = new(
         @"[\(\[\{][^\)\]\}]*[\)\]\}]\s*$", RegexOptions.Compiled);
 
+    // A bare year at the end, as film folders are often written: "Blade Runner 1982".
+    // Offered as an extra candidate rather than a replacement, so a film that really is
+    // called "Blade Runner 2049" is still tried under its own name first.
+    private static readonly Regex TrailingYear = new(
+        @"[\s._-]+(?:19|20)\d{2}\s*$", RegexOptions.Compiled);
+
     /// <summary>
-    /// Names to try, in order: the parsed episode title, then **every** ancestor directory
-    /// name up to the drive root. Season folders and single-letter buckets are tried last
-    /// rather than skipped, so a show that really is called "Ed" or "Season 9" can still be
-    /// found. Each name is also offered with trailing decoration — "(2004)", "[1080p]" —
-    /// stripped, since folders are commonly annotated that way.
+    /// Names to try, in order: the name parsed from the file, then the folder it sits in,
+    /// then **every** ancestor directory name up to the drive root. Season folders and
+    /// single-letter buckets are tried last rather than skipped, so a show that really is
+    /// called "Ed" or "Season 9" can still be found.
+    ///
+    /// The containing folder is the useful one for films: a file called
+    /// <c>xvid-grp.avi</c> inside <c>Blade Runner (1982)</c> is identifiable only from the
+    /// folder. Each name is therefore also offered with its trailing decoration stripped —
+    /// "(1982)", "[1080p]", or a bare trailing year — since folders are commonly annotated
+    /// that way. The undecorated name is always tried first, so a film genuinely called
+    /// *Blade Runner 2049* is not mistaken for *Blade Runner*.
+    ///
+    /// Used for films and programmes alike; only which TMDb index answers differs.
     /// </summary>
     public static IEnumerable<string> Candidates(MediaFile file)
     {
@@ -104,6 +118,9 @@ public class TvNameValidator
 
             var stripped = TrailingBracket.Replace(cleaned, "").Trim();
             if (stripped.Length > 0 && seen.Add(stripped)) yield return stripped;
+
+            var undated = TrailingYear.Replace(stripped.Length > 0 ? stripped : cleaned, "").Trim();
+            if (undated.Length > 0 && seen.Add(undated)) yield return undated;
         }
 
         foreach (var candidate in Variants(file.ParsedTitle)) yield return candidate;
