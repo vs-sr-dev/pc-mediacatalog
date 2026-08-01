@@ -43,6 +43,39 @@ public enum ProgressNamePosition
     Hidden
 }
 
+/// <summary>
+/// What to do when a newly added exclusion makes earlier, narrower ones redundant.
+/// </summary>
+public enum RedundantRuleAction
+{
+    /// <summary>Show what has been superseded and let the user decide (the default).</summary>
+    Ask = 0,
+    /// <summary>Drop the redundant rules without asking.</summary>
+    RemoveAutomatically,
+    /// <summary>Leave them alone and say nothing.</summary>
+    Keep
+}
+
+/// <summary>What a scan should do with whatever is already catalogued.</summary>
+public enum ScanStartMode
+{
+    /// <summary>Merge into the existing catalogue, keeping everything already known.</summary>
+    AddToExisting = 0,
+    /// <summary>Throw the catalogue away and build a new one from nothing.</summary>
+    StartFresh
+}
+
+/// <summary>What to do when a drive a scan needs is not currently attached.</summary>
+public enum MissingDriveAction
+{
+    /// <summary>Do not start; the user can plug the drive in and try again (the default).</summary>
+    Cancel = 0,
+    /// <summary>Scan what is available, watching for the missing drive to appear.</summary>
+    ProceedAndWait,
+    /// <summary>Scan what is available and never look at the missing drive.</summary>
+    ProceedWithout
+}
+
 /// <summary>Result of the lightweight integrity check performed during a scan.</summary>
 public enum IntegrityStatus
 {

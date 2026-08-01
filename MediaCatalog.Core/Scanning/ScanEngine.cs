@@ -14,12 +14,18 @@ public record ScanProgress(int Done, int Total, string CurrentFile, string Phase
 /// blind to these, so they are handed back for the user to deal with.
 /// </param>
 /// <param name="SkippedBySize">Files outside the configured size limits.</param>
+/// <param name="UnavailableRoots">
+/// Drives that were never seen: not attached when the scan started, and still not attached
+/// when it finished. Nothing under them was touched, in the catalogue or on disk.
+/// </param>
 public record ScanReport(
     List<string> MissingFiles,
     List<MediaFile>? UnhashedFiles = null,
-    int SkippedBySize = 0)
+    int SkippedBySize = 0,
+    List<string>? UnavailableRoots = null)
 {
     public IReadOnlyList<MediaFile> Unhashed => UnhashedFiles ?? new List<MediaFile>();
+    public IReadOnlyList<string> Unavailable => UnavailableRoots ?? new List<string>();
 }
 
 /// <summary>
@@ -28,14 +34,36 @@ public record ScanReport(
 /// results into the catalogue. Reports determinate progress to the UI.
 ///
 /// Designed to be interruptible and resumable: it checkpoints the catalogue to disk
-/// periodically (via <paramref name="onCheckpoint"/>) so a pause — or a crash — never
-/// loses hashing work, and re-running over the same roots skips already-hashed files.
+/// periodically (via <c>onCheckpoint</c>) so a pause — or a crash — never loses hashing
+/// work, and re-running over the same roots skips already-hashed files.
+///
+/// A root that is not attached is treated as unknown rather than empty. Its catalogue
+/// entries are left alone, and — when asked to wait — the scan watches for the drive to
+/// appear and picks it up, so an external drive plugged in halfway through still gets done.
 /// </summary>
 public class ScanEngine
 {
     private readonly Catalog _catalog;
 
+    /// <summary>How often the scan looks to see whether a missing drive has turned up.</summary>
+    private static readonly TimeSpan RootPollInterval = TimeSpan.FromSeconds(5);
+
     public ScanEngine(Catalog catalog) => _catalog = catalog;
+
+    /// <summary>True when a root can be read right now.</summary>
+    public static bool IsRootAvailable(string root)
+    {
+        if (string.IsNullOrWhiteSpace(root)) return false;
+        try { return Directory.Exists(root); }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// The roots in <paramref name="roots"/> that are not currently attached, so the
+    /// caller can ask what to do about them before any work starts.
+    /// </summary>
+    public static List<string> UnavailableRoots(IEnumerable<string> roots) =>
+        roots.Where(r => !IsRootAvailable(r)).ToList();
 
     /// <summary>
     /// Scan <paramref name="roots"/>. When cancelled (pause/cancel) the method throws
@@ -52,8 +80,13 @@ public class ScanEngine
     /// </param>
     /// <param name="pruneMissing">
     /// When true (a full drive scan) catalogue entries that were not seen are removed, as
-    /// the roots are authoritative. Set false when scanning one folder into an existing
-    /// catalogue: everything outside that folder is simply not in scope.
+    /// the roots are authoritative — but only within the roots actually walked. Set false
+    /// when scanning one folder into an existing catalogue: everything outside that folder
+    /// is simply not in scope.
+    /// </param>
+    /// <param name="waitForMissingRoots">
+    /// When true, the scan does not finish while a chosen drive is still unattached: it
+    /// waits, watching for it, and scans it as soon as it appears. Cancel stops the wait.
     /// </param>
     public async Task<ScanReport> ScanAsync(
         IReadOnlyList<string> roots,
@@ -64,6 +97,7 @@ public class ScanEngine
         int resumeFromIndex = 0,
         AppSettings? settings = null,
         bool pruneMissing = true,
+        bool waitForMissingRoots = false,
         CancellationToken ct = default)
     {
         settings ??= new AppSettings();
@@ -72,6 +106,11 @@ public class ScanEngine
         var unhashed = new List<MediaFile>();
         var outOfScope = new List<string>();
         var skippedBySize = 0;
+
+        // A drive that is not plugged in has not become empty. Its files are left exactly
+        // as they are — walked round, never pruned — until it turns up.
+        var absent = UnavailableRoots(roots);
+        var walked = roots.Where(IsRootAvailable).ToList();
 
         // Reuse a matching enumeration snapshot on resume; otherwise walk the drives,
         // pruning excluded folders and ignored file types as we go.
@@ -88,21 +127,8 @@ public class ScanEngine
         else
         {
             progress?.Report(new ScanProgress(0, 0, string.Empty, "Enumerating files…"));
-            var scanSettings = settings;
-            paths = await Task.Run(() => DriveScanner.EnumerateMediaFiles(
-                roots, ct,
-                excludeDescent: scanSettings.IsDescentBlocked,
-                // An audio-only or video-only scan drops the other kind here, before any
-                // work is done on it. What it skips stays in the catalogue untouched, so
-                // running one kind and then the other builds a single combined catalogue.
-                ignoreExtension: ext => scanSettings.IsExtensionIgnored(ext) ||
-                                        !scanSettings.IsExtensionScanned(ext)).ToList(), ct);
-            new EnumerationCache
-            {
-                Roots = roots.ToList(),
-                Paths = paths,
-                CreatedUtc = DateTime.UtcNow
-            }.Save(enumPath);
+            paths = await EnumerateAsync(walked, settings, ct);
+            SaveEnumeration();
         }
 
         // Entries whose file is no longer where we left it: a file that turns up under a
@@ -113,6 +139,10 @@ public class ScanEngine
         var interval = checkpointInterval ?? TimeSpan.FromSeconds(30);
         var sw = Stopwatch.StartNew();
         var nextCheckpoint = interval;
+
+        // Paths a resumed enumeration lists on a drive that is not attached this time.
+        // Kept with their index so a checkpoint can point back at the earliest one.
+        var deferred = new List<(int Index, string Path)>();
 
         for (var i = startIndex; i < total; i++)
         {
@@ -125,12 +155,67 @@ public class ScanEngine
             // this file, the persisted resume index redoes it rather than skipping it.
             progress?.Report(new ScanProgress(i, total, Path.GetFileName(path), "Hashing & classifying"));
 
+            if (absent.Count > 0 && UnderAny(path, absent))
+            {
+                deferred.Add((i, path));
+                continue;
+            }
+
+            await ProcessFileAsync(path);
+            Checkpoint(i + 1);
+        }
+
+        // Anything still on an unattached drive. Waiting is a deliberate choice made
+        // before the scan started; without it the drive is simply reported as unseen.
+        if (waitForMissingRoots)
+            await WaitForAbsentRootsAsync();
+
+        // Full pass completed. The enumeration snapshot (minus anything that turned out to
+        // be missing) is the authoritative set of files that exist, so pruning here is
+        // correct even across a restart. A partial/paused pass never reaches this point.
+        if (pruneMissing)
+        {
+            var existing = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+            foreach (var m in missing) existing.Remove(m);
+            foreach (var s in outOfScope) existing.Remove(s);
+            foreach (var (_, path) in deferred) existing.Remove(path);
+
+            // Only the ground actually covered is authoritative. A scan of C: says nothing
+            // about what is on D:, and a drive that never turned up says nothing at all —
+            // so pruning is confined to the roots that were walked. A filtered scan is
+            // likewise only authoritative about the kind it went looking for, which is what
+            // lets an audio scan and a video scan build one combined catalogue between them.
+            _catalog.Files.RemoveAll(f =>
+                !existing.Contains(f.FullPath) &&
+                settings.IsExtensionScanned(f.Extension) &&
+                UnderAny(f.FullPath, walked));
+        }
+        _catalog.RebuildIndex();
+
+        // These can only run once every file is known: identical files share what each of
+        // them worked out, and specials attach to the show or film they belong to.
+        Classification.DuplicateMetadata.Propagate(_catalog.Files);
+        ExtraLinker.Link(_catalog.Files);
+        _catalog.LastScanUtc = DateTime.UtcNow;
+
+        EnumerationCache.Clear(enumPath);
+        progress?.Report(new ScanProgress(total, total, string.Empty, "Done"));
+
+        // Only report files still in the catalogue: one that vanished mid-scan is a
+        // missing file, not an unhashable one.
+        var stillHere = unhashed.Where(f => !f.HasHash && _catalog.ByPath.ContainsKey(f.FullPath)).ToList();
+        return new ScanReport(missing, stillHere, skippedBySize, absent);
+
+        // --- the work itself, shared by the main pass and the late-arriving drives ---
+
+        async Task ProcessFileAsync(string path)
+        {
             // A file that vanished since enumeration must never abort the scan. Ones under
             // a "Temp" folder are ignored silently; the rest are reported afterwards.
             if (!File.Exists(path))
             {
                 if (!DriveScanner.IsUnderTempFolder(path)) missing.Add(path);
-                continue;
+                return;
             }
 
             FileInfo info;
@@ -138,7 +223,7 @@ public class ScanEngine
             catch
             {
                 if (!DriveScanner.IsUnderTempFolder(path)) missing.Add(path);
-                continue;
+                return;
             }
 
             // Outside the configured size limits: not catalogued, and dropped if a
@@ -147,7 +232,7 @@ public class ScanEngine
             {
                 skippedBySize++;
                 outOfScope.Add(path);
-                continue;
+                return;
             }
 
             var entry = MergeEntry(info);
@@ -171,53 +256,102 @@ public class ScanEngine
 
             entry.IndexedUtc = DateTime.UtcNow;
             entry.FeatureVersion = CatalogRefresher.CurrentFeatureVersion;
+        }
 
-            // Periodic crash-safe checkpoint; hand back the resume index (i + 1).
-            if (onCheckpoint != null && sw.Elapsed >= nextCheckpoint)
+        // Periodic crash-safe checkpoint; hands back the index to resume from.
+        void Checkpoint(int index)
+        {
+            if (onCheckpoint == null || sw.Elapsed < nextCheckpoint) return;
+            _catalog.RebuildIndex();
+            // Never point past work still owed on a drive we skipped over: resuming a
+            // little early only re-walks files that are already hashed, which is cheap.
+            var resumeAt = deferred.Count > 0 ? Math.Min(index, deferred[0].Index) : index;
+            try { onCheckpoint(resumeAt); }
+            catch { /* a failed checkpoint must not abort the scan */ }
+            nextCheckpoint = sw.Elapsed + interval;
+        }
+
+        void SaveEnumeration() => new EnumerationCache
+        {
+            Roots = roots.ToList(),
+            Paths = paths,
+            CreatedUtc = DateTime.UtcNow
+        }.Save(enumPath);
+
+        // Wait for each unattached drive and scan it the moment it appears.
+        async Task WaitForAbsentRootsAsync()
+        {
+            var done = total;
+            while (absent.Count > 0)
             {
-                _catalog.RebuildIndex();
-                TryCheckpoint(onCheckpoint, i + 1);
-                nextCheckpoint = sw.Elapsed + interval;
+                ct.ThrowIfCancellationRequested();
+
+                var arrived = absent.Where(IsRootAvailable).ToList();
+                if (arrived.Count == 0)
+                {
+                    progress?.Report(new ScanProgress(done, Math.Max(done, total), string.Empty,
+                        $"Waiting for {string.Join(", ", absent)} — connect the drive, or Cancel to stop"));
+                    await Task.Delay(RootPollInterval, ct);
+                    continue;
+                }
+
+                foreach (var root in arrived)
+                {
+                    absent.Remove(root);
+                    walked.Add(root);
+
+                    // Either the resumed enumeration already listed this drive's files, or
+                    // it was skipped at enumeration time and has to be walked now.
+                    var pending = deferred.Where(d => IsUnder(d.Path, root)).ToList();
+                    if (pending.Count > 0) deferred.RemoveAll(d => IsUnder(d.Path, root));
+                    else
+                    {
+                        progress?.Report(new ScanProgress(done, total, string.Empty,
+                            $"Enumerating {root}…"));
+                        foreach (var found in await EnumerateAsync(new[] { root }, settings, ct))
+                        {
+                            paths.Add(found);
+                            pending.Add((paths.Count - 1, found));
+                        }
+                        total = paths.Count;
+                        SaveEnumeration();
+                    }
+
+                    foreach (var (index, path) in pending)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        progress?.Report(new ScanProgress(done, total, Path.GetFileName(path),
+                            $"Hashing & classifying ({root})"));
+                        await ProcessFileAsync(path);
+                        done++;
+                        Checkpoint(index + 1);
+                    }
+                }
             }
         }
-
-        // Full pass completed. The enumeration snapshot (minus anything that turned out to
-        // be missing) is the authoritative set of files that exist, so pruning here is
-        // correct even across a restart. A partial/paused pass never reaches this point.
-        if (pruneMissing)
-        {
-            var existing = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
-            foreach (var m in missing) existing.Remove(m);
-            foreach (var s in outOfScope) existing.Remove(s);
-
-            // A filtered scan is only authoritative about what it went looking for: an
-            // audio-only pass says nothing about whether the video files are still there,
-            // so it must leave them alone. That is what lets an audio scan and a video
-            // scan build one combined catalogue between them.
-            _catalog.Files.RemoveAll(f =>
-                !existing.Contains(f.FullPath) && settings.IsExtensionScanned(f.Extension));
-        }
-        _catalog.RebuildIndex();
-
-        // These can only run once every file is known: identical files share what each of
-        // them worked out, and specials attach to the show or film they belong to.
-        Classification.DuplicateMetadata.Propagate(_catalog.Files);
-        ExtraLinker.Link(_catalog.Files);
-        _catalog.LastScanUtc = DateTime.UtcNow;
-
-        EnumerationCache.Clear(enumPath);
-        progress?.Report(new ScanProgress(total, total, string.Empty, "Done"));
-
-        // Only report files still in the catalogue: one that vanished mid-scan is a
-        // missing file, not an unhashable one.
-        var stillHere = unhashed.Where(f => !f.HasHash && _catalog.ByPath.ContainsKey(f.FullPath)).ToList();
-        return new ScanReport(missing, stillHere, skippedBySize);
     }
 
-    private static void TryCheckpoint(Action<int> onCheckpoint, int index)
+    /// <summary>Walk roots for media files, honouring exclusions and the scan's media filter.</summary>
+    private static Task<List<string>> EnumerateAsync(
+        IReadOnlyList<string> roots, AppSettings settings, CancellationToken ct) =>
+        Task.Run(() => DriveScanner.EnumerateMediaFiles(
+            roots, ct,
+            excludeDescent: settings.IsDescentBlocked,
+            // An audio-only or video-only scan drops the other kind here, before any work
+            // is done on it. What it skips stays in the catalogue untouched, so running one
+            // kind and then the other builds a single combined catalogue.
+            ignoreExtension: ext => settings.IsExtensionIgnored(ext) ||
+                                    !settings.IsExtensionScanned(ext)).ToList(), ct);
+
+    private static bool UnderAny(string path, IEnumerable<string> roots) =>
+        roots.Any(r => IsUnder(path, r));
+
+    private static bool IsUnder(string path, string root)
     {
-        try { onCheckpoint(index); }
-        catch { /* a failed checkpoint must not abort the scan */ }
+        var trimmed = root.TrimEnd('\\', '/');
+        if (trimmed.Length == 0) return false;
+        return path.StartsWith(trimmed + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+               path.StartsWith(trimmed + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

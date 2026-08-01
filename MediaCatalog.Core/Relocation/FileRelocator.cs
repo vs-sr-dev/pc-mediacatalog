@@ -102,23 +102,23 @@ public static class FileRelocator
             var copyHash = await FileHasher.ComputeSha256Async(destPath, ct);
             if (!string.Equals(copyHash, sourceHash, StringComparison.OrdinalIgnoreCase))
             {
-                TryDelete(destPath); // roll back the bad copy
+                FileDeleter.TryDeleteQuietly(destPath); // roll back the bad copy
                 return new RelocationResult(false,
                     "Verification failed: copy did not match source. Original kept.", file.FullPath);
             }
 
             if (deleteOriginal)
             {
-                try
-                {
-                    File.Delete(file.FullPath);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                // Through the shared deleter, so a read-only original is dealt with the
+                // same way here as anywhere else rather than simply refusing.
+                var failure = FileDeleter.DeleteOne(file.FullPath, toRecycleBin: false);
+                if (failure != null)
                 {
                     // Copy is verified and safe; we just couldn't remove the original.
                     UpdateFile(file, destPath, sourceHash);
                     return new RelocationResult(true,
-                        "Copied and verified, but the original could not be deleted.", destPath);
+                        $"Copied and verified, but the original could not be deleted: {failure.Reason}",
+                        destPath);
                 }
             }
 
@@ -231,11 +231,5 @@ public static class FileRelocator
             var candidate = Path.Combine(dir, $"{stem} ({i}){ext}");
             if (!File.Exists(candidate)) return candidate;
         }
-    }
-
-    private static void TryDelete(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); }
-        catch { /* best effort */ }
     }
 }

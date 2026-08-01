@@ -15,28 +15,40 @@ public static class NamingScheme
 {
     private static readonly char[] InvalidChars = Path.GetInvalidFileNameChars();
 
-    public static string GenerateFileName(MediaFile file)
+    /// <summary>The name for a file using its automatically detected category.</summary>
+    public static string GenerateFileName(MediaFile file) =>
+        GenerateFileName(file, Classification.CategoryResolver.Auto(file));
+
+    /// <summary>
+    /// The name for a file filed under <paramref name="category"/> — the effective one,
+    /// so a category the user set by hand decides the shape of the name.
+    ///
+    /// Built from the title the file actually goes by: a confirmed or hand-typed title
+    /// when there is one, the parsed guess otherwise. Correcting a title therefore
+    /// changes the name it implies, which is what drives the rename that follows.
+    /// </summary>
+    public static string GenerateFileName(MediaFile file, string category)
     {
-        var title = Sanitize(file.ParsedTitle);
+        var title = Sanitize(file.EffectiveTitle);
         if (string.IsNullOrWhiteSpace(title))
             return string.Empty; // nothing reliable to build a name from
 
         var ext = file.Extension.ToLowerInvariant();
 
-        string stem = file switch
+        var stem = category switch
         {
-            { Kind: MediaKind.Video, VideoCategory: VideoCategory.TvShow, Season: { } s, Episode: { } e }
+            Classification.CategoryResolver.TvShow when file is { Season: { } s, Episode: { } e }
                 => $"{title} - S{s:00}E{e:00}",
 
-            { Kind: MediaKind.Video, VideoCategory: VideoCategory.Movie, Year: { } y }
+            Classification.CategoryResolver.Movie when file.Year is { } y
                 => $"{title} ({y})",
 
-            { Kind: MediaKind.Video, VideoCategory: VideoCategory.Movie }
-                => title,
+            Classification.CategoryResolver.Movie => title,
 
-            { Kind: MediaKind.Audio }
-                => title,
+            Classification.CategoryResolver.Audio => title,
 
+            // Specials and featurettes keep the names they were given: the naming scheme
+            // has nothing better to say about "Behind the scenes" than its own name does.
             _ => string.Empty
         };
 

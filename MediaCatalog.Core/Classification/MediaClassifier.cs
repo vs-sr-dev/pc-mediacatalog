@@ -63,9 +63,12 @@ public static class MediaClassifier
         @"(?<![0-9])(?<y>(?:19|20)\d{2})(?![0-9])",
         RegexOptions.Compiled);
 
-    // Common release-group / quality noise we strip from titles.
+    // Common release-group / quality noise we strip from titles. Also does duty as the
+    // guard against reading a codec or a resolution as a season/episode code: any number
+    // inside one of these tokens is about the encoding, not about the programme.
     private static readonly Regex Noise = new(
-        @"\b(1080p|720p|2160p|480p|4k|x264|x265|h264|h265|hevc|xvid|divx|" +
+        @"\b(1080p|720p|2160p|480p|4k|x\.?26[45]|h\.?26[45]|avc|hevc|vp9|av1|xvid|divx|" +
+        @"10bit|8bit|\d{3,4}x\d{3,4}|" +
         @"bluray|brrip|bdrip|dvdrip|webrip|web-?dl|hdtv|aac|ac3|dts|hdr|" +
         @"remux|proper|repack|internal|extended|uncut)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -82,9 +85,14 @@ public static class MediaClassifier
 
         var name = Path.GetFileNameWithoutExtension(file.FileName);
 
+        // Where the encoding details sit in the name. Numbers inside them describe the
+        // file, not the programme, so nothing below is allowed to read them: "x264" is a
+        // codec rather than season 2 episode 64, and the 1920 in "1920x1080" is not a year.
+        var noise = NoiseSpans(name);
+
         // Year applies to both movies and TV; capture the first plausible one.
-        var yearMatch = Year.Match(name);
-        if (yearMatch.Success && int.TryParse(yearMatch.Groups["y"].Value, out var y))
+        var yearMatch = FirstOutsideNoise(Year, name, noise);
+        if (yearMatch != null && int.TryParse(yearMatch.Groups["y"].Value, out var y))
             file.Year = y;
 
         var se = SeasonEpisode.Match(name);
@@ -160,9 +168,9 @@ public static class MediaClassifier
         {
             // A year with no episode markers is the classic movie signature.
             file.VideoCategory = VideoCategory.Movie;
-            titleCut = yearMatch.Index;
+            titleCut = yearMatch?.Index ?? -1;
         }
-        else if (TryCompactEpisode(name, out var cSeason, out var cEpisode, out var cIndex))
+        else if (TryCompactEpisode(name, noise, out var cSeason, out var cEpisode, out var cIndex))
         {
             // No explicit markers and no year: a bare 3- or 4-digit number like "123" or
             // "1102" is read as season 1 episode 23, or season 11 episode 02.
@@ -219,24 +227,52 @@ public static class MediaClassifier
         EpisodeOnly.Match(name) is { Success: true } m ? ParseInt(m.Groups["e"].Value) : null;
 
     /// <summary>
+    /// Where the encoding/quality tokens sit in a name, as half-open character ranges.
+    /// </summary>
+    private static List<(int Start, int End)> NoiseSpans(string name) =>
+        Noise.Matches(name).Select(m => (m.Index, m.Index + m.Length)).ToList();
+
+    /// <summary>The first match of <paramref name="pattern"/> that is not inside a noise token.</summary>
+    private static Match? FirstOutsideNoise(
+        Regex pattern, string name, IReadOnlyList<(int Start, int End)> noise)
+    {
+        foreach (Match m in pattern.Matches(name))
+            if (!Overlaps(m, noise)) return m;
+        return null;
+    }
+
+    /// <summary>True when a match falls inside a codec/resolution token.</summary>
+    private static bool Overlaps(Match m, IReadOnlyList<(int Start, int End)> noise)
+    {
+        foreach (var (start, end) in noise)
+            if (m.Index < end && m.Index + m.Length > start) return true;
+        return false;
+    }
+
+    /// <summary>
     /// Find a bare 3- or 4-digit number to read as a compact season/episode code: "123"
-    /// is S01E23, "1102" is S11E02. Rejects resolutions (720, 1080, …) and episode 00.
+    /// is S01E23, "1102" is S11E02. Rejects resolutions (720, 1080, …), episode 00, and
+    /// anything inside an encoding token — the 264 in "x264" is a codec, not S02E64.
     /// The 4-digit form is tried first, so "1102" is not read as the "102" inside it.
     /// </summary>
-    private static bool TryCompactEpisode(string name, out int season, out int episode, out int index)
+    private static bool TryCompactEpisode(
+        string name, IReadOnlyList<(int Start, int End)> noise,
+        out int season, out int episode, out int index)
     {
-        if (TryDigits(FourDigit, ResolutionNumbers4, name, out season, out episode, out index))
+        if (TryDigits(FourDigit, ResolutionNumbers4, name, noise, out season, out episode, out index))
             return true;
-        return TryDigits(ThreeDigit, ResolutionNumbers, name, out season, out episode, out index);
+        return TryDigits(ThreeDigit, ResolutionNumbers, name, noise, out season, out episode, out index);
     }
 
     private static bool TryDigits(
         Regex pattern, HashSet<int> reject, string name,
+        IReadOnlyList<(int Start, int End)> noise,
         out int season, out int episode, out int index)
     {
         season = episode = 0; index = -1;
         foreach (Match m in pattern.Matches(name))
         {
+            if (Overlaps(m, noise)) continue;
             var value = int.Parse(m.Value);
             if (reject.Contains(value)) continue;
             var e = int.Parse(m.Groups["e"].Value);

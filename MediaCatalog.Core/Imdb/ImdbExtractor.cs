@@ -140,8 +140,6 @@ public static class ImdbExtractor
     private static bool IsGzip(string path) =>
         path.EndsWith(".gz", StringComparison.OrdinalIgnoreCase);
 
-    private static void TryDelete(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
-    }
+    private static void TryDelete(string path) =>
+        Relocation.FileDeleter.TryDeleteQuietly(path);
 }

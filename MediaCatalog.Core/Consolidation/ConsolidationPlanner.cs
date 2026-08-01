@@ -65,10 +65,10 @@ public static class ConsolidationPlanner
     public const string ExtrasFolder = "Extras";
 
     /// <summary>
-    /// True when the file already sits somewhere under one of the configured
-    /// consolidation folders — i.e. it has been filed into the library.
+    /// True when the file sits somewhere under one of the configured consolidation
+    /// folders. That it is in the library at all — not that it is in the right place in it.
     /// </summary>
-    public static bool IsInConsolidationLocation(MediaFile file, AppSettings settings)
+    public static bool IsUnderConsolidationRoot(MediaFile file, AppSettings settings)
     {
         if (string.IsNullOrEmpty(file.FullPath)) return false;
 
@@ -82,6 +82,40 @@ public static class ConsolidationPlanner
                 return true;
         }
         return false;
+    }
+
+    /// <summary>True when the file is already at the exact path the layout dictates.</summary>
+    public static bool IsAtPlannedPath(MediaFile file, string category, AppSettings settings) =>
+        PlanPath(file, category, settings) is { } planned && PathsEqual(planned, file.FullPath);
+
+    /// <summary>
+    /// True when the file has been filed correctly — it is in the library, at the place
+    /// its category, title, year and numbering say it belongs.
+    ///
+    /// The distinction matters after a title is corrected: the file is still under the
+    /// consolidation root, but under the old title's folder, so it is *not* filed and
+    /// consolidating it again should move it rather than report it as already done.
+    /// </summary>
+    public static bool IsCorrectlyFiled(MediaFile file, string category, AppSettings settings)
+    {
+        if (!IsUnderConsolidationRoot(file, settings)) return false;
+
+        // Nothing to plan — no title yet, or a category filed straight into its folder —
+        // means being under the root is the most that can be said about it.
+        var planned = PlanPath(file, category, settings);
+        return planned == null || PathsEqual(planned, file.FullPath);
+    }
+
+    /// <summary>Same file, whatever the two paths look like as text.</summary>
+    public static bool PathsEqual(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
     }
 
     /// <summary>

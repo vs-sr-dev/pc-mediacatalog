@@ -161,6 +161,48 @@ public class AppSettings
     public bool UseImdbFirst { get; set; } = true;
 
     /// <summary>
+    /// Where <c>title.basics.tsv.gz</c> is fetched from when the user asks for it to be
+    /// downloaded. Kept as a setting so a changed address can be corrected without a new
+    /// build; blank falls back to <see cref="DefaultImdbDownloadUrl"/>.
+    /// </summary>
+    public string ImdbDownloadUrl { get; set; } = DefaultImdbDownloadUrl;
+
+    /// <summary>IMDb's published location for the titles dataset.</summary>
+    public const string DefaultImdbDownloadUrl = "https://datasets.imdbws.com/title.basics.tsv.gz";
+
+    /// <summary>The download address to actually use, falling back to the built-in one.</summary>
+    [XmlIgnore]
+    public string EffectiveImdbDownloadUrl =>
+        string.IsNullOrWhiteSpace(ImdbDownloadUrl) ? DefaultImdbDownloadUrl : ImdbDownloadUrl.Trim();
+
+    // --- Housekeeping ------------------------------------------------------
+
+    /// <summary>
+    /// What to do when a new exclusion covers rules that already exist. Asking is the
+    /// default; the alternatives are to prune them silently or to leave them be.
+    /// </summary>
+    public RedundantRuleAction RedundantExclusions { get; set; } = RedundantRuleAction.Ask;
+
+    /// <summary>
+    /// Rename the file on disk when its title changes, following the naming scheme for its
+    /// category. On by default: a corrected title that leaves the old name on disk is only
+    /// half a correction.
+    /// </summary>
+    public bool RenameOnTitleChange { get; set; } = true;
+
+    /// <summary>
+    /// Drives the scan wizard last ran over, so it opens on the same choice next time.
+    /// </summary>
+    [XmlArray("ScanDrives"), XmlArrayItem("Drive")]
+    public List<string> ScanDrives { get; set; } = new();
+
+    /// <summary>
+    /// Set once the scan wizard has been through. Until then it is offered unprompted,
+    /// since an empty catalogue is not much use and the options are worth seeing once.
+    /// </summary>
+    public bool ScanWizardCompleted { get; set; }
+
+    /// <summary>
     /// True when a file of this size should be catalogued, given the configured limits.
     /// Zero-length files always pass: they are reported as corrupt rather than hidden.
     /// </summary>
@@ -361,19 +403,90 @@ public class AppSettings
     }
 
     /// <summary>
-    /// Existing literal exclusions made redundant by <paramref name="candidate"/> (a
-    /// broader subtree rule that already covers them). Used to offer pruning old rules.
+    /// Existing exclusions made redundant by <paramref name="candidate"/> — rules whose
+    /// every effect the candidate already has. Used to offer pruning the old ones.
+    ///
+    /// Both plain paths and patterns are considered: <c>*\Windows\*</c> supersedes
+    /// <c>C:\Windows</c> just as <c>D:\Media</c> supersedes <c>D:\Media\Films</c>.
     /// </summary>
-    public List<ExcludedFolder> FindSupersededBy(ExcludedFolder candidate)
+    public List<ExcludedFolder> FindSupersededBy(ExcludedFolder candidate) =>
+        ExcludedFolders
+            .Where(ex => !ReferenceEquals(ex, candidate) && Supersedes(candidate, ex))
+            .ToList();
+
+    /// <summary>
+    /// User rules the built-in system-folder list already covers, when that list is
+    /// switched on. Worth offering to prune for the same reason as any other redundancy.
+    /// </summary>
+    public List<ExcludedFolder> FindCoveredBySystemRules() =>
+        ExcludeSystemDirectories
+            ? ExcludedFolders.Where(ex => SystemExclusions.Any(sys => Supersedes(sys, ex))).ToList()
+            : new List<ExcludedFolder>();
+
+    /// <summary>
+    /// Add <paramref name="candidate"/>'s effect to <paramref name="rules"/> by removing
+    /// whatever it makes redundant, following <paramref name="policy"/>. Returns the rules
+    /// dropped, so the caller can say what happened.
+    ///
+    /// One implementation for both places a rule can be added — the settings list and the
+    /// results grid's "exclude this folder" — so the policy means the same thing wherever
+    /// it is applied.
+    /// </summary>
+    /// <param name="ask">
+    /// Put the redundant rules to the user; true to prune. Only consulted under
+    /// <see cref="RedundantRuleAction.Ask"/>.
+    /// </param>
+    public static List<ExcludedFolder> PruneSuperseded(
+        IList<ExcludedFolder> rules,
+        ExcludedFolder candidate,
+        RedundantRuleAction policy,
+        Func<IReadOnlyList<ExcludedFolder>, bool>? ask = null)
     {
-        if (HasWildcard(candidate.Path) || !candidate.IncludeSubdirectories)
-            return new List<ExcludedFolder>();
-        var root = candidate.Path.TrimEnd('\\', '/');
-        return ExcludedFolders.Where(ex =>
-            !ReferenceEquals(ex, candidate) &&
-            !HasWildcard(ex.Path) &&
-            !string.Equals(ex.Path.TrimEnd('\\', '/'), root, StringComparison.OrdinalIgnoreCase) &&
-            IsUnder(ex.Path.TrimEnd('\\', '/'), root)).ToList();
+        var none = new List<ExcludedFolder>();
+        if (policy == RedundantRuleAction.Keep) return none;
+
+        var superseded = rules
+            .Where(r => !ReferenceEquals(r, candidate) && Supersedes(candidate, r))
+            .ToList();
+        if (superseded.Count == 0) return none;
+
+        if (policy == RedundantRuleAction.Ask && (ask == null || !ask(superseded))) return none;
+
+        foreach (var rule in superseded) rules.Remove(rule);
+        return superseded;
+    }
+
+    /// <summary>
+    /// True when <paramref name="outer"/> already excludes everything
+    /// <paramref name="inner"/> would — so keeping <paramref name="inner"/> changes nothing.
+    /// </summary>
+    public static bool Supersedes(ExcludedFolder outer, ExcludedFolder inner)
+    {
+        if (string.IsNullOrWhiteSpace(outer.Path) || string.IsNullOrWhiteSpace(inner.Path))
+            return false;
+
+        var outerPath = outer.Path.TrimEnd('\\', '/');
+        var innerPath = inner.Path.TrimEnd('\\', '/');
+        var same = string.Equals(outerPath, innerPath, StringComparison.OrdinalIgnoreCase);
+
+        // The identical path twice: redundant unless the survivor covers less than the
+        // rule it would replace.
+        if (same) return outer.IncludeSubdirectories || !inner.IncludeSubdirectories;
+
+        // A rule that only covers one folder cannot stand in for a rule about another.
+        if (!outer.IncludeSubdirectories) return false;
+
+        if (HasWildcard(outer.Path))
+        {
+            // A pattern covers a plain path when it matches that folder; a pattern covering
+            // another pattern is not something we can decide, so we leave it alone.
+            if (HasWildcard(inner.Path)) return false;
+            return BlocksDescent(outer, innerPath);
+        }
+
+        // A plain subtree rule covers anything beneath it — but not a pattern, which may
+        // well match folders on other drives entirely.
+        return !HasWildcard(inner.Path) && IsUnder(innerPath, outerPath);
     }
 
     /// <summary>Category rule matching a path, preferring the deepest (most specific) folder.</summary>

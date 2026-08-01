@@ -28,25 +28,41 @@ public static class RenameService
     /// Compute a proposal for each file. Files with no confident scheme, or already
     /// matching the scheme, come back with <see cref="RenameProposal.WillChange"/> = false.
     /// </summary>
-    public static List<RenameProposal> BuildProposals(IEnumerable<MediaFile> files)
+    /// <param name="categoryOf">
+    /// The effective category of a file, when the caller knows it. Without one the
+    /// automatically detected category is used, which ignores anything the user has set.
+    /// </param>
+    public static List<RenameProposal> BuildProposals(
+        IEnumerable<MediaFile> files, Func<MediaFile, string>? categoryOf = null)
     {
         var proposals = new List<RenameProposal>();
         foreach (var f in files)
         {
-            var proposed = NamingScheme.GenerateFileName(f);
-            if (string.IsNullOrEmpty(proposed))
-                continue; // not enough metadata — leave it alone
-
-            var dir = Path.GetDirectoryName(f.FullPath) ?? string.Empty;
-            proposals.Add(new RenameProposal
-            {
-                File = f,
-                CurrentName = f.FileName,
-                ProposedName = proposed,
-                ProposedPath = Path.Combine(dir, proposed)
-            });
+            var proposal = BuildProposal(f, categoryOf?.Invoke(f));
+            if (proposal != null) proposals.Add(proposal);
         }
         return proposals;
+    }
+
+    /// <summary>
+    /// The proposal for one file, or null when the naming scheme has nothing better to
+    /// offer than the name it already has.
+    /// </summary>
+    public static RenameProposal? BuildProposal(MediaFile file, string? category = null)
+    {
+        var proposed = category == null
+            ? NamingScheme.GenerateFileName(file)
+            : NamingScheme.GenerateFileName(file, category);
+        if (string.IsNullOrEmpty(proposed)) return null;
+
+        var dir = Path.GetDirectoryName(file.FullPath) ?? string.Empty;
+        return new RenameProposal
+        {
+            File = file,
+            CurrentName = file.FileName,
+            ProposedName = proposed,
+            ProposedPath = Path.Combine(dir, proposed)
+        };
     }
 
     /// <summary>

@@ -30,12 +30,15 @@ public record DeleteResult(int Deleted, List<DeleteFailure> Failures)
 }
 
 /// <summary>
-/// Deletes files either to the Recycle Bin (recoverable, the default) or permanently.
+/// The one place in the program that removes a file from disk. Everything that deletes —
+/// the results grid, the duplicate manager, a verified move discarding its original, a
+/// rolled-back copy — comes through here, so a fix to how deleting behaves is made once.
 ///
-/// A refusal is not taken at face value: a read-only file has the attribute cleared and
-/// the delete retried, and anything still failing is reported with the reason and — when
-/// the file is locked — the applications holding it open, so the caller can tell the user
-/// exactly what to close or offer to retry with administrative rights.
+/// Files go to the Recycle Bin (recoverable) or permanently, as asked. A refusal is not
+/// taken at face value: the read-only attribute is cleared before the attempt and again
+/// after a failure, and anything still refusing is reported with the reason and — when the
+/// file is locked — the applications holding it open, so the caller can say exactly what
+/// to close or offer to retry with administrative rights.
 /// </summary>
 public static class FileDeleter
 {
@@ -52,20 +55,43 @@ public static class FileDeleter
 
         foreach (var path in list)
         {
-            if (!File.Exists(path)) { deleted++; continue; }   // already gone is a success
-
-            var failure = TryDelete(path, toRecycleBin);
-
-            // A read-only file refuses deletion for a reason we can simply undo.
-            if (failure != null && clearReadOnly && TryClearReadOnly(path))
-                failure = TryDelete(path, toRecycleBin);
-
+            var failure = DeleteOne(path, toRecycleBin, clearReadOnly);
             if (failure == null) deleted++;
             else failures.Add(failure);
         }
 
         return new DeleteResult(deleted, failures);
     }
+
+    /// <summary>
+    /// Delete one file. Returns null when it is gone (including when it was never there,
+    /// which is the outcome the caller wanted), or the failure explaining why not.
+    /// </summary>
+    public static DeleteFailure? DeleteOne(string path, bool toRecycleBin, bool clearReadOnly = true)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        if (!File.Exists(path)) return null;   // already gone is a success
+
+        // Read-only is the commonest reason a delete refuses, and the easiest to undo, so
+        // the attribute goes before the attempt rather than after the first failure.
+        if (clearReadOnly) ClearReadOnly(path);
+
+        var failure = TryDelete(path, toRecycleBin);
+
+        // The attribute may have been set again between clearing it and deleting, or the
+        // file may have been unreadable a moment ago; one more go costs nothing.
+        if (failure != null && clearReadOnly && ClearReadOnly(path))
+            failure = TryDelete(path, toRecycleBin);
+
+        return failure;
+    }
+
+    /// <summary>
+    /// Convenience for housekeeping deletes — temporary files, a half-written copy being
+    /// rolled back — where there is nothing useful to say about a failure.
+    /// </summary>
+    public static bool TryDeleteQuietly(string path) =>
+        DeleteOne(path, toRecycleBin: false) == null;
 
     /// <summary>Delete one file; returns null on success or a failure describing why not.</summary>
     private static DeleteFailure? TryDelete(string path, bool toRecycleBin)
@@ -106,7 +132,11 @@ public static class FileDeleter
         return new DeleteFailure(path, reason, holders, accessDenied && holders.Count == 0);
     }
 
-    private static bool TryClearReadOnly(string path)
+    /// <summary>
+    /// Clear the read-only attribute. True only when it was set and has now gone, so the
+    /// caller can tell "worth retrying" from "that was never the problem".
+    /// </summary>
+    public static bool ClearReadOnly(string path)
     {
         try
         {
