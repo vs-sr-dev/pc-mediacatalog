@@ -37,10 +37,11 @@ public partial class App : Application
             return;
         }
 
-        var startHidden = args.Contains(TrayArgument, StringComparer.OrdinalIgnoreCase);
-        var window = new MainWindow(startHidden);
+        // The window works out for itself whether to stay hidden: the launch argument is
+        // one reason, the "always start minimised" setting is the other.
+        var window = new MainWindow(args.Contains(TrayArgument, StringComparer.OrdinalIgnoreCase));
         MainWindow = window;
-        if (!startHidden) window.Show();
+        if (!window.ShouldStartHidden) window.Show();
     }
 
     /// <summary>

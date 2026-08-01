@@ -42,8 +42,12 @@ public class FileRow : ObservableObject
     public string Integrity => Model.Integrity.ToString();
     public string FullPath => Model.FullPath;
 
-    /// <summary>Title provenance: ✓ confirmed by TMDb, ✎ typed by the user.</summary>
-    public string TmdbFlag => Model.TitleManuallySet ? "✎" : Model.TmdbVerified ? "✓" : "";
+    /// <summary>
+    /// Title provenance: ✎ typed by the user, ✓ confirmed against the local IMDb data or
+    /// TMDb, blank when it is still only a guess from the file name.
+    /// </summary>
+    public string TmdbFlag =>
+        Model.TitleManuallySet ? "✎" : Model.TitleVerified ? "✓" : "";
 
     /// <summary>Whether the file has been filed into its consolidation location.</summary>
     public string FiledFlag => Model.Consolidated ? "✓" : "";

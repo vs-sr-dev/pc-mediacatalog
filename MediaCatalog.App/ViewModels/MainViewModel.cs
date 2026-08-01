@@ -10,6 +10,7 @@ using MediaCatalog.Core.Duplicates;
 using MediaCatalog.Core.Filtering;
 using MediaCatalog.Core.Fingerprinting;
 using MediaCatalog.Core.History;
+using MediaCatalog.Core.Imdb;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Naming;
 using MediaCatalog.Core.Persistence;
@@ -56,6 +57,7 @@ public class MainViewModel : ObservableObject
     private ExternalTools _tools;
     private ScanSession _session;
     private TmdbCache _tmdbCache;
+    private readonly ImdbTitleIndex _imdb = new(AppPaths.ImdbDataPath);
     private NewFileWatcher? _watcher;
     private List<string> _lastRoots = new();
     private readonly List<FileRow> _allRows = new();
@@ -104,6 +106,17 @@ public class MainViewModel : ObservableObject
             var how = _session.Status == ScanSessionStatus.Paused ? "Paused" : "Interrupted";
             StatusText = $"{how} scan can be resumed: {_session.LastDone}/{_session.LastTotal} done " +
                          $"on {_session.Roots.Count} drive(s). Click Resume to continue.";
+        }
+        else
+        {
+            // Nudge the one-off upgrade job, since nothing else would make it obvious that
+            // an existing catalogue has work waiting that costs no re-scanning.
+            var stale = StaleEntryCount;
+            var rules = PendingFolderRuleCount;
+            if (stale > 0 || rules > 0)
+                StatusText = $"{stale} catalogue entr(ies) can be re-derived with this version's rules" +
+                             (rules > 0 ? $", and {rules} folder rule(s) written onto their files" : "") +
+                             " — click Refresh catalogue. No re-scanning or re-hashing is involved.";
         }
 
         LoadDrives();
@@ -336,6 +349,26 @@ public class MainViewModel : ObservableObject
 
     private void EndTiming() => EtaText = "";
 
+    /// <summary>
+    /// Compose a progress line. Thousands of small files going past in a second make a
+    /// trailing file name flicker the whole line about — the counter never lands in the
+    /// same place twice — so the name can be moved to the front, where it pushes nothing
+    /// around, or dropped entirely.
+    /// </summary>
+    private string ProgressLine(string phase, int done, int total, string currentFile)
+    {
+        if (total <= 0) return phase;
+        var counted = $"{phase}: {done}/{total}";
+        if (string.IsNullOrEmpty(currentFile)) return counted;
+
+        return _settings.ProgressNamePosition switch
+        {
+            ProgressNamePosition.Hidden => counted,
+            ProgressNamePosition.Left => $"{currentFile}  —  {counted}",
+            _ => $"{counted} — {currentFile}"
+        };
+    }
+
     private static bool Matches(FileRow row, FilterClause clause)
     {
         var m = WildcardMatcher.IsMatch(row.ColumnValue(clause.Column), clause.Pattern);
@@ -354,6 +387,44 @@ public class MainViewModel : ObservableObject
         set { if (SetProperty(ref _missingFiles, value)) OnPropertyChanged(nameof(HasMissingFiles)); }
     }
     public bool HasMissingFiles => _missingFiles.Count > 0;
+
+    private IReadOnlyList<MediaFile> _unhashedFiles = Array.Empty<MediaFile>();
+
+    /// <summary>
+    /// Files the last scan found but could not read to hash. Surfaced rather than left
+    /// quiet: without a hash they are invisible to duplicate detection.
+    /// </summary>
+    public IReadOnlyList<MediaFile> UnhashedFiles
+    {
+        get => _unhashedFiles;
+        set { if (SetProperty(ref _unhashedFiles, value)) OnPropertyChanged(nameof(HasUnhashedFiles)); }
+    }
+
+    public bool HasUnhashedFiles => _unhashedFiles.Count > 0;
+
+    /// <summary>Raised when a scan ends having left files it could not hash.</summary>
+    public Action? UnhashedFilesFound { get; set; }
+
+    // --- Scan scope -------------------------------------------------------
+
+    public Array ScanFilters => Enum.GetValues(typeof(ScanMediaFilter));
+
+    /// <summary>
+    /// Whether a scan looks for everything, only video, or only audio. Saved as it
+    /// changes, and never prunes what it wasn't looking for — so audio and video scans
+    /// accumulate into one catalogue.
+    /// </summary>
+    public ScanMediaFilter ScanFilter
+    {
+        get => _settings.ScanMediaFilter;
+        set
+        {
+            if (_settings.ScanMediaFilter == value) return;
+            _settings.ScanMediaFilter = value;
+            _settings.Save(_settingsPath);
+            OnPropertyChanged();
+        }
+    }
 
     private void LoadDrives()
     {
@@ -407,9 +478,7 @@ public class MainViewModel : ObservableObject
             _lastTotal = p.Total;
             ProgressMax = Math.Max(1, p.Total);
             ProgressValue = p.Done;
-            StatusText = p.Total > 0
-                ? $"{p.Phase}: {p.Done}/{p.Total} — {p.CurrentFile}"
-                : p.Phase;
+            StatusText = ProgressLine(p.Phase, p.Done, p.Total, p.CurrentFile);
         });
 
         // Checkpoint the catalogue AND the session (as Running) so a crash mid-scan is
@@ -435,9 +504,23 @@ public class MainViewModel : ObservableObject
             _lastRoots = roots;
             StartWatchingIfEnabled(roots);
             MissingFiles = report.MissingFiles;
-            StatusText = report.MissingFiles.Count > 0
-                ? $"Scan complete. {report.MissingFiles.Count} file(s) could not be found — see the missing-files list."
+            UnhashedFiles = report.Unhashed;
+
+            var notes = new List<string>();
+            if (report.MissingFiles.Count > 0)
+                notes.Add($"{report.MissingFiles.Count} file(s) could not be found");
+            if (report.Unhashed.Count > 0)
+                notes.Add($"{report.Unhashed.Count} could not be hashed");
+            if (report.SkippedBySize > 0)
+                notes.Add($"{report.SkippedBySize} skipped by the size limits");
+
+            StatusText = notes.Count > 0
+                ? "Scan complete — " + string.Join(", ", notes) + "."
                 : $"Scan complete. Catalogue saved to {_catalogPath}";
+
+            // Files with no hash are invisible to duplicate detection, so they are put in
+            // front of the user rather than left to be noticed.
+            if (report.Unhashed.Count > 0) UnhashedFilesFound?.Invoke();
         }
         catch (OperationCanceledException)
         {
@@ -492,9 +575,7 @@ public class MainViewModel : ObservableObject
             ProgressMax = Math.Max(1, p.Total);
             ProgressValue = p.Done;
             UpdateEta(p.Done, p.Total);
-            StatusText = p.Total > 0
-                ? $"{p.Phase}: {p.Done}/{p.Total} — {p.CurrentFile}"
-                : p.Phase;
+            StatusText = ProgressLine(p.Phase, p.Done, p.Total, p.CurrentFile);
         });
 
         try
@@ -965,7 +1046,7 @@ public class MainViewModel : ObservableObject
         var withDuplicates = targets.Concat(DuplicatesOf(targets)).Distinct().ToList();
 
         var snapshot = _catalog.Files
-            .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.TitleManuallySet, f.ParsedTitle))
+            .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified, f.TitleManuallySet, f.ParsedTitle))
             .ToList();
 
         var changed = TitleUpdater.Apply(_catalog.Files, withDuplicates, title, manual: true);
@@ -981,6 +1062,7 @@ public class MainViewModel : ObservableObject
             {
                 s.File.TmdbName = s.TmdbName;
                 s.File.TmdbVerified = s.TmdbVerified;
+                s.File.ImdbVerified = s.ImdbVerified;
                 s.File.TitleManuallySet = s.TitleManuallySet;
                 s.File.ParsedTitle = s.ParsedTitle;
             }
@@ -1088,8 +1170,9 @@ public class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Give everything under a folder the same title — a whole show in one go. The rule is
-    /// remembered so files scanned later inherit it, and applied to what is already here.
+    /// Give everything under a folder the same title — a whole show in one go. Written
+    /// onto each file rather than kept as a folder rule, so the catalogue alone says
+    /// everything there is to know about a file.
     /// </summary>
     public string SetTitleForFolder(string folder, string title, bool includeSubdirs)
     {
@@ -1097,32 +1180,31 @@ public class MainViewModel : ObservableObject
             return "Choose a folder and a title first.";
 
         var clean = title.Trim();
-        var rules = _settings.FolderTitleRules;
-        var previous = rules.Where(r => string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        rules.RemoveAll(r => string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
-        rules.Add(new FolderTitleRule
+        var affected = FilesUnder(folder, includeSubdirs);
+        if (affected.Count == 0)
         {
-            Path = folder, Title = clean, IncludeSubdirectories = includeSubdirs
-        });
-        _settings.Save(_settingsPath);
+            StatusText = $"No catalogued files under {folder}.";
+            return StatusText;
+        }
 
-        // Apply to the files already catalogued under the folder.
-        var affected = _catalog.Files
-            .Where(f => includeSubdirs
-                ? f.FullPath.StartsWith(folder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar,
-                    StringComparison.OrdinalIgnoreCase)
-                : string.Equals(Path.GetDirectoryName(f.FullPath), folder.TrimEnd('\\', '/'),
-                    StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        var snapshot = affected
-            .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.TitleManuallySet))
+        var snapshot = _catalog.Files
+            .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified, f.TitleManuallySet))
             .ToList();
 
         var changed = TitleUpdater.Apply(_catalog.Files, affected, clean, manual: true);
         DuplicateMetadata.Propagate(_catalog.Files);
         ExtraLinker.Link(_catalog.Files);
+
+        // Any leftover rule for this folder has just been made redundant.
+        var previous = _settings.FolderTitleRules
+            .Where(r => string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (previous.Count > 0)
+        {
+            _settings.FolderTitleRules.RemoveAll(r =>
+                string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
+            _settings.Save(_settingsPath);
+        }
+
         CatalogStore.Save(_catalog, _catalogPath);
         RebuildRows();
 
@@ -1132,12 +1214,14 @@ public class MainViewModel : ObservableObject
             {
                 s.File.TmdbName = s.TmdbName;
                 s.File.TmdbVerified = s.TmdbVerified;
+                s.File.ImdbVerified = s.ImdbVerified;
                 s.File.TitleManuallySet = s.TitleManuallySet;
             }
-            _settings.FolderTitleRules.RemoveAll(r =>
-                string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
-            _settings.FolderTitleRules.AddRange(previous);
-            _settings.Save(_settingsPath);
+            if (previous.Count > 0)
+            {
+                _settings.FolderTitleRules.AddRange(previous);
+                _settings.Save(_settingsPath);
+            }
             ExtraLinker.Link(_catalog.Files);
             PersistAndRefresh();
             return Task.FromResult($"Reverted the folder title '{clean}'.");
@@ -1148,17 +1232,54 @@ public class MainViewModel : ObservableObject
         return StatusText;
     }
 
-    public void SetCategoryForFolder(string folder, string category, bool includeSubdirs)
+    /// <summary>
+    /// Give every catalogued file under a folder the same category. Written onto the files
+    /// themselves rather than kept as a folder rule: everything known about a file belongs
+    /// in the catalogue, where it travels with the file and survives a settings reset.
+    /// </summary>
+    public string SetCategoryForFolder(string folder, string category, bool includeSubdirs)
     {
-        _settings.FolderCategoryRules.RemoveAll(r =>
-            string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
-        _settings.FolderCategoryRules.Add(new FolderCategoryRule
+        if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(category))
+            return "Choose a folder and a category first.";
+
+        var affected = FilesUnder(folder, includeSubdirs);
+        if (affected.Count == 0)
         {
-            Path = folder, Category = category, IncludeSubdirectories = includeSubdirs
-        });
-        _settings.Save(_settingsPath);
+            StatusText = $"No catalogued files under {folder}.";
+            return StatusText;
+        }
+
+        // Duplicates elsewhere are the same content, so they are filed the same way.
+        var withDuplicates = affected.Concat(DuplicatesOf(affected)).Distinct().ToList();
+
+        PushFieldUndo($"category '{category}' on {withDuplicates.Count} file(s)", withDuplicates,
+            f => f.CategoryOverride, (f, old) => f.CategoryOverride = old);
+
+        foreach (var f in withDuplicates) f.CategoryOverride = category;
+
+        // A rule for this folder, if one is left over from an earlier version, has just
+        // been made redundant by the files themselves saying so.
+        var retired = _settings.FolderCategoryRules.RemoveAll(r =>
+            string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
+        if (retired > 0) _settings.Save(_settingsPath);
+
+        CatalogStore.Save(_catalog, _catalogPath);
         RebuildRows();
-        StatusText = $"Folder rule: '{category}' for {folder}{(includeSubdirs ? " (and subfolders)" : "")}.";
+
+        StatusText = $"Category '{category}' set on {withDuplicates.Count} file(s) under " +
+                     $"{folder}{(includeSubdirs ? " and its subfolders" : "")}.";
+        return StatusText;
+    }
+
+    /// <summary>Catalogued files inside a folder (and optionally everything below it).</summary>
+    private List<MediaFile> FilesUnder(string folder, bool includeSubdirs)
+    {
+        var root = folder.TrimEnd('\\', '/');
+        return _catalog.Files
+            .Where(f => includeSubdirs
+                ? f.FullPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(Path.GetDirectoryName(f.FullPath), root, StringComparison.OrdinalIgnoreCase))
+            .ToList();
     }
 
     public void AddCustomCategory(string category)
@@ -1660,14 +1781,24 @@ public class MainViewModel : ObservableObject
     /// <summary>How many catalogue entries a refresh would re-derive.</summary>
     public int StaleEntryCount => CatalogRefresher.CountStale(_catalog);
 
+    /// <summary>How many titles a refresh would try to confirm or date.</summary>
+    public int UnverifiedTitleCount => CatalogRefresher.CountUnverified(_catalog);
+
+    /// <summary>How many folder rules are still waiting to be written onto their files.</summary>
+    public int PendingFolderRuleCount =>
+        _settings.FolderCategoryRules.Count + _settings.FolderTitleRules.Count;
+
     /// <summary>
     /// Re-derive metadata for entries that predate the current feature set (new
-    /// categories, extras linking, title parsing) without re-walking drives or re-hashing.
+    /// categories, extras linking, title parsing) without re-walking drives or re-hashing,
+    /// then confirm unverified titles against IMDb — falling back to TMDb — and fill in
+    /// any missing years.
     /// </summary>
-    public async Task<string> RefreshCatalogAsync()
+    public async Task<string> RefreshCatalogAsync(bool verifyTitles = true)
     {
         _cts = new CancellationTokenSource();
         IsScanning = true;
+        BeginTiming();
         ProgressValue = 0;
         ProgressMax = Math.Max(1, StaleEntryCount);
 
@@ -1675,18 +1806,34 @@ public class MainViewModel : ObservableObject
         {
             ProgressMax = Math.Max(1, p.Total);
             ProgressValue = p.Done;
-            StatusText = $"Refreshing catalogue {p.Done}/{p.Total} — {p.Current}";
+            UpdateEta(p.Done, p.Total);
+            StatusText = ProgressLine(p.Phase, p.Done, p.Total, p.Current);
         });
 
         try
         {
+            var verifier = verifyTitles ? await BuildVerifierAsync(_cts.Token) : null;
             var report = await Task.Run(() =>
-                CatalogRefresher.Refresh(_catalog, _settings, progress, _cts.Token));
+                CatalogRefresher.RefreshAsync(_catalog, _settings, verifier, progress, _cts.Token));
+
             CatalogStore.Save(_catalog, _catalogPath);
-            StatusText =
-                $"Catalogue refresh: {report.Refreshed} entr(ies) updated, {report.Skipped} already current, " +
-                $"{report.Linked} extra(s) linked, {report.Shared} value(s) shared with duplicates" +
-                (report.Pruned > 0 ? $", {report.Pruned} dropped by exclusions." : ".");
+            _settings.Save(_settingsPath);   // folder rules retired during the migration
+            _tmdbCache.Save(_tmdbCachePath);
+
+            var parts = new List<string>
+            {
+                $"{report.Refreshed} entr(ies) updated",
+                $"{report.Skipped} already current",
+                $"{report.Linked} extra(s) linked",
+                $"{report.Shared} value(s) shared with duplicates"
+            };
+            if (report.Numbered > 0) parts.Add($"{report.Numbered} gained a season/episode");
+            if (report.Adopted > 0) parts.Add($"{report.Adopted} took a folder rule onto the file itself");
+            if (report.RulesRetired > 0) parts.Add($"{report.RulesRetired} folder rule(s) retired");
+            if (report.Pruned > 0) parts.Add($"{report.Pruned} dropped by exclusions");
+
+            StatusText = "Catalogue refresh: " + string.Join(", ", parts) + ".";
+            if (report.Verified is { } v) StatusText += "\n" + v.Describe();
         }
         catch (OperationCanceledException)
         {
@@ -1699,6 +1846,186 @@ public class MainViewModel : ObservableObject
         }
         finally
         {
+            EndTiming();
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+            RebuildRows();
+        }
+        return StatusText;
+    }
+
+    // --- IMDb -------------------------------------------------------------
+
+    /// <summary>True once <c>IMDBData.tsv</c> exists and can be searched.</summary>
+    public bool HasImdbData => _imdb.IsAvailable;
+
+    /// <summary>The raw IMDb download, if one is sitting in the app folder waiting to be extracted.</summary>
+    public string? ImdbSourceFile =>
+        ImdbExtractor.FindSource(AppPaths.ImdbSourcePath, AppPaths.ImdbSourceGzPath);
+
+    /// <summary>
+    /// True when the raw IMDb file is present but the extract isn't — the one case where
+    /// extraction should be offered without being asked for.
+    /// </summary>
+    public bool ImdbExtractionPending => !HasImdbData && ImdbSourceFile != null;
+
+    public string ImdbStatus =>
+        !HasImdbData
+            ? ImdbSourceFile != null
+                ? "IMDb: title.basics.tsv found, not yet extracted"
+                : "IMDb: no data"
+            : _imdb.IsLoaded
+                ? $"IMDb: {_imdb.Count:N0} titles in memory"
+                : "IMDb: reading from disk";
+
+    /// <summary>
+    /// Boil <c>title.basics.tsv</c> (or its gzip) down to <c>IMDBData.tsv</c>. The source
+    /// is well over a gigabyte and is streamed a line at a time, never loaded.
+    /// </summary>
+    public async Task<string> ExtractImdbDataAsync()
+    {
+        var source = ImdbSourceFile;
+        if (source == null)
+            return "Put IMDb's title.basics.tsv (or title.basics.tsv.gz) in the program folder " +
+                   $"({AppPaths.DataDirectory}) first. It is downloaded from " +
+                   "https://datasets.imdbws.com/title.basics.tsv.gz";
+
+        _cts = new CancellationTokenSource();
+        IsScanning = true;
+        BeginTiming();
+        ProgressValue = 0;
+        ProgressMax = 1000;
+
+        var progress = new Progress<ImdbExtractProgress>(p =>
+        {
+            if (p.BytesTotal > 0)
+            {
+                ProgressValue = (int)Math.Min(1000, p.BytesRead * 1000 / p.BytesTotal);
+                UpdateEta(p.BytesRead, p.BytesTotal);
+            }
+            StatusText = $"Extracting IMDb titles — {p.LinesKept:N0} kept";
+        });
+
+        try
+        {
+            _imdb.Unload();
+            var report = await ImdbExtractor.ExtractAsync(
+                source, AppPaths.ImdbDataPath, progress, _cts.Token);
+            StatusText = $"IMDb extract written: {report.Kept:N0} titles kept, " +
+                         $"{report.Skipped:N0} unnamed episode rows skipped.";
+            await EnsureImdbLoadedAsync(_cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "IMDb extraction cancelled.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"IMDb extraction failed: {ex.Message}";
+        }
+        finally
+        {
+            EndTiming();
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+            OnPropertyChanged(nameof(HasImdbData));
+            OnPropertyChanged(nameof(ImdbStatus));
+        }
+        return StatusText;
+    }
+
+    /// <summary>
+    /// Hold the extract in memory when the user has asked for that, so lookups don't
+    /// re-read a large file. A no-op when the option is off or it is already loaded.
+    /// </summary>
+    private async Task EnsureImdbLoadedAsync(CancellationToken ct)
+    {
+        if (!_settings.ImdbInMemory) { _imdb.Unload(); return; }
+        if (!_imdb.IsAvailable || _imdb.IsLoaded) return;
+
+        StatusText = "Loading IMDb titles into memory…";
+        await _imdb.LoadAsync(
+            new Progress<long>(n => StatusText = $"Loading IMDb titles into memory — {n:N0}…"), ct);
+        OnPropertyChanged(nameof(ImdbStatus));
+    }
+
+    /// <summary>
+    /// The thing that confirms titles: the local IMDb extract first, TMDb only for what
+    /// it cannot answer. Extraction is done here if the raw file is present and the
+    /// extract isn't, so the first refresh after dropping the download in just works.
+    /// </summary>
+    private async Task<TitleVerifier> BuildVerifierAsync(CancellationToken ct)
+    {
+        if (ImdbExtractionPending)
+        {
+            StatusText = "Extracting IMDb titles (first run only)…";
+            try
+            {
+                await ImdbExtractor.ExtractAsync(ImdbSourceFile!, AppPaths.ImdbDataPath, null, ct);
+                OnPropertyChanged(nameof(HasImdbData));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* carry on without it; TMDb still works */ }
+        }
+
+        await EnsureImdbLoadedAsync(ct);
+
+        TmdbClient? tmdb = null;
+        if (!string.IsNullOrWhiteSpace(_settings.TmdbApiKey) ||
+            !string.IsNullOrWhiteSpace(_settings.TmdbReadAccessToken))
+        {
+            tmdb = new TmdbClient(_settings.TmdbApiKey, _settings.TmdbReadAccessToken,
+                _tmdbCache, new RateLimiter(TimeSpan.FromSeconds(2)));
+        }
+
+        return new TitleVerifier(_imdb, tmdb, _settings.UseImdbFirst);
+    }
+
+    /// <summary>
+    /// Confirm titles and fill in missing years for the given rows (or the whole
+    /// catalogue when nothing is selected), IMDb first and TMDb only as a fallback.
+    /// </summary>
+    public async Task<string> VerifyTitlesAsync(IReadOnlyList<FileRow> rows)
+    {
+        var targets = (rows.Count > 0 ? rows.Select(r => r.Model) : _catalog.Files).ToList();
+
+        _cts = new CancellationTokenSource();
+        IsScanning = true;
+        BeginTiming();
+        ProgressValue = 0;
+        ProgressMax = 1;
+
+        var progress = new Progress<VerifyProgress>(p =>
+        {
+            ProgressMax = Math.Max(1, p.Total);
+            ProgressValue = p.Done;
+            UpdateEta(p.Done, p.Total);
+            StatusText = ProgressLine(p.Phase, p.Done, p.Total, p.Current);
+        });
+
+        try
+        {
+            var verifier = await BuildVerifierAsync(_cts.Token);
+            var report = await verifier.VerifyAsync(targets, progress, _cts.Token);
+            _tmdbCache.Save(_tmdbCachePath);
+            CatalogStore.Save(_catalog, _catalogPath);
+            StatusText = report.Describe();
+        }
+        catch (OperationCanceledException)
+        {
+            _tmdbCache.Save(_tmdbCachePath);
+            CatalogStore.Save(_catalog, _catalogPath);
+            StatusText = "Title verification cancelled. Progress saved.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Title verification failed: {ex.Message}";
+        }
+        finally
+        {
+            EndTiming();
             IsScanning = false;
             _cts?.Dispose();
             _cts = null;
@@ -1775,6 +2102,12 @@ public class MainViewModel : ObservableObject
         _settings.Save(_settingsPath);
         StartupManager.Apply(_settings.StartWithWindows, _settings.StartInTray);
         StartWatchingIfEnabled(_lastRoots);
+
+        // Turning the memory option off should give the memory back straight away; turning
+        // it on costs a load, which is left until something actually needs a lookup.
+        if (!_settings.ImdbInMemory) _imdb.Unload();
+        OnPropertyChanged(nameof(ImdbStatus));
+
         OnPropertyChanged(nameof(Categories));
         RebuildRows();
         StatusText = "Settings saved.";
@@ -1931,9 +2264,15 @@ public class MainViewModel : ObservableObject
     /// Re-check files that were catalogued while they may still have been downloading:
     /// refresh their size, re-hash them, and re-derive what the name implies.
     /// </summary>
-    public async Task<string> RehashPendingAsync()
+    public Task<string> RehashPendingAsync() =>
+        RehashAsync(_catalog.Files.Where(f => f.AwaitingDownload || !f.HasHash).ToList());
+
+    /// <summary>
+    /// Re-read and re-hash specific files. Used both for the download-aware pending list
+    /// and to retry the files a scan could not read.
+    /// </summary>
+    public async Task<string> RehashAsync(IReadOnlyList<MediaFile> targets)
     {
-        var targets = _catalog.Files.Where(f => f.AwaitingDownload || !f.HasHash).ToList();
         if (targets.Count == 0) return "Every catalogued file already has a trustworthy hash.";
 
         _cts = new CancellationTokenSource();
@@ -1957,19 +2296,26 @@ public class MainViewModel : ObservableObject
 
                 var info = new FileInfo(file.FullPath);
                 var hash = await FileHasher.ComputeSha256Async(file.FullPath, _cts.Token);
-                if (string.IsNullOrEmpty(hash)) continue;
+                if (string.IsNullOrEmpty(hash)) { file.HashFailed = true; continue; }
 
                 file.SizeBytes = info.Length;
                 file.LastModifiedUtc = info.LastWriteTimeUtc;
                 file.Sha256 = hash;
                 file.AwaitingDownload = false;
+                file.HashFailed = false;
                 MediaClassifier.Classify(file);
                 rehashed++;
             }
             ExtraLinker.Link(_catalog.Files);
+            DuplicateMetadata.Propagate(_catalog.Files);
             CatalogStore.Save(_catalog, _catalogPath);
+
+            // Whatever still refuses stays on the list, so the user can see what is left.
+            UnhashedFiles = targets.Where(f => !f.HasHash && File.Exists(f.FullPath)).ToList();
+            var stillFailing = UnhashedFiles.Count;
             StatusText = $"Re-hashed {rehashed} file(s)" +
-                         (missing > 0 ? $"; {missing} no longer exist." : ".");
+                         (missing > 0 ? $"; {missing} no longer exist" : "") +
+                         (stillFailing > 0 ? $"; {stillFailing} still could not be read." : ".");
         }
         catch (OperationCanceledException)
         {

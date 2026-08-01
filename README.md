@@ -47,9 +47,11 @@ dotnet run --project MediaCatalog.App
    destination folder. Files are **copied and hash-verified** first; the original is
    only deleted if you tick *Delete original after verify* (and only after the copy
    verifies successfully). Moving **within one volume** skips all that: the file is
-   renamed in place, so a terabyte lands as fast as a byte. The volume is identified by
-   its GUID rather than by drive letter, so a volume mounted at two letters — or into a
-   folder — is still recognised as one drive.
+   renamed in place, so a terabyte lands as fast as a byte. That decision is taken
+   **before anything is read** — hashing a 20 GB file to verify a copy that is never going
+   to happen costs about as much as the copy would, which is the whole wait the rename is
+   there to avoid. The volume is identified by its GUID rather than by drive letter, so a
+   volume mounted at two letters — or into a folder — is still recognised as one drive.
 
 All data is written to **the folder the app runs from** (portable-app style) — the
 catalogue (`catalog.xml`), tool paths (`tools.xml`), and scan state — not to
@@ -90,8 +92,13 @@ full completion — a pause never deletes anything.
   **suggestions** view (current → new location, collisions, duplicates)
 - ✅ **Editable categories** — per-file / per-folder / parent-folder overrides, custom
   categories, each with its own consolidation folder
+- ✅ **Local IMDb title data** — `title.basics.tsv` boiled down to a title/year extract that
+  validates films *and* programmes with no rate limit, no API key and no network; TMDb is
+  only asked what IMDb cannot answer
 - ✅ **TMDb validation** of TV names — v4 Read Token *or* v3 API Key — rate-limited, cached,
   with folder-name fallback
+- ✅ **Audio-only / video-only scans** that accumulate into one catalogue
+- ✅ **Minimum / maximum file size** limits for scans (no limits by default)
 - ✅ **Exclude folders (incl. wildcards `?:\Windows`, `*\Cache\*`) / ignore file types**
 - ✅ **Column filters** — wildcard (`*`/`?`), **negation** (`not`), and **multiple stacked
   filters**; plus **hide/show columns** and horizontal scrolling
@@ -154,6 +161,13 @@ file sets it on **every exact duplicate of that file** too, so the same content 
 filed two different ways. A season/episode code beats the extension: anything that says
 `S02E05` — whatever it is called or however it is packaged — is categorised as **TvShow**.
 
+> **Everything a file knows lives in the catalogue.** Setting a category or title on a
+> folder writes it onto each of that folder's files rather than leaving a rule behind in
+> the settings. Rules saved by earlier versions are migrated the same way by **Refresh
+> catalogue**, and each one is retired as soon as its files have been labelled outright.
+> (A rule whose folder has not been scanned yet is kept, since dropping it would lose the
+> instruction.) Folder rules are on their way out and may go entirely in a later release.
+
 **Titles** — right-click → *Edit title…* to correct a title by hand; the box starts from
 the current title, or from the file name without its extension when there isn't one. The
 correction is applied to the selected file, **to every other file that had the same
@@ -202,6 +216,8 @@ off with *Remember the view and filters* in Settings.
 **Columns** — click a header to sort (**Size** sorts by actual file size, not by its
 printed text). Right-click a header to *set its width in pixels*, fit it to its contents,
 hide it, or open the column chooser. Widths and visibility are remembered between runs.
+**Every header has a tooltip** explaining what the column means and what its values stand
+for — hover over *Dup*, *TMDb* or *Integrity* to see what each flag is telling you.
 
 **Settings** — the settings window is **non-modal**: it can stay open while you keep
 scanning, filtering and working in the main window. *Save* applies the changes immediately
@@ -217,6 +233,35 @@ Started at sign-in, the app comes up **in the notification area with no window**
 catch new files without getting in the way; double-click the tray icon (or *Open Media
 Catalog* on its menu) to bring it up, and *Exit* to quit properly. While watching is on,
 closing the window hides it back to the tray rather than quitting.
+
+Two more window options in **Settings…**:
+- *Always start minimised to the notification area* — a quiet start however the app was
+  launched, not only when Windows started it;
+- *Minimising sends the window to the notification area instead of the taskbar* — the
+  minimise button puts it in the tray, with a one-off notification the first time so it
+  doesn't just vanish.
+
+**Scanning scope** — the toolbar dropdown beside **Scan** chooses between *All*,
+*VideoOnly* and *AudioOnly*. A filtered scan **never prunes the kind it wasn't looking
+for**, so an audio scan followed by a video scan (or the other way round) builds a single
+combined catalogue rather than each one wiping the other's results.
+
+**Size limits** — *Settings… → Scanning* can leave out files below a minimum or above a
+maximum size. Write bytes or a size like `50MB`, `1.5 GB`, `700 KB`; leave either box empty
+for no limit, which is the default for both. Changing the limits and re-scanning both drops
+what now falls outside them and picks up what now falls inside.
+
+**Progress text** — hashing thousands of small files a second makes a trailing file name
+flicker the whole status line about, and the counter never lands twice in the same place.
+*File name* in Settings puts it on the **Left** (the default) so `Hashing & classifying:
+5/1000` holds still on the right, or **Hidden** to leave it out entirely.
+
+**Files that could not be hashed** — a file that is locked, unreadable or refused gets no
+hash, and without one it is invisible to duplicate detection. Rather than let that pass
+quietly, the scan collects them and puts the list up when it finishes, offering to **read
+them again**, **deep check** them to find out whether they are actually damaged, or
+**delete** them. Select rows to act on some, or leave the selection empty to act on all.
+The **Unhashed files…** button keeps the list reachable afterwards.
 
 **Files still downloading** — the watcher can spot a file long before it has finished
 arriving, so a newly seen file is hashed only once its size has stopped changing and it can
@@ -270,14 +315,40 @@ Both apply to duplicates of the same content as well.
 
 Episode numbering is read from any of the ways people write it — `S01E02`, `s01.e02`,
 `1x02`, `S04 E 01`, `Season 1 Episode 01`, `Series 1 Episode 1`, `S1 Episode 1`,
-`Season 2 Ep 3` — while still leaving `Cars 3 (2017)` alone. Whatever any copy of a file
-works out is shared with its duplicates, whether it came from a scan, a catalogue refresh
-or an edit by hand.
+`Season 2 Ep 3` — while still leaving `Cars 3 (2017)` alone. Compact codes are read too:
+`123` is season 1 episode 23, and a four-digit `1102` is **season 11 episode 2** rather
+than episode 102 of season 1, because shows reach an eleventh season far more often than a
+hundred-and-second episode. Resolutions (`720`, `1080`, `2160`, …) are never mistaken for
+episode codes.
 
-**Refresh catalogue** — when a new version learns to work something out from data already
-in the catalogue (new categories, extras linking, better title parsing), **Refresh
-catalogue** re-derives it in place. Entries already stamped with the current feature set are
-skipped, and nothing is re-scanned or re-hashed, so it is near-instant on a large library.
+**The path counts as metadata.** A well-filed library already says everything needed, so
+`T:\TV\K\King Of The Hill\Season 04\1.avi` is read as *King Of The Hill*, **S04E01** — the
+show name from the folder above the season folder (skipping one-letter A–Z buckets), the
+season from `Season 04`, the episode from the file name.
+
+**The file name wins.** A `Season NN` folder only ever *fills a gap* the name left; it never
+overrules it. A name carrying no season of its own — `1.avi`, `12.avi`, `E07.mkv` — takes
+the folder's season, but anything that states a season keeps it, so `1102.avi` inside
+`Season 04` is **S11E02**, not S04E02. The file was named deliberately; the folder it
+happens to be sitting in may just be where someone dropped it. (Three- and four-digit names
+are compact codes and state a season: `104.avi` is S01E04 wherever it sits.)
+
+Whatever any copy of a file works out is shared with its duplicates, whether it came from a
+scan, a catalogue refresh or an edit by hand.
+
+**Refresh catalogue** — re-derives what can be re-derived from data already in the
+catalogue, without re-scanning or re-hashing anything. It covers three things:
+
+- entries that predate the current feature set — new categories, extras linking, better
+  title parsing;
+- **programmes with no season/episode yet**, which are re-parsed *every* time with the
+  current rules, so a release that learns a new naming convention picks them up without a
+  drive scan;
+- **titles nothing has confirmed**, which are looked up in the local IMDb data and then, only
+  for what that cannot answer, TMDb — filling in missing years along the way.
+
+It also **writes any leftover folder rules onto the files themselves** and retires the rule
+once it has (see below). The status bar says on startup when there is anything waiting.
 
 **Opening files** — double-click a result to open it with its associated application, or
 right-click → *Open file* / *Open containing folder* (Explorer opens with the file selected).
@@ -312,6 +383,30 @@ saves it back once — so an old library keeps working with the current program.
 ones under a `Temp` folder are ignored, the rest are listed via the **Missing files…**
 button afterwards.
 
+### IMDb title data (local, free, no rate limit)
+IMDb publish their catalogue as a gzipped TSV. Download
+[`title.basics.tsv.gz`](https://datasets.imdbws.com/title.basics.tsv.gz) and drop it in the
+program folder — gzipped or unpacked, either is read as-is.
+
+The first time titles are verified, the file is boiled down to **`IMDBData.tsv`**, keeping
+only the two columns that matter: **primary title** and **year**. The source is over a
+gigabyte, so it is streamed a line at a time and never loaded into memory. IMDb's
+placeholder rows for untitled episodes — `Episode #1.4`, `Episode dated 3 May 1999`,
+`Episode 12` — are dropped, since they would only ever match by accident. If `IMDBData.tsv`
+is already there the raw file is left alone.
+
+**Verify titles** then confirms film and programme names against it and fills in any
+**missing years**. There is no rate limit and no network involved, so the whole catalogue is
+answered in a single pass; **TMDb is only asked about what IMDb could not identify**, which
+matters when TMDb allows one query every two seconds. Titles are matched ignoring case,
+punctuation and spacing, so `King Of The Hill` finds *King of the Hill*; where a name has
+been used more than once, the earliest year wins.
+
+By default the extract is **held in memory** for fast lookups (a few hundred megabytes).
+Turn *Keep the IMDb data in memory* off in **Settings…** and it is read from disk instead —
+slower, but free. Even then a whole run is answered in one pass over the file, not one pass
+per title.
+
 ### TMDb (themoviedb.org) TV validation
 Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** in **Settings…** (the token is
 preferred if both are given), then **Validate TV (TMDb)** confirms show names against TMDb. Lookups are **rate-limited to one every two seconds** and **cached**
@@ -324,9 +419,20 @@ really can be called *Ed*. Validated titles show a ✓ in the TMDb column (✎ m
 typed yourself). A confirmed name is also **shared with every file that had the same
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
+## Versioning
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.1.9` for
+v1.9 — with the product version kept as the number people talk about (`1.9`). Major and
+minor stay at `0`; the release rides in the build and revision fields.
+
+Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
+every project in the solution picks them up — bump them there once per release. **About**
+in the toolbar shows both, next to the program icon.
+
 ## Roadmap / possible extensions
-- Film metadata validation against TMDb (TV is validated today).
 - Acting on near-duplicate groups directly (keep-best / bulk delete) from the UI.
+- Fetching `title.basics.tsv.gz` from within the app rather than having it dropped in the
+  program folder by hand.
+- Retiring folder rules altogether, once existing catalogues have migrated off them.
 
 ## Project layout
 - `MediaCatalog.Core` — engine (scanning, hashing, classification, duplicates,

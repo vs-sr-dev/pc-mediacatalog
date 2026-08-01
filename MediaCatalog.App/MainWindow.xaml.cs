@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Input;
 using MediaCatalog.App.Infrastructure;
 using MediaCatalog.App.ViewModels;
@@ -40,6 +41,7 @@ public partial class MainWindow : Window
         _tray = new TrayIcon(ShowFromTray, ExitApplication);
         _vm.Notify = _tray.Notify;
         _vm.Undo.Changed += UpdateUndoButton;
+        _vm.UnhashedFilesFound = OfferUnhashedFiles;
         UpdateUndoButton();
 
         BuildColumnHeaderMenu();
@@ -48,7 +50,37 @@ public partial class MainWindow : Window
         // Closing the window hides it while the app is watching for new files; quitting is
         // then an explicit choice from the tray menu.
         Closing += OnWindowClosing;
-        if (startHidden) ShowInTaskbar = false;
+        StateChanged += OnWindowStateChanged;
+
+        // Either the launcher asked for it (a sign-in start) or the user has asked for
+        // every start to be a quiet one.
+        _startHidden = startHidden || _vm.Settings.AlwaysStartMinimised;
+        if (_startHidden) ShowInTaskbar = false;
+    }
+
+    /// <summary>True when this run should wait in the notification area rather than open.</summary>
+    public bool ShouldStartHidden => _startHidden;
+
+    private readonly bool _startHidden;
+    private bool _toldAboutTray;
+
+    /// <summary>
+    /// Send the window to the notification area instead of the taskbar when it is
+    /// minimised, if that is what the user has asked for.
+    /// </summary>
+    private void OnWindowStateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState != WindowState.Minimized || !_vm.Settings.MinimiseToTray) return;
+
+        Hide();
+        ShowInTaskbar = false;
+
+        // Said once per run, the first time it happens, so the window does not simply
+        // vanish with nothing to say where it went.
+        if (_toldAboutTray) return;
+        _toldAboutTray = true;
+        _tray.Notify("Media Catalog",
+            "Minimised to the notification area. Double-click the icon to bring it back.");
     }
 
     private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -249,24 +281,110 @@ public partial class MainWindow : Window
     private async void OnRefreshCatalogClick(object sender, RoutedEventArgs e)
     {
         var stale = _vm.StaleEntryCount;
-        if (stale == 0)
+        var unverified = _vm.UnverifiedTitleCount;
+        var rules = _vm.PendingFolderRuleCount;
+
+        if (stale == 0 && unverified == 0 && rules == 0)
         {
             MessageBox.Show(this,
-                "Every catalogue entry already has everything this version knows how to work out. " +
-                "Run a scan instead if you want to pick up new or changed files.",
+                "Every catalogue entry already has everything this version knows how to work out, " +
+                "and every title has been confirmed. Run a scan instead if you want to pick up new " +
+                "or changed files.",
                 "Refresh catalogue", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
+        var what = new List<string>();
+        if (stale > 0)
+            what.Add($"• re-derive metadata for {stale} entr(ies) — including programmes with no " +
+                     "season/episode yet, which are re-parsed with the current rules");
+        if (rules > 0)
+            what.Add($"• write {rules} folder rule(s) onto the files themselves, then retire the rules");
+        if (unverified > 0)
+            what.Add($"• confirm {unverified} title(s) and fill in missing years, checking the local " +
+                     "IMDb data first and TMDb only for what it cannot answer");
+
         var confirm = MessageBox.Show(this,
-            $"Re-derive metadata for {stale} catalogue entr(ies) that predate the current features " +
-            "(extras detection, linking, title parsing)?\n\n" +
-            "Entries that are already up to date are skipped, and nothing is re-scanned or re-hashed.",
+            "Refresh the catalogue?\n\n" + string.Join("\n\n", what) +
+            "\n\nNothing is re-scanned or re-hashed.",
             "Refresh catalogue", MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (confirm != MessageBoxResult.OK) return;
 
         var result = await _vm.RefreshCatalogAsync();
         MessageBox.Show(this, result, "Refresh catalogue", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private void OnAboutClick(object sender, RoutedEventArgs e) =>
+        new AboutWindow { Owner = this }.ShowDialog();
+
+    private async void OnVerifyTitlesClick(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.HasImdbData && _vm.ImdbSourceFile == null)
+        {
+            var open = MessageBox.Show(this,
+                "There is no local IMDb data to check against yet.\n\n" +
+                "Download title.basics.tsv.gz from https://datasets.imdbws.com/ and put it in the " +
+                $"program folder ({MediaCatalog.Core.Storage.AppPaths.DataDirectory}); it is extracted " +
+                "to IMDBData.tsv the first time it is needed.\n\n" +
+                "Carry on using TMDb alone for now?",
+                "Verify titles", MessageBoxButton.YesNo, MessageBoxImage.Information);
+            if (open != MessageBoxResult.Yes) return;
+        }
+
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        var result = await _vm.VerifyTitlesAsync(rows);
+        MessageBox.Show(this, result, "Verify titles", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// Put the unhashable files up as soon as the scan that found them ends — unless the
+    /// app is sitting in the notification area, where a modal dialog nobody asked for
+    /// would be an ambush. The toolbar button keeps them reachable either way.
+    /// </summary>
+    private void OfferUnhashedFiles()
+    {
+        if (!IsVisible || WindowState == WindowState.Minimized)
+        {
+            _tray.Notify("Media Catalog",
+                $"{_vm.UnhashedFiles.Count} file(s) could not be hashed during the scan.");
+            return;
+        }
+        Dispatcher.BeginInvoke(new Action(() => OnUnhashedFilesClick(this, new RoutedEventArgs())),
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// The files a scan could not hash, with the three things worth doing about them:
+    /// read them again, decode them to see if they are damaged, or delete them.
+    /// </summary>
+    private async void OnUnhashedFilesClick(object sender, RoutedEventArgs e)
+    {
+        var files = _vm.UnhashedFiles;
+        if (files.Count == 0) return;
+
+        var dlg = new UnhashedFilesWindow(files, _vm.CanDoVideo) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        var chosen = dlg.Chosen;
+        if (chosen.Count == 0) return;
+
+        switch (dlg.Action)
+        {
+            case UnhashedAction.Retry:
+                var rehashed = await _vm.RehashAsync(chosen);
+                MessageBox.Show(this, rehashed, "Rescan", MessageBoxButton.OK, MessageBoxImage.Information);
+                break;
+
+            case UnhashedAction.DeepCheck:
+                var checkedResult = await _vm.AnalyzeModelsAsync(chosen, deepCheck: true);
+                MessageBox.Show(this, checkedResult, "Deep check",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                break;
+
+            case UnhashedAction.Delete:
+                await DeleteAsync(chosen.ToList());
+                break;
+        }
     }
 
     private void OnClearFilter(object sender, RoutedEventArgs e) => _vm.ClearFilters();
@@ -742,6 +860,16 @@ public partial class MainWindow : Window
         // One shared menu for every header; PlacementTarget says which one opened it.
         var style = new Style(typeof(DataGridColumnHeader));
         style.Setters.Add(new Setter(ContextMenuProperty, menu));
+
+        // WPF does not pass a column's tooltip on to the header it draws, so each header
+        // is pointed back at its own column's ToolTipService.ToolTip. That keeps the
+        // wording in the XAML beside the column it explains.
+        style.Setters.Add(new Setter(ToolTipProperty, new Binding
+        {
+            RelativeSource = new RelativeSource(RelativeSourceMode.Self),
+            Path = new PropertyPath("Column.(0)", ToolTipService.ToolTipProperty)
+        }));
+
         FilesGrid.ColumnHeaderStyle = style;
     }
 

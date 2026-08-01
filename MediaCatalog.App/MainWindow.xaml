@@ -24,6 +24,9 @@
         <ToolBarTray Grid.Row="0">
             <ToolBar>
                 <Button Content="Scan" Command="{Binding ScanCommand}" Padding="12,2" FontWeight="Bold"/>
+                <ComboBox ItemsSource="{Binding ScanFilters}" SelectedItem="{Binding ScanFilter}"
+                          Width="106" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                          ToolTip="What a scan picks up. An audio-only scan and a video-only scan build one combined catalogue — neither removes what the other found."/>
                 <Button Content="Pause" Command="{Binding PauseCommand}" Padding="8,2"
                         ToolTip="Stop the scan but keep all progress; resume later."/>
                 <Button Content="Resume" Command="{Binding ResumeCommand}" Padding="8,2"
@@ -62,15 +65,20 @@
                 <Button x:Name="DeepCheckFolderButton" Content="Deep check folder…"
                         Click="OnDeepCheckFolderClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
                         ToolTip="Deep check every media file in a folder and its subfolders, catalogued or not."/>
+                <Button x:Name="VerifyTitlesButton" Content="Verify titles"
+                        Click="OnVerifyTitlesClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Confirm film and programme titles, and fill in missing years, against the local IMDb data — falling back to TMDb only for what IMDb cannot answer."/>
                 <Button x:Name="ValidateTvButton" Content="Validate TV (TMDb)"
                         Click="OnValidateTvClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Validate TV show names against themoviedb.org."/>
+                        ToolTip="Validate TV show names against themoviedb.org only."/>
                 <Separator/>
                 <!-- Pinned: these must never disappear into the toolbar's overflow arrow. -->
                 <Button x:Name="ToolsButton" Content="Tools…" Click="OnToolsClick" Padding="8,2"
                         ToolBar.OverflowMode="Never"/>
                 <Button x:Name="SettingsButton" Content="Settings…" Click="OnSettingsClick" Padding="8,2"
                         ToolBar.OverflowMode="Never"/>
+                <Button x:Name="AboutButton" Content="About" Click="OnAboutClick" Padding="8,2"
+                        ToolBar.OverflowMode="Never" ToolTip="Version and credits."/>
             </ToolBar>
         </ToolBarTray>
 
@@ -100,6 +108,10 @@
                         ToolTip="Re-hash files that were catalogued while they may still have been downloading."/>
                 <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
                         VerticalAlignment="Center" Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
+                <Button Content="Unhashed files…" Click="OnUnhashedFilesClick" Padding="8,1" Margin="2,0"
+                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                        Visibility="{Binding HasUnhashedFiles, Converter={StaticResource BoolToVis}}"
+                        ToolTip="Files the scan could not read to hash. Without a hash they are invisible to duplicate detection."/>
             </StackPanel>
             <ItemsControl ItemsSource="{Binding ActiveFilters}" Margin="40,4,0,0">
                 <ItemsControl.ItemsPanel>
@@ -173,23 +185,36 @@
                         <MenuItem Header="Ignore this file type (removes + skips future scans)" Click="OnIgnoreExtension"/>
                     </ContextMenu>
                 </DataGrid.ContextMenu>
+                <!-- Every header carries a tooltip; the column-header style built in code
+                     binds each header's ToolTip to its column's ToolTipService.ToolTip. -->
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="Dup" Binding="{Binding DuplicateFlag}" Width="46"/>
-                    <DataGridTextColumn Header="Name" Binding="{Binding FileName}" Width="260"/>
-                    <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="55"/>
-                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="90"/>
-                    <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="200"/>
-                    <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="46"/>
-                    <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"/>
-                    <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"/>
+                    <DataGridTextColumn Header="Dup" Binding="{Binding DuplicateFlag}" Width="46"
+                                        ToolTipService.ToolTip="DUP = byte-for-byte identical to another catalogued file. ~dup = the same content in a different encoding, matched by audio/video fingerprint. Blank = no known copy. Files that have no hash yet cannot be compared at all."/>
+                    <DataGridTextColumn Header="Name" Binding="{Binding FileName}" Width="260"
+                                        ToolTipService.ToolTip="The file's name on disk, without its folder. Rename it with the right-click menu."/>
+                    <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="55"
+                                        ToolTipService.ToolTip="Audio or Video, decided by the file extension. Unknown means the extension is neither."/>
+                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="90"
+                                        ToolTipService.ToolTip="What the content is: Movie, TvShow, TvExtra or MovieExtra (specials and featurettes), Audio, Other or Unknown. Worked out automatically unless you have set it yourself, which always wins."/>
+                    <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="200"
+                                        ToolTipService.ToolTip="The programme or film name. A confirmed or hand-typed title if there is one, otherwise the best guess parsed from the file name and its folders. This is what decides where the file is consolidated to."/>
+                    <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="46"
+                                        ToolTipService.ToolTip="Year of release, taken from the file name or looked up in the IMDb data. Part of a film's library folder name, e.g. 'Blade Runner (1982)'."/>
+                    <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"
+                                        ToolTipService.ToolTip="Season and episode, as S01E02. Read from the file name (S01E02, 1x02, 123 = S01E23, 1102 = S11E02); a 'Season NN' folder supplies the season only when the name does not state one, so the file name always wins. Blank means it could not be worked out — a catalogue refresh will try again with the current rules."/>
+                    <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"
+                                        ToolTipService.ToolTip="Where the title came from. ✓ = confirmed against the local IMDb data or TMDb. ✎ = you typed it. Blank = still only a guess from the file name, and a candidate for the next Verify titles run."/>
                     <DataGridTextColumn Header="Filed" Binding="{Binding FiledFlag}" Width="46"
                                         SortMemberPath="Model.Consolidated"
-                                        ToolTipService.ToolTip="Ticked once the file is in its consolidation location."/>
+                                        ToolTipService.ToolTip="Ticked once the file is in its consolidation location — the structured library folder its category points at."/>
                     <!-- Sorted on the raw byte count, so 900 MB comes before 1.2 GB. -->
                     <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"
-                                        SortMemberPath="SizeBytes"/>
-                    <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"/>
-                    <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="380"/>
+                                        SortMemberPath="SizeBytes"
+                                        ToolTipService.ToolTip="File size on disk. Sorted by the real byte count, so 900 MB comes before 1.2 GB."/>
+                    <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"
+                                        ToolTipService.ToolTip="Ok = passed the checks run so far. IncompleteDownload = a .part/.crdownload-style file still arriving. Corrupt = zero bytes, or a deep check failed to decode it. NotChecked = no deep check has been run on it."/>
+                    <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="380"
+                                        ToolTipService.ToolTip="Where the file is now, in full. The folders here are also read for the programme name and season number when the file name alone does not say."/>
                 </DataGrid.Columns>
             </DataGrid>
         </Grid>

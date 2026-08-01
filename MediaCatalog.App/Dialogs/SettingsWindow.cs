@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Storage;
 using Microsoft.Win32;
 
@@ -48,7 +50,31 @@ public class SettingsWindow : Window
         Content = "…and start hidden in the notification area, without opening the window",
         Margin = new Thickness(20, 2, 0, 2)
     };
+    private readonly CheckBox _alwaysMinimised = new()
+    {
+        Content = "Always start minimised to the notification area, however it was launched"
+    };
+    private readonly CheckBox _minimiseToTray = new()
+    {
+        Content = "Minimising sends the window to the notification area instead of the taskbar"
+    };
     private readonly CheckBox _watch = new() { Content = "Watch for new files and add them (with a taskbar notification)" };
+
+    // --- Scan limits ---
+    private readonly TextBox _minSize = new() { Width = 90 };
+    private readonly TextBox _maxSize = new() { Width = 90 };
+    private readonly ComboBox _scanFilter = new() { Width = 150 };
+    private readonly ComboBox _progressName = new() { Width = 190 };
+
+    // --- IMDb ---
+    private readonly CheckBox _useImdbFirst = new()
+    {
+        Content = "Check the local IMDb data before TMDb (TMDb is only asked what IMDb cannot answer)"
+    };
+    private readonly CheckBox _imdbInMemory = new()
+    {
+        Content = "Keep the IMDb data in memory (faster lookups; roughly 200–400 MB)"
+    };
     private readonly CheckBox _rememberFilters = new()
     {
         Content = "Remember the view and filters between sessions"
@@ -86,9 +112,20 @@ public class SettingsWindow : Window
         _startInTray.IsEnabled = settings.StartWithWindows;
         _startup.Checked += (_, _) => _startInTray.IsEnabled = true;
         _startup.Unchecked += (_, _) => _startInTray.IsEnabled = false;
+        _alwaysMinimised.IsChecked = settings.AlwaysStartMinimised;
+        _minimiseToTray.IsChecked = settings.MinimiseToTray;
         _watch.IsChecked = settings.WatchForNewFiles;
         _rememberFilters.IsChecked = settings.RememberFilters;
         _excludeSystem.IsChecked = settings.ExcludeSystemDirectories;
+        _minSize.Text = FormatSize(settings.MinFileSizeBytes);
+        _maxSize.Text = FormatSize(settings.MaxFileSizeBytes);
+        _useImdbFirst.IsChecked = settings.UseImdbFirst;
+        _imdbInMemory.IsChecked = settings.ImdbInMemory;
+
+        _scanFilter.ItemsSource = Enum.GetValues(typeof(ScanMediaFilter));
+        _scanFilter.SelectedItem = settings.ScanMediaFilter;
+        _progressName.ItemsSource = Enum.GetValues(typeof(ProgressNamePosition));
+        _progressName.SelectedItem = settings.ProgressNamePosition;
         foreach (var e in settings.IgnoredExtensions) _exts.Add(e);
         foreach (var f in settings.ExcludedFolders) _excluded.Add(new ExclRow { Model = f });
         foreach (var c in settings.CustomCategories) _categories.Add(c);
@@ -119,15 +156,36 @@ public class SettingsWindow : Window
         panel.Children.Add(Labeled("Read token (v4):", _readToken));
         panel.Children.Add(Hint("Get free credentials at themoviedb.org → account settings → API. Either the v4 Read Access Token or the v3 API Key works (the token is preferred). Queries are rate-limited to one every two seconds."));
 
-        panel.Children.Add(Section("Startup & watching"));
+        panel.Children.Add(Section("Startup, window & watching"));
         _startup.Margin = new Thickness(0, 2, 0, 2);
+        _alwaysMinimised.Margin = new Thickness(0, 2, 0, 2);
+        _minimiseToTray.Margin = new Thickness(0, 2, 0, 2);
         _watch.Margin = new Thickness(0, 2, 0, 2);
         _rememberFilters.Margin = new Thickness(0, 2, 0, 2);
         panel.Children.Add(_startup);
         panel.Children.Add(_startInTray);
+        panel.Children.Add(_alwaysMinimised);
+        panel.Children.Add(_minimiseToTray);
         panel.Children.Add(_watch);
         panel.Children.Add(DriveWatchEditor(settings));
         panel.Children.Add(_rememberFilters);
+
+        panel.Children.Add(Section("Scanning"));
+        panel.Children.Add(Labeled("Scan for:", _scanFilter, 110));
+        panel.Children.Add(Hint("VideoOnly and AudioOnly build one combined catalogue between them: a " +
+                                "filtered scan never removes the kind it wasn't looking for."));
+        panel.Children.Add(SizeLimitEditor());
+        panel.Children.Add(Labeled("File name:", _progressName, 110));
+        panel.Children.Add(Hint("Where the current file name goes in the progress message. Thousands of " +
+                                "small files a second make a name on the right flicker the whole line; " +
+                                "Left keeps \"Hashing & classifying\" still, and Hidden leaves it out."));
+
+        panel.Children.Add(Section("IMDb data (local, no rate limit)"));
+        _useImdbFirst.Margin = new Thickness(0, 2, 0, 2);
+        _imdbInMemory.Margin = new Thickness(0, 2, 0, 2);
+        panel.Children.Add(_useImdbFirst);
+        panel.Children.Add(_imdbInMemory);
+        panel.Children.Add(ImdbStatusText());
 
         panel.Children.Add(Section("Folders scanned in addition to whole drives"));
         panel.Children.Add(ScanFolderEditor());
@@ -177,14 +235,120 @@ public class SettingsWindow : Window
         TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0)
     };
 
-    private static FrameworkElement Labeled(string label, FrameworkElement control)
+    private static FrameworkElement Labeled(string label, FrameworkElement control, double labelWidth = 90)
     {
         var dp = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
-        var t = new TextBlock { Text = label, Width = 90, VerticalAlignment = VerticalAlignment.Center };
+        var t = new TextBlock { Text = label, Width = labelWidth, VerticalAlignment = VerticalAlignment.Center };
         DockPanel.SetDock(t, Dock.Left);
         dp.Children.Add(t);
+
+        // A fixed-width control shouldn't be stretched across the row by the DockPanel.
+        if (!double.IsNaN(control.Width))
+        {
+            control.HorizontalAlignment = HorizontalAlignment.Left;
+            DockPanel.SetDock(control, Dock.Left);
+        }
         dp.Children.Add(control);
         return dp;
+    }
+
+    // --- Scan size limits -------------------------------------------------
+
+    private FrameworkElement SizeLimitEditor()
+    {
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0)
+        };
+        row.Children.Add(new TextBlock
+        {
+            Text = "Size limits:", Width = 110, VerticalAlignment = VerticalAlignment.Center
+        });
+        row.Children.Add(new TextBlock
+        {
+            Text = "at least", VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0)
+        });
+        row.Children.Add(_minSize);
+        row.Children.Add(new TextBlock
+        {
+            Text = "at most", VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(12, 0, 6, 0)
+        });
+        row.Children.Add(_maxSize);
+
+        var wrap = new StackPanel();
+        wrap.Children.Add(row);
+        wrap.Children.Add(Hint("Files outside these sizes are left out of the catalogue. Write a plain " +
+                               "number of bytes or a size like 50MB, 1.5 GB, 700 KB. Leave either box " +
+                               "empty for no limit — which is the default for both."));
+        return wrap;
+    }
+
+    /// <summary>Show a byte count the way the user would type it back in.</summary>
+    private static string FormatSize(long bytes)
+    {
+        if (bytes <= 0) return string.Empty;
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        var unit = 0;
+        double value = bytes;
+        while (value >= 1024 && unit < units.Length - 1 && value % 1024 == 0)
+        {
+            value /= 1024;
+            unit++;
+        }
+        return $"{value:0.##} {units[unit]}";
+    }
+
+    /// <summary>
+    /// Read "50MB" / "1.5 GB" / "734003200" as a byte count. Returns null when the text
+    /// makes no sense, so the caller can say so rather than silently reading it as zero.
+    /// </summary>
+    internal static long? ParseSize(string text)
+    {
+        var s = (text ?? string.Empty).Trim();
+        if (s.Length == 0) return 0;   // empty means "no limit"
+
+        var match = System.Text.RegularExpressions.Regex.Match(
+            s, @"^(?<n>\d+(?:[.,]\d+)?)\s*(?<u>[KMGT]?B?)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success) return null;
+
+        if (!double.TryParse(match.Groups["n"].Value.Replace(',', '.'),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var number))
+            return null;
+
+        var multiplier = match.Groups["u"].Value.ToUpperInvariant() switch
+        {
+            "KB" or "K" => 1024D,
+            "MB" or "M" => 1024D * 1024,
+            "GB" or "G" => 1024D * 1024 * 1024,
+            "TB" or "T" => 1024D * 1024 * 1024 * 1024,
+            _ => 1D
+        };
+
+        var bytes = number * multiplier;
+        return bytes is >= 0 and < long.MaxValue ? (long)bytes : null;
+    }
+
+    /// <summary>Where the IMDb data stands right now, so the checkboxes above make sense.</summary>
+    private static TextBlock ImdbStatusText()
+    {
+        var extract = AppPaths.ImdbDataPath;
+        var source = MediaCatalog.Core.Imdb.ImdbExtractor.FindSource(
+            AppPaths.ImdbSourcePath, AppPaths.ImdbSourceGzPath);
+
+        var text = File.Exists(extract)
+            ? $"IMDBData.tsv is present ({FormatSize(new FileInfo(extract).Length)})."
+            : source != null
+                ? $"{Path.GetFileName(source)} is present and will be extracted to IMDBData.tsv the " +
+                  "first time titles are verified."
+                : "No IMDb data yet. Download title.basics.tsv.gz from https://datasets.imdbws.com/ " +
+                  $"and put it in {AppPaths.DataDirectory} — it is extracted automatically, and only " +
+                  "the title and year are kept.";
+
+        return Hint(text);
     }
 
     private FrameworkElement ListEditor(ObservableCollection<string> items, string addPrompt, Action<string> onAdd)
@@ -459,6 +623,26 @@ public class SettingsWindow : Window
 
     private void OnSave(object sender, RoutedEventArgs e)
     {
+        // A size that can't be read is worth stopping for: silently treating it as "no
+        // limit" would quietly catalogue everything the user meant to keep out.
+        var min = ParseSize(_minSize.Text);
+        var max = ParseSize(_maxSize.Text);
+        if (min == null || max == null)
+        {
+            MessageBox.Show(this,
+                "A size limit could not be read. Write a plain number of bytes, or a size " +
+                "like 50MB, 1.5 GB or 700 KB. Leave the box empty for no limit.",
+                "Size limits", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (min > 0 && max > 0 && min > max)
+        {
+            MessageBox.Show(this,
+                "The smallest size is larger than the largest, so no file could ever match.",
+                "Size limits", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         var folders = new List<CategoryConsolidation>();
         foreach (var row in _catFolders)
         {
@@ -476,7 +660,15 @@ public class SettingsWindow : Window
             TmdbReadAccessToken = _readToken.Text.Trim(),
             StartWithWindows = _startup.IsChecked == true,
             StartInTray = _startInTray.IsChecked == true,
+            AlwaysStartMinimised = _alwaysMinimised.IsChecked == true,
+            MinimiseToTray = _minimiseToTray.IsChecked == true,
             WatchForNewFiles = _watch.IsChecked == true,
+            MinFileSizeBytes = min.Value,
+            MaxFileSizeBytes = max.Value,
+            ScanMediaFilter = (ScanMediaFilter)(_scanFilter.SelectedItem ?? ScanMediaFilter.All),
+            ProgressNamePosition = (ProgressNamePosition)(_progressName.SelectedItem ?? ProgressNamePosition.Left),
+            UseImdbFirst = _useImdbFirst.IsChecked == true,
+            ImdbInMemory = _imdbInMemory.IsChecked == true,
             WatchedDrives = _driveChecks.Where(c => c.IsChecked == true)
                 .Select(c => (string)c.Tag).ToList(),
             RememberFilters = _rememberFilters.IsChecked == true,
