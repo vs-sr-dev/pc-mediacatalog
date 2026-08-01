@@ -83,6 +83,7 @@ public static class ExtraLinker
         {
             extra.TmdbName = owner.TmdbName;
             extra.TmdbVerified = owner.TmdbVerified;
+            extra.ImdbVerified = owner.ImdbVerified;
             extra.TitleManuallySet = owner.TitleManuallySet;
         }
         extra.Year ??= owner.Year;

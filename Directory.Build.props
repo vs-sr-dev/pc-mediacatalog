@@ -1,0 +1,22 @@
+<Project>
+
+  <!--
+    Version numbers for every project in the solution, so a release is one edit here.
+
+    The product version is the one people talk about ("v1.8"). The Windows file version
+    is kept as 0.0.<major>.<minor>: major and minor stay at 0, and the build and revision
+    fields carry the release. Bump the last field for each build; the product version and
+    the third field move together.
+  -->
+  <PropertyGroup>
+    <VersionPrefix>1.9.0</VersionPrefix>
+    <FileVersion>0.0.1.9</FileVersion>
+    <AssemblyVersion>0.0.1.9</AssemblyVersion>
+    <InformationalVersion>1.9</InformationalVersion>
+
+    <Product>Media Catalog</Product>
+    <Company>Samuele, Phreak &amp; Claude</Company>
+    <Copyright>Collaborative effort between Samuele, Phreak, and Claude</Copyright>
+  </PropertyGroup>
+
+</Project>

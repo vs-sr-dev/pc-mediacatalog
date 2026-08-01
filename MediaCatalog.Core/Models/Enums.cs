@@ -21,6 +21,28 @@ public enum VideoCategory
     MovieExtra
 }
 
+/// <summary>Which kinds of media a scan should pick up.</summary>
+public enum ScanMediaFilter
+{
+    /// <summary>Everything: audio and video alike (the default).</summary>
+    All = 0,
+    /// <summary>Only video files.</summary>
+    VideoOnly,
+    /// <summary>Only audio files.</summary>
+    AudioOnly
+}
+
+/// <summary>Where the currently-processed file name appears in the progress message.</summary>
+public enum ProgressNamePosition
+{
+    /// <summary>After the phase and counter, as it has always been.</summary>
+    Right = 0,
+    /// <summary>Before the phase, so "Hashing &amp; classifying" holds still.</summary>
+    Left,
+    /// <summary>Not shown at all — the steadiest of the three.</summary>
+    Hidden
+}
+
 /// <summary>Result of the lightweight integrity check performed during a scan.</summary>
 public enum IntegrityStatus
 {

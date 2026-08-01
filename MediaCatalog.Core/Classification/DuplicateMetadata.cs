@@ -26,6 +26,7 @@ public static class DuplicateMetadata
             // A hand-typed value is the most authoritative, then a TMDb one, then
             // whatever was parsed from a file name.
             var titleSource = copies.FirstOrDefault(f => f.TitleManuallySet)
+                              ?? copies.FirstOrDefault(f => f.ImdbVerified)
                               ?? copies.FirstOrDefault(f => f.TmdbVerified);
             var numbering = copies.FirstOrDefault(f => f is { Season: not null, Episode: not null });
 
@@ -37,6 +38,7 @@ public static class DuplicateMetadata
                 {
                     copy.TmdbName = titleSource.TmdbName;
                     copy.TmdbVerified = titleSource.TmdbVerified;
+                    copy.ImdbVerified = titleSource.ImdbVerified;
                     copy.TitleManuallySet = titleSource.TitleManuallySet;
                     changed++;
                 }
@@ -54,19 +56,25 @@ public static class DuplicateMetadata
         return changed;
     }
 
-    /// <summary>Apply a folder's title rule to a file that has no title of its own.</summary>
+    /// <summary>
+    /// Apply a folder's title rule to a file that has no title of its own. Only rules for
+    /// folders that have not yet been migrated onto their files still reach this — see
+    /// <see cref="Scanning.CatalogRefresher"/> — but a newly scanned file under such a
+    /// folder still needs picking up.
+    /// </summary>
     public static bool ApplyFolderTitle(MediaFile file, Storage.AppSettings settings)
     {
-        // A title the user typed on the file itself, or one TMDb confirmed, is more
+        // A title the user typed on the file itself, or one a source confirmed, is more
         // specific than a blanket rule on the folder and wins.
-        if (file.TitleManuallySet || file.TmdbVerified) return false;
+        if (file.TitleVerified) return false;
 
         var title = settings.TitleForPath(file.FullPath);
         if (string.IsNullOrWhiteSpace(title)) return false;
         if (string.Equals(file.TmdbName, title, StringComparison.Ordinal)) return false;
 
+        // Recorded as the user's own choice, which is what a folder rule is — not as
+        // something TMDb confirmed, which it never was.
         file.TmdbName = title.Trim();
-        file.TmdbVerified = true;
         file.TitleManuallySet = true;
         return true;
     }

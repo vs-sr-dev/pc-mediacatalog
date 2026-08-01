@@ -91,11 +91,16 @@ public static class TitleUpdater
     private static bool Set(MediaFile file, string title, bool manual)
     {
         var changed = !string.Equals(file.TmdbName, title, StringComparison.Ordinal) ||
-                      !file.TmdbVerified ||
+                      !file.TitleVerified ||
                       file.TitleManuallySet != manual;
         file.TmdbName = title;
-        file.TmdbVerified = true;
         file.TitleManuallySet = manual;
+
+        // A hand-typed title replaces whatever a lookup had decided, and is recorded as
+        // the user's own rather than borrowing the credit of a source that never saw it.
+        if (manual) { file.TmdbVerified = false; file.ImdbVerified = false; }
+        else file.TmdbVerified = true;
+
         return changed;
     }
 }

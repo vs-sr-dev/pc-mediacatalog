@@ -8,8 +8,19 @@ namespace MediaCatalog.Core.Scanning;
 
 public record ScanProgress(int Done, int Total, string CurrentFile, string Phase);
 
-/// <summary>Outcome of a completed scan; currently the files that could not be found.</summary>
-public record ScanReport(List<string> MissingFiles);
+/// <param name="MissingFiles">Enumerated, but gone by the time we got to them.</param>
+/// <param name="UnhashedFiles">
+/// Present, but hashing failed — locked, unreadable or refused. Duplicate detection is
+/// blind to these, so they are handed back for the user to deal with.
+/// </param>
+/// <param name="SkippedBySize">Files outside the configured size limits.</param>
+public record ScanReport(
+    List<string> MissingFiles,
+    List<MediaFile>? UnhashedFiles = null,
+    int SkippedBySize = 0)
+{
+    public IReadOnlyList<MediaFile> Unhashed => UnhashedFiles ?? new List<MediaFile>();
+}
 
 /// <summary>
 /// Orchestrates a full scan: enumerate media under the chosen roots, classify each
@@ -58,6 +69,9 @@ public class ScanEngine
         settings ??= new AppSettings();
         var enumPath = AppPaths.EnumerationPath;
         var missing = new List<string>();
+        var unhashed = new List<MediaFile>();
+        var outOfScope = new List<string>();
+        var skippedBySize = 0;
 
         // Reuse a matching enumeration snapshot on resume; otherwise walk the drives,
         // pruning excluded folders and ignored file types as we go.
@@ -74,10 +88,15 @@ public class ScanEngine
         else
         {
             progress?.Report(new ScanProgress(0, 0, string.Empty, "Enumerating files…"));
+            var scanSettings = settings;
             paths = await Task.Run(() => DriveScanner.EnumerateMediaFiles(
                 roots, ct,
-                excludeDescent: settings.IsDescentBlocked,
-                ignoreExtension: settings.IsExtensionIgnored).ToList(), ct);
+                excludeDescent: scanSettings.IsDescentBlocked,
+                // An audio-only or video-only scan drops the other kind here, before any
+                // work is done on it. What it skips stays in the catalogue untouched, so
+                // running one kind and then the other builds a single combined catalogue.
+                ignoreExtension: ext => scanSettings.IsExtensionIgnored(ext) ||
+                                        !scanSettings.IsExtensionScanned(ext)).ToList(), ct);
             new EnumerationCache
             {
                 Roots = roots.ToList(),
@@ -122,6 +141,15 @@ public class ScanEngine
                 continue;
             }
 
+            // Outside the configured size limits: not catalogued, and dropped if a
+            // previous scan (with different limits) had picked it up.
+            if (!settings.IsSizeInRange(info.Length))
+            {
+                skippedBySize++;
+                outOfScope.Add(path);
+                continue;
+            }
+
             var entry = MergeEntry(info);
             MediaClassifier.Classify(entry);
             Classification.DuplicateMetadata.ApplyFolderTitle(entry, settings);
@@ -133,6 +161,12 @@ public class ScanEngine
                 !entry.HasHash)
             {
                 entry.Sha256 = await FileHasher.ComputeSha256Async(path, ct);
+
+                // A file we could read the size of but not the contents: locked by another
+                // program, or refused. Duplicate detection can't see it, so it is collected
+                // and reported rather than quietly left out.
+                entry.HashFailed = !entry.HasHash;
+                if (entry.HashFailed) unhashed.Add(entry);
             }
 
             entry.IndexedUtc = DateTime.UtcNow;
@@ -154,7 +188,14 @@ public class ScanEngine
         {
             var existing = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
             foreach (var m in missing) existing.Remove(m);
-            _catalog.Files.RemoveAll(f => !existing.Contains(f.FullPath));
+            foreach (var s in outOfScope) existing.Remove(s);
+
+            // A filtered scan is only authoritative about what it went looking for: an
+            // audio-only pass says nothing about whether the video files are still there,
+            // so it must leave them alone. That is what lets an audio scan and a video
+            // scan build one combined catalogue between them.
+            _catalog.Files.RemoveAll(f =>
+                !existing.Contains(f.FullPath) && settings.IsExtensionScanned(f.Extension));
         }
         _catalog.RebuildIndex();
 
@@ -166,7 +207,11 @@ public class ScanEngine
 
         EnumerationCache.Clear(enumPath);
         progress?.Report(new ScanProgress(total, total, string.Empty, "Done"));
-        return new ScanReport(missing);
+
+        // Only report files still in the catalogue: one that vanished mid-scan is a
+        // missing file, not an unhashable one.
+        var stillHere = unhashed.Where(f => !f.HasHash && _catalog.ByPath.ContainsKey(f.FullPath)).ToList();
+        return new ScanReport(missing, stillHere, skippedBySize);
     }
 
     private static void TryCheckpoint(Action<int> onCheckpoint, int index)
@@ -242,7 +287,10 @@ public class ScanEngine
         var modifiedUtc = info.LastWriteTimeUtc;
         var changed = entry.SizeBytes != info.Length || entry.LastModifiedUtc != modifiedUtc;
         if (changed)
+        {
             entry.Sha256 = string.Empty;
+            entry.HashFailed = false;   // a changed file earns a fresh attempt
+        }
 
         entry.FileName = info.Name;
         entry.Extension = info.Extension;

@@ -38,6 +38,12 @@ public class MediaFile
     /// <summary>Set once a TV title has been confirmed against TMDb (cached).</summary>
     public bool TmdbVerified { get; set; }
 
+    /// <summary>
+    /// Set once the title has been found in the local IMDb extract. Checked before TMDb,
+    /// since a local lookup costs nothing and has no rate limit.
+    /// </summary>
+    public bool ImdbVerified { get; set; }
+
     /// <summary>The canonical name TMDb returned, if validated.</summary>
     public string TmdbName { get; set; } = string.Empty;
 
@@ -84,8 +90,22 @@ public class MediaFile
     /// <summary>When this entry was last (re)scanned.</summary>
     public DateTime IndexedUtc { get; set; }
 
+    /// <summary>
+    /// Set when hashing was attempted and failed (unreadable, locked, refused). Distinct
+    /// from simply not having been hashed yet, so a scan can offer these to the user.
+    /// </summary>
+    public bool HashFailed { get; set; }
+
     [XmlIgnore]
     public bool HasHash => !string.IsNullOrEmpty(Sha256);
+
+    /// <summary>
+    /// True when the title came from somewhere authoritative — the local IMDb extract,
+    /// TMDb, or the user's own hand. Everything else is a guess from the file name and is
+    /// re-checked on a catalogue refresh.
+    /// </summary>
+    [XmlIgnore]
+    public bool TitleVerified => ImdbVerified || TmdbVerified || TitleManuallySet;
 
     /// <summary>The title to show and to file under: the validated/edited one if set.</summary>
     [XmlIgnore]

@@ -17,4 +17,17 @@ public static class AppPaths
 
     /// <summary>Cached file-enumeration snapshot, so a resume needn't re-walk the drives.</summary>
     public static string EnumerationPath => Path.Combine(DataDirectory, "enumeration.xml");
+
+    /// <summary>
+    /// IMDb's raw <c>title.basics.tsv</c> as downloaded (or still gzipped). Over a
+    /// gigabyte, and only ever read a line at a time to boil it down to
+    /// <see cref="ImdbDataPath"/>.
+    /// </summary>
+    public static string ImdbSourcePath => Path.Combine(DataDirectory, "title.basics.tsv");
+
+    /// <summary>The gzipped form, accepted as-is so the download needn't be unpacked first.</summary>
+    public static string ImdbSourceGzPath => Path.Combine(DataDirectory, "title.basics.tsv.gz");
+
+    /// <summary>Our own two-column extract: primary title and year, tab separated.</summary>
+    public static string ImdbDataPath => Path.Combine(DataDirectory, "IMDBData.tsv");
 }

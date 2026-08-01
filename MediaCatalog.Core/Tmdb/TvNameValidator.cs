@@ -24,7 +24,7 @@ public class TvNameValidator
     /// <summary>Validate one file, setting <see cref="MediaFile.TmdbVerified"/>/Name on success.</summary>
     public async Task<bool> ValidateAsync(MediaFile file, CancellationToken ct = default)
     {
-        if (file.TmdbVerified) return true;
+        if (file.TitleVerified) return true;
 
         foreach (var candidate in Candidates(file))
         {
@@ -53,7 +53,7 @@ public class TvNameValidator
         var targets = all
             .Where(f => f.Kind == MediaKind.Video &&
                         f.VideoCategory is VideoCategory.TvShow or VideoCategory.TvExtra &&
-                        !f.TmdbVerified)
+                        !f.TitleVerified)
             .ToList();
 
         var validated = 0;

@@ -25,6 +25,13 @@ public static class MediaClassifier
         @"(?<![a-zA-Z0-9])(?<s>\d{1,2})x(?<e>\d{1,3})(?![a-zA-Z0-9])",
         RegexOptions.Compiled);
 
+    // An episode marker with no season beside it: "E07", "Ep 7", "Episode 12". Only ever
+    // consulted when a "Season NN" folder has already supplied the season, which is what
+    // keeps "Part 2" in a film title from being read as an episode number.
+    private static readonly Regex EpisodeOnly = new(
+        @"(?<![a-z0-9])(?:e|ep|episode|part|pt)\s*\.?\s*(?<e>\d{1,3})(?![0-9])",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     // "Season 1", "Series 1"
     private static readonly Regex SeasonWord = new(
         @"\b(?:season|series)\s*\d{1,2}\b",
@@ -35,8 +42,21 @@ public static class MediaClassifier
         @"(?<![0-9])(?<s>[1-9])(?<e>[0-9]{2})(?![0-9])",
         RegexOptions.Compiled);
 
+    // A bare 4-digit number: "1102" => season 11, episode 02. Read as two-and-two rather
+    // than one-and-three, because shows run to eleven seasons far more often than to a
+    // hundred-and-two episodes in one.
+    private static readonly Regex FourDigit = new(
+        @"(?<![0-9])(?<s>[1-9][0-9])(?<e>[0-9]{2})(?![0-9])",
+        RegexOptions.Compiled);
+
     // 3-digit numbers that are really resolutions, not S/E codes.
     private static readonly HashSet<int> ResolutionNumbers = new() { 240, 360, 480, 540, 576, 720 };
+
+    // The same for 4-digit numbers: widths, heights and bitrates, not episodes.
+    private static readonly HashSet<int> ResolutionNumbers4 = new()
+    {
+        1080, 1440, 2160, 4320, 1280, 1920, 2560, 3840, 7680
+    };
 
     // A plausible release year in brackets or standalone: 1900-2099
     private static readonly Regex Year = new(
@@ -96,6 +116,18 @@ public static class MediaClassifier
 
         int titleCut = -1;
 
+        // What the surrounding folders say. A well-filed library carries the season in a
+        // "Season 04" folder and the show name in the folder above it, which is often
+        // everything the file name itself leaves out.
+        var pathSeason = PathMetadata.SeasonFromPath(file.FullPath);
+
+        // The episode when the name gives only that and no season: a bare "1" or "12", or
+        // an "E07"-style marker. Longer runs of digits are compact season/episode codes
+        // and are left to TryCompactEpisode, which reads the season out of them.
+        var pathEpisode = pathSeason is null
+            ? null
+            : PathMetadata.EpisodeFromBareName(name) ?? EpisodeOnlyNumber(name);
+
         if (se.Success)
         {
             file.VideoCategory = VideoCategory.TvShow;
@@ -110,6 +142,15 @@ public static class MediaClassifier
             file.Episode = ParseInt(xf.Groups["e"].Value);
             titleCut = xf.Index;
         }
+        else if (pathSeason is { } folderSeason && pathEpisode is { } folderEpisode)
+        {
+            // "…\Season 04\1.avi": the folder is the season, the name is the episode.
+            // Checked ahead of the year rule, since a numeric name under a season folder
+            // is an episode even when the number happens to look like a year.
+            file.VideoCategory = VideoCategory.TvShow;
+            file.Season = folderSeason;
+            file.Episode = folderEpisode;
+        }
         else if (SeasonWord.Match(name) is { Success: true } sw)
         {
             file.VideoCategory = VideoCategory.TvShow;
@@ -121,18 +162,28 @@ public static class MediaClassifier
             file.VideoCategory = VideoCategory.Movie;
             titleCut = yearMatch.Index;
         }
-        else if (TryThreeDigitEpisode(name, out var tdSeason, out var tdEpisode, out var tdIndex))
+        else if (TryCompactEpisode(name, out var cSeason, out var cEpisode, out var cIndex))
         {
-            // No explicit markers and no year: a bare 3-digit number like "123" is
-            // read as season 1, episode 23.
+            // No explicit markers and no year: a bare 3- or 4-digit number like "123" or
+            // "1102" is read as season 1 episode 23, or season 11 episode 02.
             file.VideoCategory = VideoCategory.TvShow;
-            file.Season = tdSeason;
-            file.Episode = tdEpisode;
-            titleCut = tdIndex;
+            file.Season = cSeason;
+            file.Episode = cEpisode;
+            titleCut = cIndex;
         }
         else
         {
             file.VideoCategory = VideoCategory.Unknown;
+        }
+
+        // A season folder fills a gap the name left — "E05.mkv" in "Season 03" — but never
+        // overrules it. Whatever the name says about the season stands, so "1102" in a
+        // "Season 04" folder is S11E02: the file was named deliberately, the folder it
+        // happens to be sitting in may just be where someone dropped it.
+        if (pathSeason is { } seasonFolder && file.Episode.HasValue && file.Season is null)
+        {
+            file.Season = seasonFolder;
+            file.VideoCategory = VideoCategory.TvShow;
         }
 
         // Specials/featurettes keep whatever season/episode was parsed, but are filed as
@@ -141,22 +192,53 @@ public static class MediaClassifier
             file.VideoCategory = extra;
 
         file.ParsedTitle = CleanTitle(name, titleCut);
+
+        // A name that was all episode code leaves nothing to call the show by, so fall
+        // back to the folder it lives in — "King Of The Hill" for the example above.
+        if (!HasUsefulTitle(file.ParsedTitle) &&
+            PathMetadata.TitleFromPath(file.FullPath) is { } fromPath)
+            file.ParsedTitle = fromPath;
     }
+
+    /// <summary>
+    /// True when a parsed title says something — anything that is not empty and not just
+    /// the episode number we already extracted.
+    /// </summary>
+    private static bool HasUsefulTitle(string title) =>
+        !string.IsNullOrWhiteSpace(title) &&
+        !title.All(c => char.IsDigit(c) || char.IsWhiteSpace(c));
 
     private static int? ParseInt(string s) =>
         int.TryParse(s, out var v) ? v : null;
 
     /// <summary>
-    /// Find a bare 3-digit number to read as SxEyy. Rejects resolutions (720, 480, …)
-    /// and episode 00. Returns the season, episode and where the match starts.
+    /// The number in a lone episode marker — "E07", "Ep 7", "Episode 12" — or null.
+    /// Only meaningful once a season folder has supplied the season.
     /// </summary>
-    private static bool TryThreeDigitEpisode(string name, out int season, out int episode, out int index)
+    private static int? EpisodeOnlyNumber(string name) =>
+        EpisodeOnly.Match(name) is { Success: true } m ? ParseInt(m.Groups["e"].Value) : null;
+
+    /// <summary>
+    /// Find a bare 3- or 4-digit number to read as a compact season/episode code: "123"
+    /// is S01E23, "1102" is S11E02. Rejects resolutions (720, 1080, …) and episode 00.
+    /// The 4-digit form is tried first, so "1102" is not read as the "102" inside it.
+    /// </summary>
+    private static bool TryCompactEpisode(string name, out int season, out int episode, out int index)
+    {
+        if (TryDigits(FourDigit, ResolutionNumbers4, name, out season, out episode, out index))
+            return true;
+        return TryDigits(ThreeDigit, ResolutionNumbers, name, out season, out episode, out index);
+    }
+
+    private static bool TryDigits(
+        Regex pattern, HashSet<int> reject, string name,
+        out int season, out int episode, out int index)
     {
         season = episode = 0; index = -1;
-        foreach (Match m in ThreeDigit.Matches(name))
+        foreach (Match m in pattern.Matches(name))
         {
             var value = int.Parse(m.Value);
-            if (ResolutionNumbers.Contains(value)) continue;
+            if (reject.Contains(value)) continue;
             var e = int.Parse(m.Groups["e"].Value);
             if (e == 0) continue; // "100" -> episode 00 is not meaningful
             season = int.Parse(m.Groups["s"].Value);

@@ -46,6 +46,25 @@ public static class FileRelocator
             var desired = Path.Combine(destinationDir,
                 string.IsNullOrWhiteSpace(newFileName) ? file.FileName : newFileName);
 
+            // Moving within one volume is a rename: the file's data never moves, so a
+            // terabyte lands as fast as a byte. Taken *before* any hashing, because
+            // hashing a large file costs about as much as copying it would — which is
+            // exactly the wait this path exists to avoid. Nothing is duplicated and the
+            // original is never deleted, so there is no copy to verify.
+            var sameVolume = deleteOriginal && VolumeInfo.SameVolume(file.FullPath, destinationDir);
+            if (sameVolume && !File.Exists(desired))
+            {
+                if (PathsEqual(desired, file.FullPath))
+                    return new RelocationResult(true, "Already in place.", file.FullPath, AlreadyPresent: true);
+
+                if (TryRename(file.FullPath, desired))
+                {
+                    copiedBytes?.Report(file.SizeBytes);
+                    UpdateFile(file, desired, file.Sha256);
+                    return new RelocationResult(true, "Moved on the same drive (no copy needed).", desired);
+                }
+            }
+
             // Ensure we have a trustworthy source hash to verify against.
             var sourceHash = file.HasHash
                 ? file.Sha256
@@ -69,10 +88,9 @@ public static class FileRelocator
             if (PathsEqual(destPath, file.FullPath))
                 return new RelocationResult(true, "Already in place.", file.FullPath, AlreadyPresent: true);
 
-            // Moving within one volume is a rename: the data never moves, so a terabyte
-            // lands as fast as a byte. Only worth it when the original is going anyway.
-            if (deleteOriginal && VolumeInfo.SameVolume(file.FullPath, destinationDir) &&
-                TryRename(file.FullPath, destPath))
+            // The name was taken, so the fast path above stood down; now that a free name
+            // has been chosen, rename into it rather than copying a whole file for nothing.
+            if (sameVolume && TryRename(file.FullPath, destPath))
             {
                 copiedBytes?.Report(file.SizeBytes);
                 UpdateFile(file, destPath, sourceHash);

@@ -80,7 +80,7 @@ public static class ConsolidationSuggester
 
                 if (category == CategoryResolver.TvShow)
                 {
-                    if (!file.TmdbVerified) { s.Recommended = false; s.AddNote("TV title not validated"); }
+                    if (!file.TitleVerified) { s.Recommended = false; s.AddNote("TV title not validated"); }
                     if (file.Season is null || file.Episode is null)
                     { s.Recommended = false; s.AddNote("missing season/episode"); }
                 }

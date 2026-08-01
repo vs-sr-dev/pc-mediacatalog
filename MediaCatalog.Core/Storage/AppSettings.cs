@@ -1,4 +1,5 @@
 using System.Xml.Serialization;
+using MediaCatalog.Core.Models;
 
 namespace MediaCatalog.Core.Storage;
 
@@ -119,6 +120,75 @@ public class AppSettings
 
     /// <summary>Start hidden in the notification area when launched at Windows sign-in.</summary>
     public bool StartInTray { get; set; } = true;
+
+    /// <summary>
+    /// Start hidden in the notification area however the app was launched, not only when
+    /// Windows started it. Off by default: launching something by hand should show it.
+    /// </summary>
+    public bool AlwaysStartMinimised { get; set; }
+
+    /// <summary>
+    /// Minimising sends the window to the notification area rather than the taskbar.
+    /// Off by default, since it surprises people who expect the taskbar button.
+    /// </summary>
+    public bool MinimiseToTray { get; set; }
+
+    // --- Scan limits ---
+    /// <summary>Smallest file worth cataloguing, in bytes. 0 = no lower limit (the default).</summary>
+    public long MinFileSizeBytes { get; set; }
+
+    /// <summary>Largest file worth cataloguing, in bytes. 0 = no upper limit (the default).</summary>
+    public long MaxFileSizeBytes { get; set; }
+
+    /// <summary>
+    /// Which kinds of media a scan picks up. An audio-only scan followed by a video-only
+    /// one leaves both in the one catalogue: a filtered scan never prunes what it wasn't
+    /// looking for.
+    /// </summary>
+    public ScanMediaFilter ScanMediaFilter { get; set; } = ScanMediaFilter.All;
+
+    /// <summary>Where the current file name sits in the progress message (see the enum).</summary>
+    public ProgressNamePosition ProgressNamePosition { get; set; } = ProgressNamePosition.Left;
+
+    // --- IMDb ---
+    /// <summary>
+    /// Hold the IMDb extract in memory instead of re-reading it from disk for every
+    /// lookup. On by default; roughly 100–200 MB for the current dataset.
+    /// </summary>
+    public bool ImdbInMemory { get; set; } = true;
+
+    /// <summary>Consult the local IMDb extract before falling back to TMDb.</summary>
+    public bool UseImdbFirst { get; set; } = true;
+
+    /// <summary>
+    /// True when a file of this size should be catalogued, given the configured limits.
+    /// Zero-length files always pass: they are reported as corrupt rather than hidden.
+    /// </summary>
+    public bool IsSizeInRange(long bytes)
+    {
+        if (bytes <= 0) return true;
+        if (MinFileSizeBytes > 0 && bytes < MinFileSizeBytes) return false;
+        if (MaxFileSizeBytes > 0 && bytes > MaxFileSizeBytes) return false;
+        return true;
+    }
+
+    /// <summary>True when a media kind is in scope for the current scan filter.</summary>
+    public bool IsKindScanned(MediaKind kind) => ScanMediaFilter switch
+    {
+        Models.ScanMediaFilter.VideoOnly => kind == MediaKind.Video,
+        Models.ScanMediaFilter.AudioOnly => kind == MediaKind.Audio,
+        _ => true
+    };
+
+    /// <summary>True when an extension is in scope for the current scan filter.</summary>
+    public bool IsExtensionScanned(string extension)
+    {
+        if (ScanMediaFilter == Models.ScanMediaFilter.All) return true;
+        // Half-downloaded files have no meaningful kind yet, so a filtered scan leaves
+        // them alone rather than guessing wrong in either direction.
+        if (Scanning.MediaExtensions.IsIncompleteMarker(extension)) return false;
+        return IsKindScanned(Scanning.MediaExtensions.Classify(extension));
+    }
 
     // --- Categories ---
     [XmlArray("CustomCategories"), XmlArrayItem("Category")]
