@@ -23,10 +23,8 @@
         <!-- Toolbar -->
         <ToolBarTray Grid.Row="0">
             <ToolBar>
-                <Button Content="Scan" Command="{Binding ScanCommand}" Padding="12,2" FontWeight="Bold"/>
-                <ComboBox ItemsSource="{Binding ScanFilters}" SelectedItem="{Binding ScanFilter}"
-                          Width="106" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                          ToolTip="What a scan picks up. An audio-only scan and a video-only scan build one combined catalogue — neither removes what the other found."/>
+                <Button Content="Scan…" Command="{Binding ScanCommand}" Padding="12,2" FontWeight="Bold"
+                        ToolTip="Open the scan wizard: which drives and folders to walk, what to pick up, and whether to add to the catalogue or start again."/>
                 <Button Content="Pause" Command="{Binding PauseCommand}" Padding="8,2"
                         ToolTip="Stop the scan but keep all progress; resume later."/>
                 <Button Content="Resume" Command="{Binding ResumeCommand}" Padding="8,2"
@@ -73,8 +71,6 @@
                         ToolTip="Validate TV show names against themoviedb.org only."/>
                 <Separator/>
                 <!-- Pinned: these must never disappear into the toolbar's overflow arrow. -->
-                <Button x:Name="ToolsButton" Content="Tools…" Click="OnToolsClick" Padding="8,2"
-                        ToolBar.OverflowMode="Never"/>
                 <Button x:Name="SettingsButton" Content="Settings…" Click="OnSettingsClick" Padding="8,2"
                         ToolBar.OverflowMode="Never"/>
                 <Button x:Name="AboutButton" Content="About" Click="OnAboutClick" Padding="8,2"
@@ -126,32 +122,10 @@
             </ItemsControl>
         </StackPanel>
 
-        <!-- Body -->
+        <!-- Body: the results grid has the window to itself. Choosing what to scan lives
+             in the scan wizard, where there is room to explain the options. -->
         <Grid Grid.Row="2" Margin="0,4">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="300"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-
-            <!-- Drives panel -->
-            <DockPanel Grid.Column="0" Margin="0,0,8,0">
-                <TextBlock DockPanel.Dock="Top" Text="Drives to scan" FontWeight="Bold" Margin="0,0,0,4"/>
-                <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,4,0,0">
-                    <Button Content="All" Command="{Binding SelectAllDrivesCommand}" Width="46" Margin="0,0,4,0"/>
-                    <Button Content="None" Command="{Binding SelectNoDrivesCommand}" Width="46" Margin="0,0,4,0"/>
-                    <Button Content="Refresh" Command="{Binding RefreshDrivesCommand}" Width="64"/>
-                </StackPanel>
-                <ListBox ItemsSource="{Binding Drives}" BorderThickness="1">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <CheckBox IsChecked="{Binding IsSelected}" Content="{Binding Display}" Margin="2"/>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
-            </DockPanel>
-
-            <!-- File grid -->
-            <DataGrid x:Name="FilesGrid" Grid.Column="1"
+            <DataGrid x:Name="FilesGrid"
                       ItemsSource="{Binding Files}"
                       AutoGenerateColumns="False" IsReadOnly="True"
                       SelectionMode="Extended" SelectionUnit="FullRow"
@@ -169,6 +143,8 @@
                         <MenuItem Header="Remove from results (keeps file on disk)" Click="OnRemoveFromResults"/>
                         <MenuItem Header="Delete file(s) from disk…" Click="OnDeleteFiles"/>
                         <Separator/>
+                        <MenuItem Header="Edit details…" Click="OnEditDetails"
+                                  ToolTip="Every field at once — title, year, season, episode, category, name, date, integrity and kind."/>
                         <MenuItem Header="Edit title…" Click="OnEditTitle"/>
                         <MenuItem Header="Set title for this folder…" Click="OnSetTitleFolder"/>
                         <MenuItem Header="Edit season / episode…" Click="OnEditSeasonEpisode"/>

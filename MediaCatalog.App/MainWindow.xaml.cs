@@ -8,6 +8,7 @@ using System.Windows.Input;
 using MediaCatalog.App.Infrastructure;
 using MediaCatalog.App.ViewModels;
 using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Relocation;
 using MediaCatalog.Core.Storage;
 using Microsoft.Win32;
 
@@ -42,6 +43,10 @@ public partial class MainWindow : Window
         _vm.Notify = _tray.Notify;
         _vm.Undo.Changed += UpdateUndoButton;
         _vm.UnhashedFilesFound = OfferUnhashedFiles;
+        _vm.ScanRequested = () => _ = RunScanWizardAsync();
+        _vm.ResumeRequested = () => _ = ResumeScanAsync();
+        _vm.CollisionResolver = ResolveCollisionAsync;
+        _vm.ConfirmRedundantExclusions = AskAboutRedundantExclusions;
         UpdateUndoButton();
 
         BuildColumnHeaderMenu();
@@ -56,6 +61,23 @@ public partial class MainWindow : Window
         // every start to be a quiet one.
         _startHidden = startHidden || _vm.Settings.AlwaysStartMinimised;
         if (_startHidden) ShowInTaskbar = false;
+
+        // An empty catalogue is the one situation where the app cannot do anything useful
+        // until it is told what to look at, so the wizard opens itself. Not when we are
+        // starting into the notification area, where a dialog nobody asked for is an ambush.
+        if (!_startHidden && _vm.CatalogIsEmpty && !_vm.Settings.ScanWizardCompleted)
+            Loaded += OnFirstRun;
+    }
+
+    private async void OnFirstRun(object sender, RoutedEventArgs e)
+    {
+        Loaded -= OnFirstRun;
+        var start = MessageBox.Show(this,
+            "Nothing has been catalogued yet.\n\n" +
+            "The scan wizard walks through what to look at and what to pick up. You can " +
+            "open it again at any time with the Scan button.",
+            "Welcome to Media Catalog", MessageBoxButton.OKCancel, MessageBoxImage.Information);
+        if (start == MessageBoxResult.OK) await RunScanWizardAsync();
     }
 
     /// <summary>True when this run should wait in the notification area rather than open.</summary>
@@ -239,20 +261,60 @@ public partial class MainWindow : Window
         MessageBox.Show(this, result, "Deep check", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
-    private void OnToolsClick(object sender, RoutedEventArgs e)
-    {
-        var dlg = new ToolSettingsWindow(_vm.CurrentToolSettings) { Owner = this };
-        if (dlg.ShowDialog() == true)
-            _vm.ApplyToolSettings(dlg.Result);
-    }
-
     private void PromptForTools(string message)
     {
         var open = MessageBox.Show(this,
-            message + "\n\nOpen the Tools settings now?",
+            message + "\n\nOpen the External tools settings now?",
             "Tools required", MessageBoxButton.YesNo, MessageBoxImage.Information);
         if (open == MessageBoxResult.Yes)
-            OnToolsClick(this, new RoutedEventArgs());
+            OpenSettings(SettingsTab.ExternalTools);
+    }
+
+    // --- Scanning ---------------------------------------------------------
+
+    /// <summary>
+    /// The scan wizard: what to do with the existing catalogue, where to look, what to
+    /// pick up, and what to do about a drive that is not plugged in.
+    /// </summary>
+    private async Task RunScanWizardAsync()
+    {
+        var wizard = new ScanWizardWindow(
+            _vm.Settings, _vm.CataloguedFileCount, _vm.Settings.ScanDrives) { Owner = this };
+
+        if (wizard.ShowDialog() != true || wizard.Plan == null) return;
+
+        var result = await _vm.StartScanAsync(wizard.Plan);
+        MessageBox.Show(this, result, "Scan", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// Continue an interrupted scan. A drive that was part of it but is not attached now
+    /// is raised before anything starts: cancelling is the default, since an external drive
+    /// that is simply unplugged is not a reason to rewrite what is known about it.
+    /// </summary>
+    private async Task ResumeScanAsync()
+    {
+        var missing = _vm.UnavailableSessionRoots();
+        var wait = false;
+
+        if (missing.Count > 0)
+        {
+            var answer = MessageBox.Show(this,
+                $"{string.Join(", ", missing)} {(missing.Count == 1 ? "is" : "are")} part of the " +
+                "paused scan but not connected.\n\n" +
+                "Yes — carry on, and scan that drive as soon as it is connected.\n" +
+                "No — carry on with the drives that are here and leave it out.\n" +
+                "Cancel — do nothing, so you can connect it first.\n\n" +
+                "Nothing already catalogued on that drive is removed in any case.",
+                "Drive not connected", MessageBoxButton.YesNoCancel, MessageBoxImage.Warning,
+                MessageBoxResult.Cancel);
+
+            if (answer == MessageBoxResult.Cancel) return;
+            wait = answer == MessageBoxResult.Yes;
+        }
+
+        var result = await _vm.ResumeScanAsync(wait);
+        MessageBox.Show(this, result, "Resume scan", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     // --- Settings & filter ------------------------------------------------
@@ -261,21 +323,48 @@ public partial class MainWindow : Window
     /// Settings open non-modally so the catalogue stays usable while they are edited;
     /// saving applies immediately through the <see cref="SettingsWindow.Saved"/> event.
     /// </summary>
-    private void OnSettingsClick(object sender, RoutedEventArgs e)
+    private void OnSettingsClick(object sender, RoutedEventArgs e) => OpenSettings(SettingsTab.General);
+
+    private void OpenSettings(SettingsTab tab)
     {
         if (_settingsWindow != null)
         {
-            if (_settingsWindow.WindowState == WindowState.Minimized)
-                _settingsWindow.WindowState = WindowState.Normal;
-            _settingsWindow.Activate();
+            _settingsWindow.FocusTab(tab);
             return;
         }
 
-        var dlg = new SettingsWindow(_vm.Settings, _vm.Categories, _vm.AvailableDriveRoots) { Owner = this };
+        var dlg = new SettingsWindow(
+            _vm.Settings, _vm.Categories, _vm.AvailableDriveRoots,
+            _vm.CurrentToolSettings, () => _vm.DownloadImdbDataAsync())
+        { Owner = this };
         dlg.Saved += settings => _vm.ApplyAppSettings(settings);
+        dlg.ToolsSaved += tools => _vm.ApplyToolSettings(tools);
         dlg.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow = dlg;
-        dlg.Show();
+        dlg.Show(tab);
+    }
+
+    /// <summary>
+    /// Put the exclusion rules a new one has made redundant to the user. Only reached when
+    /// the policy is to ask — the other two settings decide without stopping.
+    /// </summary>
+    private bool AskAboutRedundantExclusions(IReadOnlyList<ExcludedFolder> superseded) =>
+        MessageBox.Show(this,
+            $"This rule already covers {superseded.Count} existing exclusion(s):\n\n" +
+            string.Join("\n", superseded.Select(s => "    " + s.Path)) +
+            "\n\nRemove them? Nothing about what gets excluded changes either way — the list " +
+            "is simply shorter. You can change how this is handled on the Exclusions tab in Settings.",
+            "Redundant rules", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+
+    /// <summary>
+    /// Two files want the same name: show both, and every known copy of either, and let the
+    /// user say which one is worth keeping.
+    /// </summary>
+    private Task<CollisionResolution> ResolveCollisionAsync(CollisionRequest request)
+    {
+        var dlg = new FileCollisionWindow(request, file => _vm.DeepCheckOneAsync(file)) { Owner = this };
+        dlg.ShowDialog();
+        return Task.FromResult(dlg.Resolution);
     }
 
     private async void OnRefreshCatalogClick(object sender, RoutedEventArgs e)
@@ -319,16 +408,29 @@ public partial class MainWindow : Window
 
     private async void OnVerifyTitlesClick(object sender, RoutedEventArgs e)
     {
-        if (!_vm.HasImdbData && _vm.ImdbSourceFile == null)
+        // Neither our extract nor the raw download is here, so offer to fetch it rather
+        // than sending the user off to find a file themselves.
+        if (_vm.NeedsImdbDownload)
         {
-            var open = MessageBox.Show(this,
-                "There is no local IMDb data to check against yet.\n\n" +
-                "Download title.basics.tsv.gz from https://datasets.imdbws.com/ and put it in the " +
-                $"program folder ({MediaCatalog.Core.Storage.AppPaths.DataDirectory}); it is extracted " +
-                "to IMDBData.tsv the first time it is needed.\n\n" +
-                "Carry on using TMDb alone for now?",
-                "Verify titles", MessageBoxButton.YesNo, MessageBoxImage.Information);
-            if (open != MessageBoxResult.Yes) return;
+            var answer = MessageBox.Show(this,
+                "There is no local IMDb data to check titles against yet.\n\n" +
+                $"Download it now from {_vm.Settings.EffectiveImdbDownloadUrl}?\n" +
+                "It is around 150 MB, and is boiled down to a two-column extract of titles and " +
+                "years — the only part this program uses.\n\n" +
+                "Yes — download it now.\n" +
+                "No — carry on using TMDb alone, which is rate-limited to one query every two seconds.\n" +
+                "Cancel — do nothing.\n\n" +
+                "The address can be changed on the Data sources tab in Settings if it ever moves.",
+                "Verify titles", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+            if (answer == MessageBoxResult.Cancel) return;
+            if (answer == MessageBoxResult.Yes)
+            {
+                var downloaded = await _vm.DownloadImdbDataAsync();
+                MessageBox.Show(this, downloaded, "IMDb data",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                if (!_vm.HasImdbData) return;   // it did not arrive; nothing to verify against
+            }
         }
 
         var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
@@ -426,6 +528,7 @@ public partial class MainWindow : Window
         var outcome = await _vm.ApplyConsolidationAsync(chosen, deleteOriginal == MessageBoxResult.Yes);
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
+        await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
     }
 
     /// <summary>
@@ -477,6 +580,77 @@ public partial class MainWindow : Window
         await DeleteAsync(present.ToList());
     }
 
+    /// <summary>
+    /// Deal with the files that were already exactly where they belong. On its own that is
+    /// simply "already consolidated" and worth no more than saying so — but when other
+    /// copies of the same content exist, this is the moment to sort them out.
+    /// </summary>
+    private async Task HandleAlreadyConsolidatedAsync(IReadOnlyList<MediaFile> consolidated)
+    {
+        if (consolidated.Count == 0) return;
+
+        // Only the ones with copies elsewhere are worth a conversation.
+        var withCopies = consolidated.Where(f => _vm.CopiesOf(f).Count > 0).ToList();
+        if (withCopies.Count == 0)
+        {
+            MessageBox.Show(this,
+                consolidated.Count == 1
+                    ? $"Already consolidated: {consolidated[0].FileName} is exactly where it belongs, " +
+                      "and no other copy of it exists."
+                    : $"Already consolidated: {consolidated.Count} file(s) are exactly where they belong, " +
+                      "and no other copies of them exist.",
+                "Already consolidated", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var standing = ConsolidatedDuplicateAction.Nothing;
+        var applyToAll = false;
+
+        for (var i = 0; i < withCopies.Count; i++)
+        {
+            var file = withCopies[i];
+            var copies = new List<MediaFile> { file };
+            copies.AddRange(_vm.CopiesOf(file));
+            if (copies.Count < 2) continue;    // the earlier rounds may have cleared them
+
+            var action = standing;
+            MediaFile? keeper = file;
+
+            if (!applyToAll)
+            {
+                var dlg = new ConsolidatedDuplicatesWindow(file, copies, withCopies.Count - i - 1)
+                { Owner = this };
+                if (dlg.ShowDialog() != true) continue;
+
+                action = dlg.Action;
+                keeper = dlg.Keeper ?? file;
+                if (dlg.ApplyToAll)
+                {
+                    applyToAll = true;
+                    // "The same" can only mean the same policy, not the same file: the
+                    // keeper is chosen per group. Deleting the extras is the policy that
+                    // carries over.
+                    standing = ConsolidatedDuplicateAction.DeleteAllDuplicates;
+                }
+            }
+
+            switch (action)
+            {
+                case ConsolidatedDuplicateAction.DeleteAllDuplicates:
+                    await FileDeletion.RunAsync(this, _vm,
+                        copies.Where(c => !ReferenceEquals(c, file)).ToList(), "Delete duplicates");
+                    break;
+
+                case ConsolidatedDuplicateAction.KeepChosen:
+                    var message = await _vm.KeepOneCopyAsync(keeper, copies, toRecycleBin: true);
+                    MessageBox.Show(this, message, "Keep one copy",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                    break;
+            }
+        }
+        UpdateUndoButton();
+    }
+
     private void OnMissingFilesClick(object sender, RoutedEventArgs e)
     {
         if (_vm.MissingFiles.Count == 0) return;
@@ -515,6 +689,7 @@ public partial class MainWindow : Window
         var outcome = await _vm.ConsolidateAsync(rows, deleteOriginal);
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
+        await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
     }
 
     // --- TMDb -------------------------------------------------------------
@@ -603,6 +778,29 @@ public partial class MainWindow : Window
     }
 
     // --- Titles, season/episode, file names --------------------------------
+
+    /// <summary>
+    /// Every field of one entry in a single dialog — including the date, which is read off
+    /// the file system and is wrong often enough to be worth correcting by hand.
+    /// </summary>
+    private void OnEditDetails(object sender, RoutedEventArgs e)
+    {
+        var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
+        if (row == null)
+        {
+            MessageBox.Show(this, "Select the file to edit first.",
+                "Edit details", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var copies = _vm.CopiesOf(row.Model).Count;
+        var dlg = new FileDetailsWindow(row.Model, _vm.Categories, row.Category, copies) { Owner = this };
+        if (dlg.ShowDialog() != true || dlg.Edits == null) return;
+
+        var result = _vm.ApplyFileEdits(row.Model, dlg.Edits);
+        UpdateUndoButton();
+        MessageBox.Show(this, result, "Edit details", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
 
     private void OnEditTitle(object sender, RoutedEventArgs e)
     {
@@ -799,39 +997,14 @@ public partial class MainWindow : Window
         await DeleteAsync(rows.Select(r => r.Model).ToList());
     }
 
+    /// <summary>
+    /// Deleting goes through the one shared conversation, so the results grid, the
+    /// duplicate manager and the unhashed-files list all behave identically.
+    /// </summary>
     private async Task DeleteAsync(IReadOnlyList<MediaFile> files)
     {
-        var dlg = new DeleteFilesWindow(files) { Owner = this };
-        if (dlg.ShowDialog() != true) return;
-
-        var recycle = !dlg.DeletePermanently;
-        var outcome = await _vm.DeleteFilesAsync(files, recycle);
+        await FileDeletion.RunAsync(this, _vm, files);
         UpdateUndoButton();
-
-        // Files that refused over permissions are worth one more go with more rights;
-        // ones held open by another application need that application closed instead.
-        var denied = outcome.AccessDeniedPaths;
-        if (denied.Count > 0)
-        {
-            var retry = MessageBox.Show(this,
-                outcome.Message +
-                $"\n\n{denied.Count} file(s) were refused for permission reasons. " +
-                "Retry those with administrative rights? Windows will ask you to confirm.",
-                "Delete files", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (retry == MessageBoxResult.Yes)
-            {
-                var stillThere = files.Where(f => denied.Contains(f.FullPath)).ToList();
-                var elevated = await _vm.RetryDeleteElevatedAsync(stillThere, recycle);
-                UpdateUndoButton();
-                MessageBox.Show(this, elevated.Message, "Delete files",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-        }
-
-        MessageBox.Show(this, outcome.Message, "Delete files",
-            MessageBoxButton.OK,
-            outcome.Result.Failed > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
     }
 
     // --- Column layout ----------------------------------------------------

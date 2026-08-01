@@ -38,12 +38,14 @@ dotnet run --project MediaCatalog.App
 ```
 
 ## How to use
-1. Tick the drives you want to scan on the left, then click **Scan**.
+1. Click **Scan…** and work through the wizard: what to do with the existing catalogue,
+   which drives and folders to walk, what to pick up. On a first run it opens by itself,
+   since an empty catalogue is the one state the app can't do anything useful with.
 2. The grid fills with every audio/video file found. Use the **View** dropdown to filter
    (All / Video / Audio / Movies / TV / Duplicates / Problems).
 3. Files that are exact duplicates are flagged **DUP**; the status bar shows how much
    space you could reclaim.
-4. To move files: select one or more rows, click **Relocate selected…**, pick a
+4. To move files: select one or more rows, click **Relocate…**, pick a
    destination folder. Files are **copied and hash-verified** first; the original is
    only deleted if you tick *Delete original after verify* (and only after the copy
    verifies successfully). Moving **within one volume** skips all that: the file is
@@ -57,6 +59,33 @@ All data is written to **the folder the app runs from** (portable-app style) —
 catalogue (`catalog.xml`), tool paths (`tools.xml`), and scan state — not to
 `%APPDATA%`. Copy the app folder to another machine or drive and its catalogue comes
 with it. (Run it from a writable location, not read-only media.)
+
+### The scan wizard
+Choosing what to scan is a decision made now and then, so it lives in a wizard rather than
+in a panel occupying a third of the window at all times:
+
+1. **What should this scan do?** — add to the existing catalogue, or start again from
+   nothing. Starting over is the honest choice after changing the size limits or the media
+   filter, since the old catalogue was built under the old rules. It discards typed titles,
+   set categories and computed fingerprints, so it asks twice.
+2. **Where should it look?** — drives and extra folders. A folder already sitting on a
+   ticked drive is covered by it and skipped rather than walked twice.
+3. **What should it pick up?** — audio/video filter and the minimum/maximum file size.
+4. **Ready** — a summary of the lot, plus what to do about any drive that isn't connected.
+
+A scan only prunes entries **within the roots it actually walked**. Scanning `C:` says
+nothing about what is on `D:`, and a drive that never turned up says nothing at all — so
+"add to the existing catalogue" really does add rather than quietly replace.
+
+### Drives that aren't plugged in
+An external drive that is part of the library but not currently attached is treated as
+**unknown, not empty**. Nothing catalogued on it is touched.
+
+When you **Resume** an interrupted scan and one of its drives is missing, you're told, and
+offered three ways out — cancel (the default, so you can go and plug it in), carry on
+without it, or carry on **and wait**: the scan finishes everything it can reach, then
+watches for the drive and scans it the moment it appears. Cancel stops the wait at any
+point. The same choice is offered up front in the wizard.
 
 ### Pausing & resuming long scans
 Scanning terabytes can take hours, so scans are fully interruptible and survive an
@@ -76,6 +105,25 @@ Files that vanished from disk are only pruned from the catalogue once a scan run
 full completion — a pause never deletes anything.
 
 ## What's implemented (Phases 1–3)
+- ✅ **Scan wizard** — start fresh or add to the catalogue, pick drives and folders, set the
+  media filter and size limits, and decide what to do about drives that aren't connected
+- ✅ **Tabbed settings**, ordered by how often each thing changes — General first, API keys
+  last — with the external-tool paths folded in as a tab of their own
+- ✅ **Name-collision dialog on moves** — both files side by side with every known copy of
+  either, sizes, dates and integrity, a deep check on demand, and the option to delete all
+  the duplicates of both once you've said which to keep
+- ✅ **Re-consolidation after a title correction** — a file filed under the wrong title stops
+  counting as filed and is moved to where the corrected title puts it
+- ✅ **"Already consolidated"** rather than a second copy — with the option to delete every
+  other copy, or to nominate a different copy as the keeper and have it filed instead
+- ✅ **Edit every field** of an entry, the modified date included — written to the file on
+  disk too, so the next scan doesn't read the old one back
+- ✅ **Rename on title change** — correcting a title renames the file to match the scheme
+- ✅ **One delete path** — read-only files have the attribute cleared before the attempt,
+  everywhere that deletes
+- ✅ **Redundant exclusion rules** are spotted and offered for removal — ask, remove
+  automatically, or leave alone
+- ✅ **IMDb data downloaded from within the app**, from an address you can correct
 - ✅ Spider all attached drives, catalogue audio + video
 - ✅ **Pause / resume scanning across application restarts** — the file enumeration is
   serialized to disk, with periodic crash-safe checkpoints; built for multi-terabyte
@@ -139,8 +187,9 @@ two free, portable tools:
 automatically — no PATH editing, no admin rights.
 
 The app also auto-detects them on the system PATH and in common install folders
-(winget, chocolatey, `C:\ffmpeg\bin`, …). Or click **Tools…** in the app to point at
-them manually; the status bar shows `ffmpeg ✓ ffprobe ✓ fpcalc ✓` for what it found.
+(winget, chocolatey, `C:\ffmpeg\bin`, …). Or open **Settings… → External tools** to point
+at them manually; that tab shows what was resolved, and the status bar shows
+`ffmpeg ✓ ffprobe ✓ fpcalc ✓` for what it found.
 
 ### Using the analysis features
 - **Fingerprint / analyse** — computes perceptual fingerprints for audio/video, then
@@ -168,6 +217,14 @@ filed two different ways. A season/episode code beats the extension: anything th
 > (A rule whose folder has not been scanned yet is kept, since dropping it would lose the
 > instruction.) Folder rules are on their way out and may go entirely in a later release.
 
+**Edit details** — right-click → *Edit details…* opens every field of an entry at once:
+title, year, season, episode, category, file name, **modified date**, integrity and kind.
+What the content *is* (title, year, numbering, category) is written to every byte-identical
+copy, because they are the same thing; what the *file* is (its name, its date, what a decode
+made of it) belongs to that one file. A corrected date is written to the file on disk as
+well as to the catalogue — left in the catalogue alone, the next scan would read the old one
+straight back and treat the file as changed.
+
 **Titles** — right-click → *Edit title…* to correct a title by hand; the box starts from
 the current title, or from the file name without its extension when there isn't one. The
 correction is applied to the selected file, **to every other file that had the same
@@ -176,6 +233,13 @@ never had a title gets one too. *Set title for this folder…* names a whole fol
 parent) at once: the rule sticks, so files scanned into it later inherit the title, and a
 rule on a season folder beats one on the show above it. TMDb validation does the same with the name it confirms. A
 hand-typed title counts as validated (shown as ✎ in the TMDb column; ✓ means TMDb).
+
+Correcting a title also **renames the file on disk** to match the scheme for its category —
+`Show - S01E02.mkv`, `Title (Year).mkv` — because a corrected title that leaves the old name
+in place is only half a correction, and the old name is exactly what the next scan would
+read the title back out of. Turn it off with *Rename files on disk when their title changes*
+on **Settings… → General**. Extras keep the names they were given: the naming scheme has
+nothing better to say about "Behind the scenes" than its own name does.
 
 **Extras** — specials, featurettes, deleted scenes and behind-the-scenes material are
 detected (by folder name, Plex/Kodi `-featurette` suffixes, or a season-zero code) and
@@ -190,13 +254,24 @@ into a tidy library:
 - Extras → the same show/film folder, under `\Extras\`
 
 Seasons are left-padded to ≥2 digits, and episodes are **prefixed with their episode
-number** so a season folder sorts into broadcast order in any file manager. Files that are
-already in the consolidation location are **never copied twice**: the redundant source is
-reported instead, and you are offered the chance to delete it. A file with **no title** has
-nowhere to be filed, so you are asked for one before the move rather than having it quietly
-skipped. Target folders are set per category in **Settings…** — any number of categories,
-each with its own folder. Uses the same copy-and-verify as Relocate, with a progress bar and
-an ETA.
+number** so a season folder sorts into broadcast order in any file manager. A file with
+**no title** has nowhere to be filed, so you are asked for one before the move rather than
+having it quietly skipped. Target folders are set per category in **Settings… → Library** —
+any number of categories, each with its own folder. Uses the same copy-and-verify as
+Relocate, with a progress bar and an ETA.
+
+**Filed means "in the right place", not "somewhere in the library".** A file counts as
+consolidated only when it sits at the exact path its category, title, year and numbering
+give it. That distinction is what makes a corrected title work properly: a file filed as
+*Burn Notce* stops being filed the moment the title is fixed, and consolidating it again
+**moves it under the corrected name** instead of announcing that it is already in the
+library.
+
+**Already consolidated** — a file that really is exactly where it belongs is never copied
+onto itself. If no other copy of it exists you are simply told so. If copies do exist, this
+is the natural moment to deal with them: **delete all duplicates**, or **pick which copy to
+keep** — and if the one you pick isn't the library copy, the others go and the keeper is
+moved into the library in its place.
 
 **Suggest consolidation** — click **Suggest consolidation…** to scan the catalogue and get a
 reviewable list of proposed moves: current location → new location, with name-collision and
@@ -223,6 +298,40 @@ for — hover over *Dup*, *TMDb* or *Integrity* to see what each flag is telling
 scanning, filtering and working in the main window. *Save* applies the changes immediately
 and closes it.
 
+The tabs run **from what changes often to what changes once**, which is why they are in this
+order: *General* (startup, watching, behaviour) → *Scanning* → *Library* → *Exclusions* →
+*Categories* → *External tools* → *Data sources*. An API key is typed in on the day it is
+obtained and rarely looked at again, so it sits at the far end; which folders to watch is
+revisited regularly, so it comes first. The external-tool paths, which used to be a separate
+*Tools…* dialog on the toolbar, are a tab here now — the main window is for the catalogue,
+not for configuration.
+
+**Moving into a name that is taken** — when a move would land on a name that already exists,
+you are shown **both files side by side**, together with **every catalogued copy of either**:
+sizes, dates and integrity, so there is something to decide on. A **deep check** can be run
+on any of them from that dialog — whether a file actually decodes is often exactly the fact
+that settles which of two identically named copies is worth keeping. Then choose to keep the
+one being moved, keep the one already there, keep both (the arrival gets a free name), skip
+it, or cancel the whole move. Tick *Delete every other copy of both files* and the losers and
+all their copies go to the Recycle Bin once the choice is made; tick *Answer the rest of this
+move the same way* and you're only asked once.
+
+**Deleting** — every delete in the program goes through **one** implementation, so the
+results grid, the duplicate manager, the unhashed-files list and a verified move discarding
+its original all behave identically and gain the same fixes. **Read-only files have the
+attribute cleared before the delete is attempted** (and again if it still refuses), which is
+what used to make deleting from the duplicate manager fail. Files go to the Recycle Bin by
+default; skipping it demands a separate confirmation tick. Anything refused for permission
+reasons can be retried with administrative rights, and anything held open reports **which
+application is holding it**.
+
+**Redundant exclusion rules** — excluding `D:\Media` makes an existing rule for
+`D:\Media\Films` pointless. When a new rule covers older ones you are shown what has been
+superseded and asked whether to prune them; *Settings… → Exclusions* can change that to
+removing them automatically or leaving them alone. Patterns count too — `*\Windows\*`
+supersedes `C:\Windows` — and *Find redundant rules* sweeps the whole list at once,
+including anything the built-in system-folder list already covers.
+
 **Watching & startup** — in **Settings…**, enable *Watch for new files* to have new media
 auto-added to the catalogue with a taskbar notification, and *Start with Windows* to launch
 at sign-in. You can tick **exactly which drives to watch** — useful when only one or two of
@@ -241,15 +350,15 @@ Two more window options in **Settings…**:
   minimise button puts it in the tray, with a one-off notification the first time so it
   doesn't just vanish.
 
-**Scanning scope** — the toolbar dropdown beside **Scan** chooses between *All*,
+**Scanning scope** — the scan wizard (and *Settings… → Scanning*) chooses between *All*,
 *VideoOnly* and *AudioOnly*. A filtered scan **never prunes the kind it wasn't looking
 for**, so an audio scan followed by a video scan (or the other way round) builds a single
 combined catalogue rather than each one wiping the other's results.
 
-**Size limits** — *Settings… → Scanning* can leave out files below a minimum or above a
-maximum size. Write bytes or a size like `50MB`, `1.5 GB`, `700 KB`; leave either box empty
-for no limit, which is the default for both. Changing the limits and re-scanning both drops
-what now falls outside them and picks up what now falls inside.
+**Size limits** — the wizard and *Settings… → Scanning* can leave out files below a minimum
+or above a maximum size. Write bytes or a size like `50MB`, `1.5 GB`, `700 KB`; leave either
+box empty for no limit, which is the default for both. Changing the limits and re-scanning
+both drops what now falls outside them and picks up what now falls inside.
 
 **Progress text** — hashing thousands of small files a second makes a trailing file name
 flicker the whole status line about, and the counter never lands twice in the same place.
@@ -318,8 +427,15 @@ Episode numbering is read from any of the ways people write it — `S01E02`, `s0
 `Season 2 Ep 3` — while still leaving `Cars 3 (2017)` alone. Compact codes are read too:
 `123` is season 1 episode 23, and a four-digit `1102` is **season 11 episode 2** rather
 than episode 102 of season 1, because shows reach an eleventh season far more often than a
-hundred-and-second episode. Resolutions (`720`, `1080`, `2160`, …) are never mistaken for
-episode codes.
+hundred-and-second episode.
+
+**Encoding details are not episode numbers.** A number sitting inside a codec or resolution
+token describes the file, not the programme, so nothing reads it: `x264` is a codec and not
+season 2 episode 64, `h265` is not S02E65, and the `1920` in `1920x1080` is not a year. The
+same guard covers `x265`, `h264`, `10bit`, the bare resolutions (`720`, `1080`, `2160`, …)
+and the rest of the release-noise vocabulary — one list, used both for cleaning up titles
+and for deciding what a number is allowed to mean. An explicit `S01E02` still wins over
+everything, codec tokens included.
 
 **The path counts as metadata.** A well-filed library already says everything needed, so
 `T:\TV\K\King Of The Hill\Season 04\1.avi` is read as *King Of The Hill*, **S04E01** — the
@@ -384,9 +500,17 @@ ones under a `Temp` folder are ignored, the rest are listed via the **Missing fi
 button afterwards.
 
 ### IMDb title data (local, free, no rate limit)
-IMDb publish their catalogue as a gzipped TSV. Download
-[`title.basics.tsv.gz`](https://datasets.imdbws.com/title.basics.tsv.gz) and drop it in the
-program folder — gzipped or unpacked, either is read as-is.
+IMDb publish their catalogue as a gzipped TSV. If neither the extract nor the raw download
+is present, **Verify titles** offers to fetch it — or press *Download now* on
+**Settings… → Data sources**. The address is a setting (defaulting to
+[`title.basics.tsv.gz`](https://datasets.imdbws.com/title.basics.tsv.gz)) so a move on
+IMDb's side can be corrected there rather than waiting for a new build. The download
+streams to disk and is only kept once it has arrived whole, and what arrives is checked
+for being a gzip at all — a proxy answering with a login page is a failed download, not a
+successful one.
+
+You can equally drop the file in the program folder yourself — gzipped or unpacked, either
+is read as-is.
 
 The first time titles are verified, the file is boiled down to **`IMDBData.tsv`**, keeping
 only the two columns that matter: **primary title** and **year**. The source is over a
@@ -420,8 +544,8 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.1.9` for
-v1.9 — with the product version kept as the number people talk about (`1.9`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.0` for
+v2.0 — with the product version kept as the number people talk about (`2.0`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
@@ -429,10 +553,11 @@ every project in the solution picks them up — bump them there once per release
 in the toolbar shows both, next to the program icon.
 
 ## Roadmap / possible extensions
-- Acting on near-duplicate groups directly (keep-best / bulk delete) from the UI.
-- Fetching `title.basics.tsv.gz` from within the app rather than having it dropped in the
-  program folder by hand.
+- Acting on near-duplicate groups directly (keep-best / bulk delete) from the UI — the
+  exact-duplicate manager already does this; the perceptual groups do not yet.
 - Retiring folder rules altogether, once existing catalogues have migrated off them.
+- Collision handling for consolidation the way moves now have it: consolidation currently
+  refuses a clash rather than asking about it.
 
 ## Project layout
 - `MediaCatalog.Core` — engine (scanning, hashing, classification, duplicates,

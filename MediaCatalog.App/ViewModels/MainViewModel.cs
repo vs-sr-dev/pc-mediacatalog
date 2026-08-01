@@ -30,11 +30,58 @@ public enum FilterMode
 }
 
 /// <summary>
-/// Result of a consolidation run. <paramref name="AlreadyPresent"/> holds sources whose
-/// file is already in the consolidation location, so they can be offered for deletion.
+/// Result of a consolidation run.
 /// </summary>
+/// <param name="AlreadyPresent">
+/// Sources whose content is already sitting at the destination, so they were not copied
+/// and the source is simply redundant.
+/// </param>
+/// <param name="AlreadyConsolidated">
+/// Files that were already at the exact path the library layout gives them — nothing to
+/// do but say so, and offer to tidy up any other copies of them.
+/// </param>
 public record ConsolidationOutcome(
-    int Moved, int Skipped, int Failed, List<MediaFile> AlreadyPresent, string Message);
+    int Moved, int Skipped, int Failed, List<MediaFile> AlreadyPresent, string Message,
+    List<MediaFile>? AlreadyConsolidated = null)
+{
+    public IReadOnlyList<MediaFile> Consolidated => AlreadyConsolidated ?? new List<MediaFile>();
+}
+
+/// <summary>
+/// What the scan wizard decided: what to walk, what to look for, and what to do with the
+/// catalogue that already exists.
+/// </summary>
+/// <param name="WaitForMissingDrives">
+/// Keep the scan open for a drive that is not attached, and pick it up when it appears —
+/// the external-drive case, where "not plugged in" is not the same as "gone".
+/// </param>
+public record ScanPlan(
+    IReadOnlyList<string> Drives,
+    IReadOnlyList<string> Folders,
+    ScanMediaFilter MediaFilter,
+    ScanStartMode StartMode,
+    bool WaitForMissingDrives)
+{
+    /// <summary>Smallest file worth cataloguing, in bytes. 0 = no lower limit.</summary>
+    public long MinSizeBytes { get; init; }
+
+    /// <summary>Largest file worth cataloguing, in bytes. 0 = no upper limit.</summary>
+    public long MaxSizeBytes { get; init; }
+
+    /// <summary>
+    /// Everything to walk. A chosen folder that already sits on a chosen drive is dropped:
+    /// the drive covers it, and walking it twice only costs time.
+    /// </summary>
+    public IReadOnlyList<string> Roots =>
+        Drives.Concat(Folders.Where(f => !Drives.Any(d => IsUnder(f, d)))).ToList();
+
+    private static bool IsUnder(string path, string root)
+    {
+        var trimmed = root.TrimEnd('\\', '/');
+        return trimmed.Length > 0 &&
+               path.StartsWith(trimmed + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+}
 
 /// <summary>Result of a delete, including the detail needed to explain any refusals.</summary>
 public record DeleteOutcome(DeleteResult Result, string Message)
@@ -61,6 +108,14 @@ public class MainViewModel : ObservableObject
     private NewFileWatcher? _watcher;
     private List<string> _lastRoots = new();
     private readonly List<FileRow> _allRows = new();
+
+    /// <summary>
+    /// Exact-duplicate sets by content hash, rebuilt with the rows. Grouping the whole
+    /// catalogue costs a pass over every file, and the duplicate manager asks for a group
+    /// each time it reloads — so it is worked out once and looked up thereafter.
+    /// </summary>
+    private readonly Dictionary<string, DuplicateGroup> _duplicateGroups = new(StringComparer.OrdinalIgnoreCase);
+
     private CancellationTokenSource? _cts;
     private bool _isPausing;
     private int _lastDone;
@@ -88,15 +143,13 @@ public class MainViewModel : ObservableObject
         _tmdbCache = TmdbCache.Load(_tmdbCachePath);
         UpdateToolStatus();
 
-        ScanCommand = new RelayCommand(async () => await RunScanAsync(SelectedRootPaths(), resuming: false),
-            () => !IsScanning);
-        ResumeCommand = new RelayCommand(async () => await RunScanAsync(_session.Roots, resuming: true),
+        // The Scan button opens the wizard; the window supplies it, since choosing what to
+        // scan is a conversation rather than a command.
+        ScanCommand = new RelayCommand(() => ScanRequested?.Invoke(), () => !IsScanning);
+        ResumeCommand = new RelayCommand(() => ResumeRequested?.Invoke(),
             () => !IsScanning && CanResume);
         PauseCommand = new RelayCommand(() => { _isPausing = true; _cts?.Cancel(); }, () => IsScanning);
         CancelCommand = new RelayCommand(() => { _isPausing = false; _cts?.Cancel(); }, () => IsScanning);
-        RefreshDrivesCommand = new RelayCommand(LoadDrives, () => !IsScanning);
-        SelectAllDrivesCommand = new RelayCommand(() => SetAllDrives(true), () => !IsScanning);
-        SelectNoDrivesCommand = new RelayCommand(() => SetAllDrives(false), () => !IsScanning);
 
         RestoreFilters();
 
@@ -119,12 +172,10 @@ public class MainViewModel : ObservableObject
                              " — click Refresh catalogue. No re-scanning or re-hashing is involved.";
         }
 
-        LoadDrives();
         RebuildRows();
         StartWatchingIfEnabled(_lastRoots); // resumes watching if enabled in settings
     }
 
-    public ObservableCollection<DriveItem> Drives { get; } = new();
     public ObservableCollection<FileRow> Files { get; } = new();
 
     public Array FilterModes => Enum.GetValues(typeof(FilterMode));
@@ -133,9 +184,28 @@ public class MainViewModel : ObservableObject
     public ICommand ResumeCommand { get; }
     public ICommand PauseCommand { get; }
     public ICommand CancelCommand { get; }
-    public ICommand RefreshDrivesCommand { get; }
-    public ICommand SelectAllDrivesCommand { get; }
-    public ICommand SelectNoDrivesCommand { get; }
+
+    /// <summary>Raised when the user asks to scan; the window opens the wizard.</summary>
+    public Action? ScanRequested { get; set; }
+
+    /// <summary>Raised when the user asks to resume, so missing drives can be raised first.</summary>
+    public Action? ResumeRequested { get; set; }
+
+    /// <summary>The drives available to scan right now.</summary>
+    public static IReadOnlyList<ScanRoot> AvailableDrives() => DriveScanner.GetAvailableDrives();
+
+    /// <summary>True when nothing has been catalogued yet, so the wizard is the way in.</summary>
+    public bool CatalogIsEmpty => _catalog.Files.Count == 0;
+
+    /// <summary>How many entries the catalogue holds, whether or not they are on show.</summary>
+    public int CataloguedFileCount => _catalog.Files.Count;
+
+    /// <summary>The roots a resumable session would continue with.</summary>
+    public IReadOnlyList<string> SessionRoots => _session.Roots;
+
+    /// <summary>Session drives that are not attached at the moment.</summary>
+    public IReadOnlyList<string> UnavailableSessionRoots() =>
+        ScanEngine.UnavailableRoots(_session.Roots);
 
     /// <summary>True when a paused scan can be resumed.</summary>
     public bool CanResume
@@ -407,8 +477,6 @@ public class MainViewModel : ObservableObject
 
     // --- Scan scope -------------------------------------------------------
 
-    public Array ScanFilters => Enum.GetValues(typeof(ScanMediaFilter));
-
     /// <summary>
     /// Whether a scan looks for everything, only video, or only audio. Saved as it
     /// changes, and never prunes what it wasn't looking for — so audio and video scans
@@ -426,32 +494,66 @@ public class MainViewModel : ObservableObject
         }
     }
 
-    private void LoadDrives()
+    /// <summary>
+    /// Start the scan the wizard described: over the chosen drives and folders, either
+    /// adding to what is already catalogued or beginning again from nothing.
+    /// </summary>
+    public async Task<string> StartScanAsync(ScanPlan plan)
     {
-        var previouslySelected = Drives.Where(d => d.IsSelected)
-            .Select(d => d.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        Drives.Clear();
-        foreach (var root in DriveScanner.GetAvailableDrives())
+        if (IsScanning) return "A scan is already running.";
+
+        var roots = plan.Roots.Where(r => !string.IsNullOrWhiteSpace(r))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (roots.Count == 0)
         {
-            var item = new DriveItem(root);
-            if (previouslySelected.Contains(root.Path)) item.IsSelected = true;
-            Drives.Add(item);
+            StatusText = "Choose at least one drive or folder to scan.";
+            return StatusText;
         }
+
+        // Remember the choices so the wizard opens where it left off, and so the rest of
+        // the program works to the same limits this scan did.
+        _settings.ScanDrives = plan.Drives.ToList();
+        _settings.ScanWizardCompleted = true;
+        _settings.ScanMediaFilter = plan.MediaFilter;
+        _settings.MinFileSizeBytes = plan.MinSizeBytes;
+        _settings.MaxFileSizeBytes = plan.MaxSizeBytes;
+        foreach (var folder in plan.Folders.Where(f =>
+                     !_settings.AdditionalScanFolders.Contains(f, StringComparer.OrdinalIgnoreCase)))
+            _settings.AdditionalScanFolders.Add(folder);
+        _settings.Save(_settingsPath);
+        OnPropertyChanged(nameof(ScanFilter));
+
+        if (plan.StartMode == ScanStartMode.StartFresh)
+        {
+            // A fresh start throws away everything previously known — including the
+            // resumable session and the cached enumeration, which describe the old one.
+            _catalog = new Catalog();
+            _catalog.RebuildIndex();
+            _duplicateGroups.Clear();
+            Undo.Clear();
+            CatalogStore.Save(_catalog, _catalogPath);
+            ClearSession();
+            EnumerationCache.Clear(AppPaths.EnumerationPath);
+        }
+
+        await RunScanAsync(roots, resuming: false, plan.WaitForMissingDrives);
+        return StatusText;
     }
 
-    private void SetAllDrives(bool selected)
+    /// <summary>Continue an interrupted scan, optionally waiting for a drive to reappear.</summary>
+    public async Task<string> ResumeScanAsync(bool waitForMissingDrives)
     {
-        foreach (var d in Drives) d.IsSelected = selected;
+        if (IsScanning) return "A scan is already running.";
+        if (!CanResume) return "No paused scan to resume.";
+        await RunScanAsync(_session.Roots.ToList(), resuming: true, waitForMissingDrives);
+        return StatusText;
     }
-
-    private List<string> SelectedRootPaths() =>
-        Drives.Where(d => d.IsSelected).Select(d => d.Path).ToList();
 
     /// <summary>
     /// Run (or resume) a scan over <paramref name="roots"/>. Pause and cancel both stop
     /// the scan at a clean boundary; pause additionally saves a resumable session.
     /// </summary>
-    private async Task RunScanAsync(List<string> roots, bool resuming)
+    private async Task RunScanAsync(List<string> roots, bool resuming, bool waitForMissingDrives = false)
     {
         if (roots.Count == 0)
         {
@@ -497,7 +599,8 @@ public class MainViewModel : ObservableObject
             var engine = new ScanEngine(_catalog);
             var report = await Task.Run(() => engine.ScanAsync(
                 roots, progress, Checkpoint, TimeSpan.FromSeconds(30),
-                resume: resuming, resumeFromIndex: resumeFromIndex, settings: _settings, ct: _cts.Token));
+                resume: resuming, resumeFromIndex: resumeFromIndex, settings: _settings,
+                waitForMissingRoots: waitForMissingDrives, ct: _cts.Token));
 
             CatalogStore.Save(_catalog, _catalogPath);
             ClearSession();
@@ -513,6 +616,9 @@ public class MainViewModel : ObservableObject
                 notes.Add($"{report.Unhashed.Count} could not be hashed");
             if (report.SkippedBySize > 0)
                 notes.Add($"{report.SkippedBySize} skipped by the size limits");
+            if (report.Unavailable.Count > 0)
+                notes.Add($"{string.Join(", ", report.Unavailable)} never became available and " +
+                          "were left untouched");
 
             StatusText = notes.Count > 0
                 ? "Scan complete — " + string.Join(", ", notes) + "."
@@ -658,19 +764,25 @@ public class MainViewModel : ObservableObject
             if (_settings.IsPathExcluded(f.FullPath) || _settings.IsExtensionIgnored(f.Extension))
                 continue;
 
-            // Being in the library is a fact about where the file is, so it is re-derived
-            // rather than trusted: consolidation folders change, and files get moved.
-            f.Consolidated = ConsolidationPlanner.IsInConsolidationLocation(f, _settings);
+            var category = CategoryResolver.Effective(f, _settings);
 
-            var row = new FileRow(f) { Category = CategoryResolver.Effective(f, _settings) };
+            // Being filed is a fact about where the file is, so it is re-derived rather
+            // than trusted: consolidation folders change, files get moved, and a corrected
+            // title moves the goalposts — a file under the old title's folder is in the
+            // library but no longer in the right place in it.
+            f.Consolidated = ConsolidationPlanner.IsCorrectlyFiled(f, category, _settings);
+
+            var row = new FileRow(f) { Category = category };
             _allRows.Add(row);
             rowByPath[f.FullPath] = row;
         }
 
         var groups = DuplicateFinder.FindExactDuplicates(_catalog.Files);
+        _duplicateGroups.Clear();
         long reclaimable = 0;
         foreach (var g in groups)
         {
+            _duplicateGroups[g.Sha256] = g;
             reclaimable += g.ReclaimableBytes;
             foreach (var f in g.Files)
                 if (rowByPath.TryGetValue(f.FullPath, out var row))
@@ -738,47 +850,20 @@ public class MainViewModel : ObservableObject
 
     /// <summary>
     /// Copy-and-verify the given rows to <paramref name="destinationDir"/>, optionally
-    /// deleting the originals only after a successful hash verification.
+    /// deleting the originals only after a successful hash verification. One implementation
+    /// with the plain move, so both get the progress, the ETA, the undo entry and the
+    /// name-collision conversation.
     /// </summary>
-    public async Task<string> RelocateAsync(
-        IReadOnlyList<FileRow> rows, string destinationDir, bool deleteOriginal)
-    {
-        if (rows.Count == 0) return "Nothing selected.";
-
-        IsScanning = true;
-        int ok = 0, failed = 0;
-        try
-        {
-            for (var i = 0; i < rows.Count; i++)
-            {
-                var row = rows[i];
-                StatusText = $"Relocating {i + 1}/{rows.Count}: {row.FileName}";
-                var result = await FileRelocator.RelocateAsync(
-                    row.Model, destinationDir, deleteOriginal);
-                if (result.Success) { ok++; row.Refresh(); }
-                else failed++;
-            }
-            CatalogStore.Save(_catalog, _catalogPath);
-        }
-        finally
-        {
-            IsScanning = false;
-            RebuildRows();
-        }
-
-        var msg = $"Relocation finished: {ok} succeeded, {failed} failed.";
-        StatusText = msg;
-        return msg;
-    }
+    public Task<string> RelocateAsync(
+        IReadOnlyList<FileRow> rows, string destinationDir, bool deleteOriginal) =>
+        MoveFilesAsync(rows.Select(r => r.Model).ToList(), destinationDir, deleteOriginal);
 
     /// <summary>Build in-place rename proposals for the given rows (only ones that would change).</summary>
-    public List<RenameProposal> BuildRenameProposals(IEnumerable<FileRow> rows)
-    {
-        var models = rows.Select(r => r.Model);
-        return RenameService.BuildProposals(models)
+    public List<RenameProposal> BuildRenameProposals(IEnumerable<FileRow> rows) =>
+        RenameService.BuildProposals(
+                rows.Select(r => r.Model), f => CategoryResolver.Effective(f, _settings))
             .Where(p => p.WillChange)
             .ToList();
-    }
 
     /// <summary>Apply the chosen rename proposals on disk, then refresh and save.</summary>
     public async Task<string> ApplyRenamesAsync(IReadOnlyList<RenameProposal> proposals)
@@ -1049,15 +1134,30 @@ public class MainViewModel : ObservableObject
             .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified, f.TitleManuallySet, f.ParsedTitle))
             .ToList();
 
+        // Every file that ends up carrying the new title, not only the ones selected: the
+        // rest of the show is swept along by the title change and should be swept along by
+        // the rename that follows it.
+        var before = _catalog.Files
+            .Where(f => !string.Equals(f.EffectiveTitle.Trim(), title, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
         var changed = TitleUpdater.Apply(_catalog.Files, withDuplicates, title, manual: true);
 
         // Extras take their title from what they hang off, so refresh the links.
         ExtraLinker.Link(_catalog.Files);
+
+        // The name on disk follows the title. A corrected title that leaves the old name
+        // in place is only half a correction — and the old name is what the next scan
+        // would read the title back out of.
+        var renamed = RenameToMatchTitles(
+            before.Where(f => string.Equals(f.EffectiveTitle.Trim(), title, StringComparison.OrdinalIgnoreCase)));
+
         CatalogStore.Save(_catalog, _catalogPath);
         RebuildRows();
 
         Undo.Push($"title '{title}' on {changed} file(s)", () =>
         {
+            UndoRenames(renamed);
             foreach (var s in snapshot)
             {
                 s.File.TmdbName = s.TmdbName;
@@ -1067,12 +1167,55 @@ public class MainViewModel : ObservableObject
                 s.File.ParsedTitle = s.ParsedTitle;
             }
             ExtraLinker.Link(_catalog.Files);
+            _catalog.RebuildIndex();
             PersistAndRefresh();
             return Task.FromResult($"Reverted the title '{title}'.");
         });
 
-        StatusText = $"Title set to '{title}' on {changed} file(s).";
+        StatusText = $"Title set to '{title}' on {changed} file(s)" +
+                     (renamed.Count > 0 ? $"; {renamed.Count} file(s) renamed to match." : ".");
         return StatusText;
+    }
+
+    /// <summary>
+    /// Rename files on disk so their names match the titles they now carry, following the
+    /// naming scheme for each one's category. Returns what was renamed, oldest name first,
+    /// so the change can be put back.
+    /// </summary>
+    private List<(MediaFile File, string PreviousPath, string PreviousName)> RenameToMatchTitles(
+        IEnumerable<MediaFile> files)
+    {
+        var renamed = new List<(MediaFile, string, string)>();
+        if (!_settings.RenameOnTitleChange) return renamed;
+
+        foreach (var file in files)
+        {
+            if (!File.Exists(file.FullPath)) continue;
+
+            var proposal = RenameService.BuildProposal(file, CategoryResolver.Effective(file, _settings));
+            if (proposal is not { WillChange: true }) continue;
+
+            var previousPath = file.FullPath;
+            var previousName = file.FileName;
+            if (RenameService.Apply(proposal).Success)
+                renamed.Add((file, previousPath, previousName));
+        }
+
+        if (renamed.Count > 0) _catalog.RebuildIndex();
+        return renamed;
+    }
+
+    /// <summary>Put renamed files back under the names they had.</summary>
+    private void UndoRenames(IReadOnlyList<(MediaFile File, string PreviousPath, string PreviousName)> renamed)
+    {
+        foreach (var (file, previousPath, previousName) in renamed)
+            RenameService.Apply(new RenameProposal
+            {
+                File = file,
+                CurrentName = file.FileName,
+                ProposedName = previousName,
+                ProposedPath = previousPath
+            });
     }
 
     /// <summary>
@@ -1108,6 +1251,150 @@ public class MainViewModel : ObservableObject
             : $"Set S{season?.ToString("00") ?? "--"}E{episode?.ToString("00") ?? "--"}";
         StatusText = $"{what} on {affected.Count} file(s).";
         return StatusText;
+    }
+
+    /// <summary>
+    /// Every field of a catalogue entry the user may correct, as the editor collected them.
+    /// The file's own facts — its name, its date on disk, what a decode made of it — belong
+    /// to that one file; what the content *is* belongs to every byte-identical copy of it.
+    /// </summary>
+    public record FileEdits(
+        string Title,
+        int? Year,
+        int? Season,
+        int? Episode,
+        string Category,
+        DateTime ModifiedUtc,
+        IntegrityStatus Integrity,
+        MediaKind Kind,
+        string FileName);
+
+    /// <summary>
+    /// Apply a full set of corrections to one entry. The date is written to the file on
+    /// disk as well as to the catalogue: left only in the catalogue, the next scan would
+    /// read the old one back and treat the file as changed.
+    /// </summary>
+    public string ApplyFileEdits(MediaFile file, FileEdits edits)
+    {
+        var copies = new List<MediaFile> { file };
+        copies.AddRange(CopiesOf(file));
+
+        var before = copies.Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified,
+            f.TitleManuallySet, f.Year, f.Season, f.Episode, f.CategoryOverride)).ToList();
+        var previousModified = file.LastModifiedUtc;
+        var previousIntegrity = file.Integrity;
+        var previousKind = file.Kind;
+        var previousPath = file.FullPath;
+        var previousName = file.FileName;
+
+        var changes = new List<string>();
+        var title = (edits.Title ?? string.Empty).Trim();
+        var titleChanged = !string.Equals(title, file.EffectiveTitle.Trim(), StringComparison.Ordinal);
+
+        foreach (var copy in copies)
+        {
+            if (titleChanged && title.Length > 0)
+            {
+                copy.TmdbName = title;
+                copy.TitleManuallySet = true;
+                copy.TmdbVerified = false;
+                copy.ImdbVerified = false;
+            }
+            copy.Year = edits.Year;
+            copy.Season = edits.Season;
+            copy.Episode = edits.Episode;
+            copy.CategoryOverride = (edits.Category ?? string.Empty).Trim();
+        }
+        if (titleChanged && title.Length > 0) changes.Add($"title '{title}'");
+
+        file.Integrity = edits.Integrity;
+        file.Kind = edits.Kind;
+        if (previousIntegrity != edits.Integrity) changes.Add($"integrity {edits.Integrity}");
+        if (previousKind != edits.Kind) changes.Add($"kind {edits.Kind}");
+
+        // The date, on disk and in the catalogue, so the two agree.
+        if (edits.ModifiedUtc != previousModified)
+        {
+            file.LastModifiedUtc = edits.ModifiedUtc;
+            if (TrySetModified(file.FullPath, edits.ModifiedUtc))
+                changes.Add($"date {edits.ModifiedUtc.ToLocalTime():yyyy-MM-dd HH:mm}");
+            else
+                changes.Add($"date {edits.ModifiedUtc.ToLocalTime():yyyy-MM-dd HH:mm} (catalogue only — " +
+                            "the file itself refused)");
+        }
+
+        // An explicit name wins; otherwise a changed title renames the file to match, which
+        // is what the naming scheme is for.
+        var renamed = new List<(MediaFile, string, string)>();
+        var wanted = (edits.FileName ?? string.Empty).Trim();
+        if (wanted.Length > 0 && !string.Equals(wanted, file.FileName, StringComparison.Ordinal))
+        {
+            var dir = Path.GetDirectoryName(file.FullPath) ?? string.Empty;
+            var result = RenameService.Apply(new RenameProposal
+            {
+                File = file,
+                CurrentName = file.FileName,
+                ProposedName = wanted,
+                ProposedPath = Path.Combine(dir, wanted)
+            });
+            if (result.Success)
+            {
+                renamed.Add((file, previousPath, previousName));
+                changes.Add($"renamed to '{file.FileName}'");
+            }
+            else changes.Add($"could not rename: {result.Message}");
+        }
+        else if (titleChanged)
+        {
+            renamed = RenameToMatchTitles(copies);
+            if (renamed.Count > 0) changes.Add($"{renamed.Count} file(s) renamed to match");
+        }
+
+        ExtraLinker.Link(_catalog.Files);
+        _catalog.RebuildIndex();
+        CatalogStore.Save(_catalog, _catalogPath);
+        RebuildRows();
+
+        Undo.Push($"edits to '{previousName}'", () =>
+        {
+            UndoRenames(renamed);
+            foreach (var b in before)
+            {
+                b.File.TmdbName = b.TmdbName;
+                b.File.TmdbVerified = b.TmdbVerified;
+                b.File.ImdbVerified = b.ImdbVerified;
+                b.File.TitleManuallySet = b.TitleManuallySet;
+                b.File.Year = b.Year;
+                b.File.Season = b.Season;
+                b.File.Episode = b.Episode;
+                b.File.CategoryOverride = b.CategoryOverride;
+            }
+            file.Integrity = previousIntegrity;
+            file.Kind = previousKind;
+            file.LastModifiedUtc = previousModified;
+            TrySetModified(file.FullPath, previousModified);
+            ExtraLinker.Link(_catalog.Files);
+            _catalog.RebuildIndex();
+            PersistAndRefresh();
+            return Task.FromResult($"Reverted the edits to '{previousName}'.");
+        });
+
+        StatusText = changes.Count == 0
+            ? "Nothing was changed."
+            : $"Updated {file.FileName}: " + string.Join(", ", changes) +
+              (copies.Count > 1 ? $" (shared with {copies.Count - 1} identical copy(ies))." : ".");
+        return StatusText;
+    }
+
+    private static bool TrySetModified(string path, DateTime utc)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            File.SetLastWriteTimeUtc(path, utc);
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>Rename a file on disk, keeping the catalogue entry in step.</summary>
@@ -1195,6 +1482,11 @@ public class MainViewModel : ObservableObject
         DuplicateMetadata.Propagate(_catalog.Files);
         ExtraLinker.Link(_catalog.Files);
 
+        // Names on disk follow the title here too, so a whole show renamed in one go comes
+        // out consistent rather than half-corrected.
+        var renamed = RenameToMatchTitles(_catalog.Files
+            .Where(f => string.Equals(f.EffectiveTitle.Trim(), clean, StringComparison.OrdinalIgnoreCase)));
+
         // Any leftover rule for this folder has just been made redundant.
         var previous = _settings.FolderTitleRules
             .Where(r => string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -1210,6 +1502,7 @@ public class MainViewModel : ObservableObject
 
         Undo.Push($"folder title '{clean}'", () =>
         {
+            UndoRenames(renamed);
             foreach (var s in snapshot)
             {
                 s.File.TmdbName = s.TmdbName;
@@ -1223,12 +1516,14 @@ public class MainViewModel : ObservableObject
                 _settings.Save(_settingsPath);
             }
             ExtraLinker.Link(_catalog.Files);
+            _catalog.RebuildIndex();
             PersistAndRefresh();
             return Task.FromResult($"Reverted the folder title '{clean}'.");
         });
 
         StatusText = $"Title '{clean}' set for {folder}{(includeSubdirs ? " and its subfolders" : "")} " +
-                     $"— {changed} file(s) updated.";
+                     $"— {changed} file(s) updated" +
+                     (renamed.Count > 0 ? $", {renamed.Count} renamed to match." : ".");
         return StatusText;
     }
 
@@ -1296,15 +1591,29 @@ public class MainViewModel : ObservableObject
 
     // --- Exclusions -------------------------------------------------------
 
+    /// <summary>
+    /// Put the rules a new exclusion would make redundant to the user. Set by the window;
+    /// only consulted when the policy is to ask.
+    /// </summary>
+    public Func<IReadOnlyList<ExcludedFolder>, bool>? ConfirmRedundantExclusions { get; set; }
+
     public void ExcludeFolder(string folder, bool includeSubdirs)
     {
         if (string.IsNullOrWhiteSpace(folder)) return;
         _settings.ExcludedFolders.RemoveAll(f =>
             string.Equals(f.Path, folder, StringComparison.OrdinalIgnoreCase));
-        _settings.ExcludedFolders.Add(new ExcludedFolder { Path = folder, IncludeSubdirectories = includeSubdirs });
+
+        var candidate = new ExcludedFolder { Path = folder, IncludeSubdirectories = includeSubdirs };
+        var pruned = AppSettings.PruneSuperseded(
+            _settings.ExcludedFolders, candidate,
+            _settings.RedundantExclusions, ConfirmRedundantExclusions);
+
+        _settings.ExcludedFolders.Add(candidate);
         _settings.Save(_settingsPath);
         RebuildRows();
-        StatusText = $"Excluded folder: {folder}{(includeSubdirs ? " (and subfolders)" : "")}.";
+
+        StatusText = $"Excluded folder: {folder}{(includeSubdirs ? " (and subfolders)" : "")}" +
+                     (pruned.Count > 0 ? $"; {pruned.Count} rule(s) it already covered were removed." : ".");
     }
 
     public void IgnoreExtension(string extension)
@@ -1318,49 +1627,26 @@ public class MainViewModel : ObservableObject
     // --- Duplicates -------------------------------------------------------
 
     /// <summary>The exact-duplicate group a file belongs to, or null if it has none.</summary>
-    public DuplicateGroup? DuplicateGroupFor(MediaFile file)
-    {
-        if (string.IsNullOrEmpty(file.Sha256)) return null;
-        return DuplicateGroupBySha(file.Sha256);
-    }
+    public DuplicateGroup? DuplicateGroupFor(MediaFile file) =>
+        DuplicateGroupBySha(file.Sha256);
 
-    public DuplicateGroup? DuplicateGroupBySha(string sha)
-    {
-        if (string.IsNullOrEmpty(sha)) return null;
-        return DuplicateFinder.FindExactDuplicates(_catalog.Files)
-            .FirstOrDefault(g => string.Equals(g.Sha256, sha, StringComparison.OrdinalIgnoreCase));
-    }
+    public DuplicateGroup? DuplicateGroupBySha(string sha) =>
+        !string.IsNullOrEmpty(sha) && _duplicateGroups.TryGetValue(sha, out var group)
+            ? group
+            : null;
+
+    /// <summary>Every other catalogued copy of this exact file.</summary>
+    public List<MediaFile> CopiesOf(MediaFile file) =>
+        DuplicateGroupFor(file)?.Files.Where(f => !ReferenceEquals(f, file)).ToList()
+        ?? new List<MediaFile>();
+
+    /// <summary>The catalogue entry for a path, when there is one.</summary>
+    public MediaFile? EntryAt(string path) =>
+        !string.IsNullOrEmpty(path) && _catalog.ByPath.TryGetValue(path, out var f) ? f : null;
 
     /// <summary>Copy/move specific catalogue entries (used by the duplicate manager).</summary>
-    public async Task<string> RelocateModelsAsync(IReadOnlyList<MediaFile> files, string dir, bool delete)
-    {
-        int ok = 0, failed = 0;
-        foreach (var f in files)
-        {
-            var r = await FileRelocator.RelocateAsync(f, dir, delete);
-            if (r.Success) ok++; else failed++;
-        }
-        PersistAndRefresh();
-        return $"{ok} {(delete ? "moved" : "copied")}, {failed} failed.";
-    }
-
-    /// <summary>Delete a file from disk and catalogue (used by the duplicate manager).</summary>
-    public string DeleteFile(MediaFile file)
-    {
-        try
-        {
-            if (File.Exists(file.FullPath)) File.Delete(file.FullPath);
-            _catalog.Files.Remove(file);
-            _catalog.RebuildIndex();
-            CatalogStore.Save(_catalog, _catalogPath);
-            RebuildRows();
-            return $"Deleted {file.FileName}.";
-        }
-        catch (Exception ex)
-        {
-            return $"Could not delete {file.FileName}: {ex.Message}";
-        }
-    }
+    public Task<string> RelocateModelsAsync(IReadOnlyList<MediaFile> files, string dir, bool delete) =>
+        MoveFilesAsync(files, dir, delete);
 
     public void PersistAndRefresh()
     {
@@ -1427,26 +1713,47 @@ public class MainViewModel : ObservableObject
     public async Task<ConsolidationOutcome> ConsolidateModelsAsync(
         IReadOnlyList<MediaFile> files, bool deleteOriginal)
     {
-        var skipped = 0;
-        var origins = files.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
-
-        var report = await RunFileOperationAsync(files, "Consolidating", (file, bytes) =>
-        {
-            var category = CategoryResolver.Effective(file, _settings);
-            var destDir = ConsolidationPlanner.PlanDirectory(file, category, _settings);
-            if (destDir == null)
-            {
-                skipped++;
-                return Task.FromResult(new RelocationResult(false, "No category or target folder.", file.FullPath));
-            }
-            return FileRelocator.RelocateAsync(
-                file, destDir, deleteOriginal,
-                ConsolidationPlanner.PlanFileName(file, category), DuplicatePolicy.Skip, bytes);
-        });
-
-        // Anything that arrived is now in the library.
+        // A file already sitting at the exact path the layout gives it has nothing to do:
+        // consolidating it again is how a second copy of it gets made. It is reported as
+        // already consolidated instead, and the caller can offer to tidy up its copies.
+        //
+        // Sitting *somewhere* under the library is not the same thing. A file whose title
+        // has since been corrected is under the old title's folder, and the plan below
+        // moves it to the new one — which is exactly what re-consolidating should mean.
+        var alreadyConsolidated = new List<MediaFile>();
+        var toFile = new List<MediaFile>();
         foreach (var file in files)
-            file.Consolidated = ConsolidationPlanner.IsInConsolidationLocation(file, _settings);
+        {
+            if (ConsolidationPlanner.IsAtPlannedPath(file, CategoryResolver.Effective(file, _settings), _settings))
+                alreadyConsolidated.Add(file);
+            else
+                toFile.Add(file);
+        }
+
+        var skipped = 0;
+        var origins = toFile.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
+
+        var report = toFile.Count == 0
+            ? new OperationReport(0, 0, new List<MediaFile>())
+            : await RunFileOperationAsync(toFile, "Consolidating", (file, bytes) =>
+            {
+                var category = CategoryResolver.Effective(file, _settings);
+                var destDir = ConsolidationPlanner.PlanDirectory(file, category, _settings);
+                if (destDir == null)
+                {
+                    skipped++;
+                    return Task.FromResult(new RelocationResult(false, "No category or target folder.", file.FullPath));
+                }
+                return FileRelocator.RelocateAsync(
+                    file, destDir, deleteOriginal,
+                    ConsolidationPlanner.PlanFileName(file, category), DuplicatePolicy.Skip, bytes);
+            });
+
+        // Anything that arrived is now filed; anything that moved for a corrected title is
+        // filed under the new one.
+        foreach (var file in files)
+            file.Consolidated = ConsolidationPlanner.IsCorrectlyFiled(
+                file, CategoryResolver.Effective(file, _settings), _settings);
         CatalogStore.Save(_catalog, _catalogPath);
 
         if (deleteOriginal)
@@ -1454,10 +1761,55 @@ public class MainViewModel : ObservableObject
                 StringComparison.OrdinalIgnoreCase)).ToList());
 
         var failed = Math.Max(0, report.Failed - skipped);
-        var msg = $"Consolidation: {report.Succeeded} moved, {skipped} skipped (no category/target), " +
-                  $"{report.AlreadyPresent.Count} already in the library, {failed} failed.";
+        var parts = new List<string> { $"{report.Succeeded} moved" };
+        if (skipped > 0) parts.Add($"{skipped} skipped (no category/target)");
+        if (alreadyConsolidated.Count > 0) parts.Add($"{alreadyConsolidated.Count} already consolidated");
+        if (report.AlreadyPresent.Count > 0) parts.Add($"{report.AlreadyPresent.Count} already in the library");
+        if (failed > 0) parts.Add($"{failed} failed");
+
+        var msg = "Consolidation: " + string.Join(", ", parts) + ".";
         StatusText = msg;
-        return new ConsolidationOutcome(report.Succeeded, skipped, failed, report.AlreadyPresent, msg);
+        return new ConsolidationOutcome(
+            report.Succeeded, skipped, failed, report.AlreadyPresent, msg, alreadyConsolidated);
+    }
+
+    /// <summary>
+    /// The other copies of files that were already consolidated — what there is to tidy up
+    /// once a file turns out to need no moving.
+    /// </summary>
+    public List<MediaFile> CopiesOfAny(IEnumerable<MediaFile> files)
+    {
+        var chosen = new HashSet<MediaFile>(files);
+        return chosen.SelectMany(CopiesOf).Distinct().Where(f => !chosen.Contains(f)).ToList();
+    }
+
+    /// <summary>
+    /// Keep one copy of a piece of content and remove the rest, then make sure the survivor
+    /// is the one in the library: the copies go first, which frees the library's own name
+    /// for the keeper to move into when the keeper was not the library copy to begin with.
+    /// </summary>
+    public async Task<string> KeepOneCopyAsync(
+        MediaFile keeper, IReadOnlyList<MediaFile> copies, bool toRecycleBin)
+    {
+        var others = copies.Where(f => !ReferenceEquals(f, keeper)).ToList();
+        var removed = 0;
+        if (others.Count > 0)
+        {
+            var outcome = await DeleteFilesAsync(others, toRecycleBin);
+            removed = outcome.Result.Deleted;
+        }
+
+        var category = CategoryResolver.Effective(keeper, _settings);
+        var message = $"Kept {keeper.FileName}; {removed} other copy(ies) removed.";
+
+        if (!ConsolidationPlanner.IsAtPlannedPath(keeper, category, _settings))
+        {
+            var outcome = await ConsolidateModelsAsync(new[] { keeper }, deleteOriginal: true);
+            message += " " + outcome.Message;
+        }
+
+        StatusText = message;
+        return message;
     }
 
     /// <summary>Propose consolidation moves for the whole catalogue.</summary>
@@ -1484,7 +1836,8 @@ public class MainViewModel : ObservableObject
         });
 
         foreach (var file in files)
-            file.Consolidated = ConsolidationPlanner.IsInConsolidationLocation(file, _settings);
+            file.Consolidated = ConsolidationPlanner.IsCorrectlyFiled(
+                file, CategoryResolver.Effective(file, _settings), _settings);
         CatalogStore.Save(_catalog, _catalogPath);
 
         if (deleteOriginal)
@@ -1670,8 +2023,16 @@ public class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Asked when a move would land on a name that is already taken. Set by the window,
+    /// which puts both files — and every known copy of either — in front of the user.
+    /// Left unset, the old behaviour stands: the arrival is renamed and both are kept.
+    /// </summary>
+    public Func<CollisionRequest, Task<CollisionResolution>>? CollisionResolver { get; set; }
+
+    /// <summary>
     /// Move (or copy) files to a folder the user picked, with progress and an ETA based on
-    /// the bytes actually copied.
+    /// the bytes actually copied. A name already in use at the destination is put to the
+    /// user rather than quietly worked around.
     /// </summary>
     public async Task<string> MoveFilesAsync(
         IReadOnlyList<MediaFile> files, string destinationDir, bool deleteOriginal)
@@ -1681,17 +2042,166 @@ public class MainViewModel : ObservableObject
 
         var origins = files.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
         var verb = deleteOriginal ? "Moving" : "Copying";
-        var report = await RunFileOperationAsync(files, verb, (file, bytes) =>
-            FileRelocator.RelocateAsync(file, destinationDir, deleteOriginal,
-                newFileName: null, DuplicatePolicy.Rename, bytes));
+
+        CollisionResolution? standing = null;    // an answer the user asked to reuse
+        var cancelled = false;
+        var skipped = 0;
+        var tidyUp = new List<string>();          // copies to remove once the batch is done
+        var survivors = new List<MediaFile>();    // entries the tidy-up must not touch
+        var survivorPaths = new List<string>();   // ditto, for files not in the catalogue
+
+        var report = await RunFileOperationAsync(files, verb, async (file, bytes) =>
+        {
+            if (cancelled)
+                return new RelocationResult(false, "Cancelled.", file.FullPath);
+
+            var policy = DuplicatePolicy.Rename;
+            var desired = Path.Combine(destinationDir, file.FileName);
+
+            if (CollisionResolver != null &&
+                !ConsolidationPlanner.PathsEqual(desired, file.FullPath) &&
+                File.Exists(desired))
+            {
+                var existing = EntryAt(desired);
+                var resolution = standing ?? await CollisionResolver(BuildCollisionRequest(file, desired));
+                if (resolution.ApplyToRemaining) standing = resolution;
+
+                // Gathered before anything is deleted: once the loser is gone from the
+                // catalogue there is no longer any way to ask what its other copies were.
+                if (resolution.DeleteDuplicates &&
+                    resolution.Choice is CollisionChoice.KeepExisting or
+                        CollisionChoice.KeepIncoming or CollisionChoice.KeepBoth)
+                {
+                    tidyUp.AddRange(CopiesOf(file).Select(c => c.FullPath));
+                    if (existing != null) tidyUp.AddRange(CopiesOf(existing).Select(c => c.FullPath));
+                }
+
+                switch (resolution.Choice)
+                {
+                    case CollisionChoice.Cancel:
+                        cancelled = true;
+                        return new RelocationResult(false, "Cancelled.", file.FullPath);
+
+                    case CollisionChoice.Skip:
+                        skipped++;
+                        return new RelocationResult(false, "Skipped — that name is taken.", file.FullPath);
+
+                    case CollisionChoice.KeepExisting:
+                        // The copy at the destination is the one to keep, so this file does
+                        // not move — and is itself one of the copies to clear away.
+                        if (existing != null) survivors.Add(existing); else survivorPaths.Add(desired);
+                        if (resolution.DeleteDuplicates) tidyUp.Add(file.FullPath);
+                        return new RelocationResult(false,
+                            "Kept the file already there.", desired, AlreadyPresent: true);
+
+                    case CollisionChoice.KeepIncoming:
+                        // Clear the way, then move in. Recycled rather than destroyed: the
+                        // user is choosing between two files, not throwing one away.
+                        await DeleteQuietlyAsync(new[] { desired }, toRecycleBin: true);
+                        survivors.Add(file);
+                        break;
+
+                    case CollisionChoice.KeepBoth:
+                        // Both stay, so both are spared by the tidy-up.
+                        survivors.Add(file);
+                        if (existing != null) survivors.Add(existing); else survivorPaths.Add(desired);
+                        policy = DuplicatePolicy.Rename;
+                        break;
+                }
+            }
+
+            return await FileRelocator.RelocateAsync(file, destinationDir, deleteOriginal,
+                newFileName: null, policy, bytes);
+        });
+
+        // Tidy-up happens after the batch: deleting copies mid-move would pull entries out
+        // from under the operation that is still walking the list. The survivors' paths are
+        // read now, after the moves, since that is where they have ended up.
+        var keep = survivors.Select(f => f.FullPath)
+            .Concat(survivorPaths)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var removed = await DeleteQuietlyAsync(
+            tidyUp.Where(p => !keep.Contains(p)), toRecycleBin: true);
+        if (removed > 0) PersistAndRefresh();
 
         if (report.Succeeded > 0 && deleteOriginal)
             PushMoveUndo(origins.Where(o => o.File.FullPath != o.FullPath).ToList());
 
-        var message = $"{(deleteOriginal ? "Move" : "Copy")} finished: {report.Succeeded} done, " +
-                      $"{report.AlreadyPresent.Count} already there, {report.Failed} failed.";
+        var parts = new List<string> { $"{report.Succeeded} done" };
+        if (report.AlreadyPresent.Count > 0) parts.Add($"{report.AlreadyPresent.Count} already there");
+        if (skipped > 0) parts.Add($"{skipped} skipped");
+        if (removed > 0) parts.Add($"{removed} duplicate(s) removed");
+        if (report.Failed > 0) parts.Add($"{report.Failed} failed");
+
+        var message = $"{(deleteOriginal ? "Move" : "Copy")} finished: " + string.Join(", ", parts) +
+                      (cancelled ? " (cancelled part-way)." : ".");
         StatusText = message;
         return message;
+    }
+
+    /// <summary>Everything the user needs to decide a collision: both files and all their copies.</summary>
+    private CollisionRequest BuildCollisionRequest(MediaFile incoming, string destinationPath)
+    {
+        var existing = EntryAt(destinationPath);
+        var sameContent = existing != null && incoming.HasHash && existing.HasHash &&
+                          string.Equals(existing.Sha256, incoming.Sha256, StringComparison.OrdinalIgnoreCase);
+
+        return new CollisionRequest(
+            incoming,
+            destinationPath,
+            existing,
+            CopiesOf(incoming),
+            existing != null ? CopiesOf(existing) : new List<MediaFile>(),
+            sameContent);
+    }
+
+    /// <summary>
+    /// Delete files in the middle of a larger operation, which owns the progress bar and
+    /// the saving. Entries whose file has gone are dropped from the catalogue; nothing is
+    /// pushed onto the undo stack, since the operation around this records its own.
+    /// </summary>
+    private async Task<int> DeleteQuietlyAsync(IEnumerable<string> paths, bool toRecycleBin)
+    {
+        var list = paths.Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(File.Exists)
+            .ToList();
+        if (list.Count == 0) return 0;
+
+        var result = await Task.Run(() => FileDeleter.Delete(list, toRecycleBin));
+
+        var gone = list.Where(p => !File.Exists(p)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (gone.Count > 0)
+        {
+            _catalog.Files.RemoveAll(f => gone.Contains(f.FullPath));
+            _catalog.RebuildIndex();
+            ExtraLinker.Link(_catalog.Files);
+        }
+        return result.Deleted;
+    }
+
+    /// <summary>
+    /// Deep-check one file without disturbing whatever else is running. The collision
+    /// dialog offers this mid-move, where taking over the progress bar and the
+    /// cancellation token would pull the rug from under the operation that opened it.
+    /// </summary>
+    public async Task<string> DeepCheckOneAsync(MediaFile file, CancellationToken ct = default)
+    {
+        if (!CanDoVideo)
+            return "A deep check needs FFmpeg and ffprobe — set them up on the External tools tab first.";
+        if (!File.Exists(file.FullPath))
+            return "That file is no longer on disk.";
+
+        try
+        {
+            var engine = new ContentAnalysisEngine(_tools);
+            await engine.AnalyzeAsync(new[] { file }, fingerprint: false, deepCheck: true, null, ct);
+            return $"{file.FileName}: {file.Integrity}";
+        }
+        catch (Exception ex)
+        {
+            return $"Could not check {file.FileName}: {ex.Message}";
+        }
     }
 
     /// <summary>Register the reversal of a move: put each file back where it came from.</summary>
@@ -1937,6 +2447,72 @@ public class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// True when there is no IMDb data at all — neither our extract nor the raw download
+    /// waiting to be turned into one. The one case worth offering to fetch it.
+    /// </summary>
+    public bool NeedsImdbDownload => !HasImdbData && ImdbSourceFile == null;
+
+    /// <summary>
+    /// Fetch <c>title.basics.tsv.gz</c> from the configured address and boil it down to
+    /// the extract, so the user needn't go and find the file themselves. The download runs
+    /// to a temporary name and is only kept once it has arrived whole.
+    /// </summary>
+    public async Task<string> DownloadImdbDataAsync()
+    {
+        if (IsScanning) return "Something else is running — wait for it to finish first.";
+
+        _cts = new CancellationTokenSource();
+        IsScanning = true;
+        BeginTiming();
+        ProgressValue = 0;
+        ProgressMax = 1000;
+
+        var progress = new Progress<ImdbDownloadProgress>(p =>
+        {
+            if (p.BytesTotal > 0)
+            {
+                ProgressValue = (int)Math.Min(1000, p.BytesRead * 1000 / p.BytesTotal);
+                UpdateEta(p.BytesRead, p.BytesTotal);
+                StatusText = $"Downloading IMDb titles — {Format.Bytes(p.BytesRead)} of " +
+                             $"{Format.Bytes(p.BytesTotal)}";
+            }
+            else
+            {
+                StatusText = $"Downloading IMDb titles — {Format.Bytes(p.BytesRead)} so far";
+            }
+        });
+
+        try
+        {
+            await ImdbDownloader.DownloadAsync(
+                _settings.EffectiveImdbDownloadUrl, AppPaths.ImdbSourceGzPath, progress, _cts.Token);
+            StatusText = "IMDb download finished — extracting…";
+            OnPropertyChanged(nameof(ImdbSourceFile));
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "IMDb download cancelled.";
+            return StatusText;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"IMDb download failed: {ex.Message}";
+            return StatusText;
+        }
+        finally
+        {
+            EndTiming();
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+            OnPropertyChanged(nameof(NeedsImdbDownload));
+        }
+
+        // The download on its own is not usable; the extract is what lookups read.
+        return await ExtractImdbDataAsync();
+    }
+
+    /// <summary>
     /// Hold the extract in memory when the user has asked for that, so lookups don't
     /// re-read a large file. A no-op when the option is off or it is already loaded.
     /// </summary>
@@ -2089,11 +2665,17 @@ public class MainViewModel : ObservableObject
     // --- Settings ---------------------------------------------------------
 
     /// <summary>
-    /// Drive roots offered in Settings for watching. Taken from the list already loaded
-    /// for the drives panel — re-enumerating stalls on network/removable volumes.
+    /// Drive roots offered in Settings for watching: the ones attached now, plus any the
+    /// catalogue already knows about so an unplugged drive's setting is not lost.
     /// </summary>
     public IReadOnlyList<string> AvailableDriveRoots =>
-        Drives.Select(d => d.Path).ToList();
+        DriveScanner.GetAvailableDrives().Select(d => d.Path)
+            .Concat(_settings.ScanDrives)
+            .Concat(_catalog.Files.Select(f => Path.GetPathRoot(f.FullPath) ?? ""))
+            .Where(r => !string.IsNullOrWhiteSpace(r))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(r => r, StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     public void ApplyAppSettings(AppSettings settings)
     {
@@ -2350,8 +2932,5 @@ public class MainViewModel : ObservableObject
         (ResumeCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (PauseCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (CancelCommand as RelayCommand)?.RaiseCanExecuteChanged();
-        (RefreshDrivesCommand as RelayCommand)?.RaiseCanExecuteChanged();
-        (SelectAllDrivesCommand as RelayCommand)?.RaiseCanExecuteChanged();
-        (SelectNoDrivesCommand as RelayCommand)?.RaiseCanExecuteChanged();
     }
 }

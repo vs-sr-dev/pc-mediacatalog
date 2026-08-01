@@ -3,19 +3,35 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Storage;
+using MediaCatalog.Core.Tools;
 using Microsoft.Win32;
 
 namespace MediaCatalog.App;
 
+/// <summary>The tabs, in the order they are shown.</summary>
+public enum SettingsTab
+{
+    General = 0,
+    Scanning,
+    Library,
+    Exclusions,
+    Categories,
+    ExternalTools,
+    DataSources
+}
+
 /// <summary>
-/// Edits <see cref="AppSettings"/>: TMDb credentials, per-category consolidation folders,
-/// ignored file types, excluded folders, watched drives and custom categories. Folder
-/// category rules are preserved untouched.
+/// Edits <see cref="AppSettings"/> and the external-tool paths in one place.
+///
+/// The tabs run from what changes often to what changes once: which folders to watch and
+/// how the app starts are revisited regularly, while an API key is typed in on the day it
+/// is obtained and rarely looked at again. Everything else falls between the two.
 ///
 /// Shown non-modally so the main window stays usable while it is open: saving raises
 /// <see cref="Saved"/> rather than setting a dialog result.
@@ -39,11 +55,20 @@ public class SettingsWindow : Window
     }
 
     private readonly AppSettings _incoming;
+    private readonly ToolSettings _incomingTools;
     private readonly IReadOnlyList<string> _knownCategories;
     private readonly IReadOnlyList<string> _driveRoots;
+    private readonly Func<Task<string>>? _downloadImdb;
 
+    private readonly TabControl _tabs = new();
+
+    // --- themoviedb.org / IMDb ---
     private readonly TextBox _apiKey = new();
     private readonly TextBox _readToken = new();
+    private readonly TextBox _imdbUrl = new();
+    private readonly TextBlock _imdbStatus;
+
+    // --- Startup / window / watching ---
     private readonly CheckBox _startup = new() { Content = "Start Media Catalog when Windows starts" };
     private readonly CheckBox _startInTray = new()
     {
@@ -79,10 +104,21 @@ public class SettingsWindow : Window
     {
         Content = "Remember the view and filters between sessions"
     };
+    private readonly CheckBox _renameOnTitle = new()
+    {
+        Content = "Rename files on disk when their title changes, to match the naming scheme"
+    };
     private readonly CheckBox _excludeSystem = new()
     {
         Content = "Automatically exclude system directories (Windows, Program Files, $Recycle.Bin, …)"
     };
+    private readonly ComboBox _redundantRules = new() { Width = 260 };
+
+    // --- External tools ---
+    private readonly TextBox _ffmpeg = new() { VerticalContentAlignment = VerticalAlignment.Center };
+    private readonly TextBox _ffprobe = new() { VerticalContentAlignment = VerticalAlignment.Center };
+    private readonly TextBox _fpcalc = new() { VerticalContentAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _toolStatus = new() { FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap };
 
     private readonly ObservableCollection<string> _exts = new();
     private readonly ObservableCollection<ExclRow> _excluded = new();
@@ -95,18 +131,90 @@ public class SettingsWindow : Window
     /// <summary>Raised when the user saves; carries the new settings.</summary>
     public event Action<AppSettings>? Saved;
 
-    public SettingsWindow(AppSettings settings, IReadOnlyList<string> knownCategories,
-        IReadOnlyList<string> driveRoots)
+    /// <summary>Raised alongside <see cref="Saved"/> with the external-tool paths.</summary>
+    public event Action<ToolSettings>? ToolsSaved;
+
+    /// <param name="downloadImdb">
+    /// Fetches the IMDb dataset, for the button on the data tab. Null when the caller has
+    /// no way to do that, in which case the button is not offered.
+    /// </param>
+    public SettingsWindow(
+        AppSettings settings,
+        IReadOnlyList<string> knownCategories,
+        IReadOnlyList<string> driveRoots,
+        ToolSettings tools,
+        Func<Task<string>>? downloadImdb = null)
     {
         _incoming = settings;
+        _incomingTools = tools;
         _knownCategories = knownCategories;
         _driveRoots = driveRoots;
+        _downloadImdb = downloadImdb;
+        _imdbStatus = Hint(ImdbStatusText());
 
-        Title = "Settings"; Width = 720; Height = 760;
+        Title = "Settings"; Width = 760; Height = 640;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
+        LoadValues(settings, tools);
+
+        var root = new DockPanel { Margin = new Thickness(14) };
+
+        // Buttons pinned to the bottom, below the tabs, so Save always means "save it all".
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 10, 0, 0)
+        };
+        var save = new Button
+        {
+            Content = "Save", Width = 84, IsDefault = true,
+            FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 6, 0)
+        };
+        save.Click += OnSave;
+        buttons.Children.Add(save);
+        // Explicit Close rather than IsCancel: a non-modal window has no dialog result.
+        var cancel = new Button { Content = "Close", Width = 84 };
+        cancel.Click += (_, _) => Close();
+        buttons.Children.Add(cancel);
+        DockPanel.SetDock(buttons, Dock.Bottom);
+        root.Children.Add(buttons);
+
+        _tabs.Items.Add(Tab("General", GeneralTab()));
+        _tabs.Items.Add(Tab("Scanning", ScanningTab()));
+        _tabs.Items.Add(Tab("Library", LibraryTab()));
+        _tabs.Items.Add(Tab("Exclusions", ExclusionsTab()));
+        _tabs.Items.Add(Tab("Categories", CategoriesTab()));
+        _tabs.Items.Add(Tab("External tools", ToolsTab()));
+        _tabs.Items.Add(Tab("Data sources", DataTab()));
+        root.Children.Add(_tabs);
+
+        Content = root;
+
+        // Esc closes, as it would for a modal dialog.
+        PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
+    }
+
+    /// <summary>Open on a particular tab — used when something sent the user here.</summary>
+    public void Show(SettingsTab tab)
+    {
+        _tabs.SelectedIndex = (int)tab;
+        Show();
+    }
+
+    /// <summary>Bring an already-open window forward, on the tab that matters now.</summary>
+    public void FocusTab(SettingsTab tab)
+    {
+        _tabs.SelectedIndex = (int)tab;
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void LoadValues(AppSettings settings, ToolSettings tools)
+    {
         _apiKey.Text = settings.TmdbApiKey;
         _readToken.Text = settings.TmdbReadAccessToken;
+        _imdbUrl.Text = settings.EffectiveImdbDownloadUrl;
         _startup.IsChecked = settings.StartWithWindows;
         _startInTray.IsChecked = settings.StartInTray;
         _startInTray.IsEnabled = settings.StartWithWindows;
@@ -116,6 +224,7 @@ public class SettingsWindow : Window
         _minimiseToTray.IsChecked = settings.MinimiseToTray;
         _watch.IsChecked = settings.WatchForNewFiles;
         _rememberFilters.IsChecked = settings.RememberFilters;
+        _renameOnTitle.IsChecked = settings.RenameOnTitleChange;
         _excludeSystem.IsChecked = settings.ExcludeSystemDirectories;
         _minSize.Text = FormatSize(settings.MinFileSizeBytes);
         _maxSize.Text = FormatSize(settings.MaxFileSizeBytes);
@@ -126,80 +235,112 @@ public class SettingsWindow : Window
         _scanFilter.SelectedItem = settings.ScanMediaFilter;
         _progressName.ItemsSource = Enum.GetValues(typeof(ProgressNamePosition));
         _progressName.SelectedItem = settings.ProgressNamePosition;
+
+        _redundantRules.ItemsSource = new[]
+        {
+            "Ask which redundant rules to remove",
+            "Remove redundant rules automatically",
+            "Leave redundant rules alone"
+        };
+        _redundantRules.SelectedIndex = (int)settings.RedundantExclusions;
+
+        _ffmpeg.Text = tools.FfmpegPath;
+        _ffprobe.Text = tools.FfprobePath;
+        _fpcalc.Text = tools.FpcalcPath;
+
         foreach (var e in settings.IgnoredExtensions) _exts.Add(e);
         foreach (var f in settings.ExcludedFolders) _excluded.Add(new ExclRow { Model = f });
         foreach (var c in settings.CustomCategories) _categories.Add(c);
         foreach (var f in settings.AdditionalScanFolders) _scanFolders.Add(f);
+    }
 
-        var root = new DockPanel { Margin = new Thickness(14) };
+    // --- Tabs -------------------------------------------------------------
 
-        // Buttons pinned to the bottom.
-        var buttons = new StackPanel
+    private static TabItem Tab(string header, StackPanel content) => new()
+    {
+        Header = header,
+        Content = new ScrollViewer
         {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 10, 0, 0)
-        };
-        var save = new Button { Content = "Save", Width = 84, IsDefault = true, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 6, 0) };
-        save.Click += OnSave;
-        buttons.Children.Add(save);
-        // Explicit Close rather than IsCancel: a non-modal window has no dialog result.
-        var cancel = new Button { Content = "Close", Width = 84 };
-        cancel.Click += (_, _) => Close();
-        buttons.Children.Add(cancel);
-        DockPanel.SetDock(buttons, Dock.Bottom);
-        root.Children.Add(buttons);
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Padding = new Thickness(10, 4, 10, 10),
+            Content = content
+        }
+    };
 
+    private StackPanel GeneralTab()
+    {
         var panel = new StackPanel();
-        panel.Children.Add(Section("themoviedb.org"));
-        panel.Children.Add(Labeled("API key (v3):", _apiKey));
-        panel.Children.Add(Labeled("Read token (v4):", _readToken));
-        panel.Children.Add(Hint("Get free credentials at themoviedb.org → account settings → API. Either the v4 Read Access Token or the v3 API Key works (the token is preferred). Queries are rate-limited to one every two seconds."));
 
-        panel.Children.Add(Section("Startup, window & watching"));
+        panel.Children.Add(Section("Startup and window"));
         _startup.Margin = new Thickness(0, 2, 0, 2);
         _alwaysMinimised.Margin = new Thickness(0, 2, 0, 2);
         _minimiseToTray.Margin = new Thickness(0, 2, 0, 2);
-        _watch.Margin = new Thickness(0, 2, 0, 2);
-        _rememberFilters.Margin = new Thickness(0, 2, 0, 2);
         panel.Children.Add(_startup);
         panel.Children.Add(_startInTray);
         panel.Children.Add(_alwaysMinimised);
         panel.Children.Add(_minimiseToTray);
-        panel.Children.Add(_watch);
-        panel.Children.Add(DriveWatchEditor(settings));
-        panel.Children.Add(_rememberFilters);
 
-        panel.Children.Add(Section("Scanning"));
+        panel.Children.Add(Section("Watching for new files"));
+        _watch.Margin = new Thickness(0, 2, 0, 2);
+        panel.Children.Add(_watch);
+        panel.Children.Add(DriveWatchEditor(_incoming));
+
+        panel.Children.Add(Section("Behaviour"));
+        _rememberFilters.Margin = new Thickness(0, 2, 0, 2);
+        _renameOnTitle.Margin = new Thickness(0, 2, 0, 2);
+        panel.Children.Add(_rememberFilters);
+        panel.Children.Add(_renameOnTitle);
+        panel.Children.Add(Hint("A corrected title changes the name the file should have. With this on, " +
+                                "the file on disk is renamed to match — \"Show - S01E02.mkv\" for an " +
+                                "episode, \"Title (Year).mkv\" for a film — so the next scan reads the " +
+                                "corrected name back rather than the old one."));
+
+        panel.Children.Add(Labeled("Progress name:", _progressName, 120));
+        panel.Children.Add(Hint("Where the current file name goes in the progress message. Thousands of " +
+                                "small files a second make a name on the right flicker the whole line; " +
+                                "Left keeps \"Hashing & classifying\" still, and Hidden leaves it out."));
+        return panel;
+    }
+
+    private StackPanel ScanningTab()
+    {
+        var panel = new StackPanel();
+
+        panel.Children.Add(Section("What a scan picks up"));
         panel.Children.Add(Labeled("Scan for:", _scanFilter, 110));
         panel.Children.Add(Hint("VideoOnly and AudioOnly build one combined catalogue between them: a " +
                                 "filtered scan never removes the kind it wasn't looking for."));
         panel.Children.Add(SizeLimitEditor());
-        panel.Children.Add(Labeled("File name:", _progressName, 110));
-        panel.Children.Add(Hint("Where the current file name goes in the progress message. Thousands of " +
-                                "small files a second make a name on the right flicker the whole line; " +
-                                "Left keeps \"Hashing & classifying\" still, and Hidden leaves it out."));
-
-        panel.Children.Add(Section("IMDb data (local, no rate limit)"));
-        _useImdbFirst.Margin = new Thickness(0, 2, 0, 2);
-        _imdbInMemory.Margin = new Thickness(0, 2, 0, 2);
-        panel.Children.Add(_useImdbFirst);
-        panel.Children.Add(_imdbInMemory);
-        panel.Children.Add(ImdbStatusText());
 
         panel.Children.Add(Section("Folders scanned in addition to whole drives"));
         panel.Children.Add(ScanFolderEditor());
-        panel.Children.Add(Hint("A download folder, say. These are watched along with the drives, and can be " +
-                                "rescanned on their own with \"Scan folder…\" without re-walking a whole drive."));
+        panel.Children.Add(Hint("A download folder, say. These are watched along with the drives, and are " +
+                                "offered in the scan wizard so a folder can be rescanned on its own " +
+                                "without re-walking a whole drive."));
 
+        panel.Children.Add(Hint("\nWhich drives to scan is chosen in the scan wizard — the Scan button on " +
+                                "the toolbar — where the choice belongs with the run it applies to."));
+        return panel;
+    }
+
+    private StackPanel LibraryTab()
+    {
+        var panel = new StackPanel();
         panel.Children.Add(Section("Consolidation folders (one per category)"));
-        panel.Children.Add(CategoryFolderEditor(settings));
+        panel.Children.Add(CategoryFolderEditor(_incoming));
         panel.Children.Add(Hint("A consolidation folder is the central location scattered files are moved into, e.g. all TV under T:\\TV\\. " +
                                 "TV goes to <folder>\\<A-Z or #>\\<Show>\\Season NN\\ with episodes renamed \"01 - name.ext\"; films to <folder>\\<A-Z or #>\\<Title (Year)>\\. " +
                                 "Specials and featurettes follow their show or film into an Extras subfolder."));
+        panel.Children.Add(Hint("\nA file counts as filed only when it is at the exact place its title, year " +
+                                "and numbering put it. Correct a title and its file stops being filed — " +
+                                "consolidating it again moves it under the new name rather than reporting " +
+                                "it as already done."));
+        return panel;
+    }
 
-        panel.Children.Add(Section("Ignored file types (removed from results and skipped in future scans)"));
-        panel.Children.Add(ListEditor(_exts, addPrompt: "Extension e.g. .nfo", onAdd: AddExtension));
+    private StackPanel ExclusionsTab()
+    {
+        var panel = new StackPanel();
 
         panel.Children.Add(Section("Excluded folders"));
         _excludeSystem.Margin = new Thickness(0, 2, 0, 6);
@@ -208,18 +349,112 @@ public class SettingsWindow : Window
         panel.Children.Add(Hint(@"Paths may be exact folders (D:\Downloads) or patterns: * matches any run of characters, ? matches one. " +
                                 @"So *\Windows\* excludes every Windows folder on every drive, and ?:\$Recycle.Bin excludes the bin on all of them."));
 
+        panel.Children.Add(Section("When a new rule covers older ones"));
+        panel.Children.Add(Labeled("Redundant rules:", _redundantRules, 130));
+        panel.Children.Add(Hint(@"Excluding D:\Media makes an existing rule for D:\Media\Films pointless — the " +
+                                "broader rule already covers it. Leaving both is harmless but clutters the " +
+                                "list, so by default you are shown what has been superseded and asked."));
+
+        panel.Children.Add(Section("Ignored file types (removed from results and skipped in future scans)"));
+        panel.Children.Add(ListEditor(_exts, addPrompt: "Extension e.g. .nfo", onAdd: AddExtension));
+        return panel;
+    }
+
+    private StackPanel CategoriesTab()
+    {
+        var panel = new StackPanel();
         panel.Children.Add(Section("Custom categories"));
         panel.Children.Add(ListEditor(_categories, addPrompt: "New category name", onAdd: AddCategory));
+        panel.Children.Add(Hint("Added to the built-in Movie / TvShow / TvExtra / MovieExtra / Audio / Other " +
+                                "list wherever a category is chosen. Give a custom category a consolidation " +
+                                "folder on the Library tab and its files are filed straight into it."));
+        return panel;
+    }
 
-        root.Children.Add(new ScrollViewer
+    private StackPanel ToolsTab()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(Section("FFmpeg, ffprobe and fpcalc"));
+        panel.Children.Add(Hint("The advanced features need external tools: fingerprinting, deep integrity " +
+                                "checks and duration probing. Easiest option — drop ffmpeg.exe, ffprobe.exe " +
+                                "and fpcalc.exe into a 'tools' folder next to this application and they are " +
+                                "found automatically. Otherwise set explicit paths here; an empty box means " +
+                                "auto-detect (PATH and the usual install folders)."));
+
+        panel.Children.Add(ToolRow("ffmpeg", _ffmpeg));
+        panel.Children.Add(ToolRow("ffprobe", _ffprobe));
+        panel.Children.Add(ToolRow("fpcalc", _fpcalc));
+
+        var redetect = new Button
         {
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Content = panel
-        });
-        Content = root;
+            Content = "Re-detect", Width = 100, HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 8, 0, 8)
+        };
+        redetect.Click += (_, _) => ShowToolDetection();
+        panel.Children.Add(redetect);
 
-        // Esc closes, as it would for a modal dialog.
-        PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
+        panel.Children.Add(_toolStatus);
+        panel.Children.Add(Hint("\nDownloads: FFmpeg → ffmpeg.org (the gyan.dev builds) provides ffmpeg.exe and " +
+                                "ffprobe.exe. Chromaprint → acoustid.org/chromaprint provides fpcalc.exe. " +
+                                "Both are free and portable — just unzip."));
+        ShowToolDetection();
+        return panel;
+    }
+
+    private StackPanel DataTab()
+    {
+        var panel = new StackPanel();
+
+        panel.Children.Add(Section("Local IMDb data (no rate limit)"));
+        _useImdbFirst.Margin = new Thickness(0, 2, 0, 2);
+        _imdbInMemory.Margin = new Thickness(0, 2, 0, 2);
+        panel.Children.Add(_useImdbFirst);
+        panel.Children.Add(_imdbInMemory);
+        panel.Children.Add(_imdbStatus);
+
+        panel.Children.Add(Labeled("Download from:", _imdbUrl, 110));
+        panel.Children.Add(Hint("Where title.basics.tsv.gz is fetched from. The default is IMDb's own " +
+                                "published address; it is a setting so a changed address can be corrected " +
+                                "here rather than waiting for a new version."));
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        if (_downloadImdb != null)
+        {
+            var download = new Button { Content = "Download now", Width = 130, Padding = new Thickness(0, 3, 0, 3) };
+            download.Click += async (_, _) =>
+            {
+                download.IsEnabled = false;
+                try
+                {
+                    var result = await _downloadImdb();
+                    _imdbStatus.Text = ImdbStatusText();
+                    MessageBox.Show(this, result, "IMDb data",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                finally { download.IsEnabled = true; }
+            };
+            row.Children.Add(download);
+        }
+        var reset = new Button
+        {
+            Content = "Use the default address", Width = 170,
+            Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(0, 3, 0, 3)
+        };
+        reset.Click += (_, _) => _imdbUrl.Text = AppSettings.DefaultImdbDownloadUrl;
+        row.Children.Add(reset);
+        panel.Children.Add(row);
+        panel.Children.Add(Hint("The download is around 150 MB and is boiled down to a two-column extract " +
+                                "of titles and years — the only part this program uses. Progress is shown " +
+                                "in the status bar."));
+
+        panel.Children.Add(Section("themoviedb.org"));
+        panel.Children.Add(Labeled("API key (v3):", _apiKey, 110));
+        panel.Children.Add(Labeled("Read token (v4):", _readToken, 110));
+        panel.Children.Add(Hint("Get free credentials at themoviedb.org → account settings → API. Either the " +
+                                "v4 Read Access Token or the v3 API Key works (the token is preferred). " +
+                                "Queries are rate-limited to one every two seconds, which is why the local " +
+                                "IMDb data above is consulted first."));
+        return panel;
     }
 
     // --- Layout helpers ---------------------------------------------------
@@ -251,6 +486,49 @@ public class SettingsWindow : Window
         dp.Children.Add(control);
         return dp;
     }
+
+    private FrameworkElement ToolRow(string name, TextBox box)
+    {
+        var dp = new DockPanel { Margin = new Thickness(0, 4, 0, 0) };
+
+        var label = new TextBlock { Text = name, Width = 70, VerticalAlignment = VerticalAlignment.Center };
+        DockPanel.SetDock(label, Dock.Left);
+        dp.Children.Add(label);
+
+        var browse = new Button { Content = "Browse…", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(6, 0, 0, 0) };
+        browse.Click += (_, _) =>
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = $"Select {name}.exe",
+                Filter = "Executables (*.exe)|*.exe|All files (*.*)|*.*"
+            };
+            if (dlg.ShowDialog(this) == true) { box.Text = dlg.FileName; ShowToolDetection(); }
+        };
+        DockPanel.SetDock(browse, Dock.Right);
+        dp.Children.Add(browse);
+
+        dp.Children.Add(box);
+        return dp;
+    }
+
+    private void ShowToolDetection()
+    {
+        var resolved = ExternalTools.Resolve(CollectTools());
+        string Line(string name, string? path) =>
+            $"{name}: {(string.IsNullOrEmpty(path) ? "not found" : path)}";
+        _toolStatus.Text =
+            Line("ffmpeg", resolved.FfmpegPath) + "\n" +
+            Line("ffprobe", resolved.FfprobePath) + "\n" +
+            Line("fpcalc", resolved.FpcalcPath);
+    }
+
+    private ToolSettings CollectTools() => new()
+    {
+        FfmpegPath = _ffmpeg.Text.Trim(),
+        FfprobePath = _ffprobe.Text.Trim(),
+        FpcalcPath = _fpcalc.Text.Trim()
+    };
 
     // --- Scan size limits -------------------------------------------------
 
@@ -332,29 +610,27 @@ public class SettingsWindow : Window
         return bytes is >= 0 and < long.MaxValue ? (long)bytes : null;
     }
 
-    /// <summary>Where the IMDb data stands right now, so the checkboxes above make sense.</summary>
-    private static TextBlock ImdbStatusText()
+    /// <summary>Where the IMDb data stands right now, so the options above make sense.</summary>
+    private static string ImdbStatusText()
     {
         var extract = AppPaths.ImdbDataPath;
         var source = MediaCatalog.Core.Imdb.ImdbExtractor.FindSource(
             AppPaths.ImdbSourcePath, AppPaths.ImdbSourceGzPath);
 
-        var text = File.Exists(extract)
+        return File.Exists(extract)
             ? $"IMDBData.tsv is present ({FormatSize(new FileInfo(extract).Length)})."
             : source != null
                 ? $"{Path.GetFileName(source)} is present and will be extracted to IMDBData.tsv the " +
                   "first time titles are verified."
-                : "No IMDb data yet. Download title.basics.tsv.gz from https://datasets.imdbws.com/ " +
-                  $"and put it in {AppPaths.DataDirectory} — it is extracted automatically, and only " +
-                  "the title and year are kept.";
-
-        return Hint(text);
+                : "There is no IMDb data yet. Download it below, or put title.basics.tsv.gz in " +
+                  $"{AppPaths.DataDirectory} by hand — it is extracted automatically, and only the " +
+                  "title and year are kept.";
     }
 
     private FrameworkElement ListEditor(ObservableCollection<string> items, string addPrompt, Action<string> onAdd)
     {
         var dp = new DockPanel();
-        var list = new ListBox { Height = 90, ItemsSource = items };
+        var list = new ListBox { Height = 120, ItemsSource = items };
 
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
         var input = new TextBox { Width = 260, VerticalContentAlignment = VerticalAlignment.Center, ToolTip = addPrompt };
@@ -416,7 +692,7 @@ public class SettingsWindow : Window
     private FrameworkElement ScanFolderEditor()
     {
         var wrap = new StackPanel();
-        var list = new ListBox { Height = 70, ItemsSource = _scanFolders };
+        var list = new ListBox { Height = 100, ItemsSource = _scanFolders };
         wrap.Children.Add(list);
 
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
@@ -442,14 +718,14 @@ public class SettingsWindow : Window
     private FrameworkElement ExcludedEditor()
     {
         var wrap = new StackPanel();
-        var list = new ListBox { Height = 100, ItemsSource = _excluded, DisplayMemberPath = nameof(ExclRow.Display) };
+        var list = new ListBox { Height = 140, ItemsSource = _excluded, DisplayMemberPath = nameof(ExclRow.Display) };
         wrap.Children.Add(list);
 
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        var controls = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
         var subdirs = new CheckBox { Content = "incl. subfolders", IsChecked = true, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
         controls.Children.Add(subdirs);
 
-        var browse = new Button { Content = "Add folder…", Width = 96 };
+        var browse = new Button { Content = "Add folder…", Width = 96, Margin = new Thickness(0, 0, 6, 0) };
         browse.Click += (_, _) =>
         {
             var dlg = new OpenFolderDialog { Title = "Choose folder to exclude" };
@@ -460,7 +736,7 @@ public class SettingsWindow : Window
 
         // Typed rules are the only way to enter a pattern — a folder browser can't
         // produce "*\Windows\*", which matches many folders and exists as none.
-        var addPath = new Button { Content = "Add path or pattern…", Width = 150, Margin = new Thickness(6, 0, 0, 0) };
+        var addPath = new Button { Content = "Add path or pattern…", Width = 150, Margin = new Thickness(0, 0, 6, 0) };
         addPath.Click += (_, _) =>
         {
             var typed = PromptWindow.Ask(this, "Exclude path or pattern",
@@ -473,7 +749,7 @@ public class SettingsWindow : Window
         };
         controls.Children.Add(addPath);
 
-        var edit = new Button { Content = "Edit…", Width = 70, Margin = new Thickness(6, 0, 0, 0) };
+        var edit = new Button { Content = "Edit…", Width = 70, Margin = new Thickness(0, 0, 6, 0) };
         edit.Click += (_, _) =>
         {
             if (list.SelectedItem is not ExclRow r) return;
@@ -487,12 +763,22 @@ public class SettingsWindow : Window
             var idx = _excluded.IndexOf(r);
             _excluded.RemoveAt(idx);
             _excluded.Insert(idx, new ExclRow { Model = r.Model }); // refresh the display
+            PruneRedundant(r.Model);
         };
         controls.Children.Add(edit);
 
-        var remove = new Button { Content = "Remove", Width = 80, Margin = new Thickness(6, 0, 0, 0) };
+        var remove = new Button { Content = "Remove", Width = 80, Margin = new Thickness(0, 0, 6, 0) };
         remove.Click += (_, _) => { if (list.SelectedItem is ExclRow r) _excluded.Remove(r); };
         controls.Children.Add(remove);
+
+        var tidy = new Button
+        {
+            Content = "Find redundant rules", Width = 150,
+            ToolTip = "Look through the whole list for rules another rule already covers."
+        };
+        tidy.Click += (_, _) => TidyRedundant();
+        controls.Children.Add(tidy);
+
         wrap.Children.Add(controls);
         return wrap;
     }
@@ -511,30 +797,75 @@ public class SettingsWindow : Window
             "Folder not found", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
     }
 
-    /// <summary>Add an exclusion, offering to prune any narrower rules it now supersedes.</summary>
+    /// <summary>Add an exclusion, dealing with any rules it now supersedes.</summary>
     private void AddExclusion(string path, bool includeSubdirs)
     {
         if (!ConfirmPath(path)) return;
 
         var candidate = new ExcludedFolder { Path = path, IncludeSubdirectories = includeSubdirs };
-        var probe = new AppSettings { ExcludedFolders = _excluded.Select(r => r.Model).ToList() };
-        var superseded = probe.FindSupersededBy(candidate);
-        if (superseded.Count > 0)
-        {
-            var ask = MessageBox.Show(this,
-                $"This rule already covers {superseded.Count} more specific excluded folder(s):\n\n" +
-                string.Join("\n", superseded.Select(s => s.Path)) +
-                "\n\nRemove the redundant rules?",
-                "Redundant rules", MessageBoxButton.YesNo, MessageBoxImage.Question);
-            if (ask == MessageBoxResult.Yes)
-                foreach (var s in superseded)
-                {
-                    var row = _excluded.FirstOrDefault(r => ReferenceEquals(r.Model, s));
-                    if (row != null) _excluded.Remove(row);
-                }
-        }
         _excluded.Add(new ExclRow { Model = candidate });
+        PruneRedundant(candidate);
     }
+
+    /// <summary>The policy the user has chosen on this tab, which applies as they edit.</summary>
+    private RedundantRuleAction Policy =>
+        (RedundantRuleAction)Math.Max(0, _redundantRules.SelectedIndex);
+
+    /// <summary>
+    /// Apply the redundancy policy to a rule that has just been added or edited. The
+    /// working list is what the user sees, so it is pruned in place.
+    /// </summary>
+    private void PruneRedundant(ExcludedFolder candidate)
+    {
+        var models = _excluded.Select(r => r.Model).ToList();
+        var removed = AppSettings.PruneSuperseded(models, candidate, Policy, AskAboutRedundant);
+        foreach (var rule in removed)
+        {
+            var row = _excluded.FirstOrDefault(r => ReferenceEquals(r.Model, rule));
+            if (row != null) _excluded.Remove(row);
+        }
+    }
+
+    /// <summary>Sweep the whole list for rules that another rule already covers.</summary>
+    private void TidyRedundant()
+    {
+        var models = _excluded.Select(r => r.Model).ToList();
+        var redundant = models
+            .Where(inner => models.Any(outer => !ReferenceEquals(outer, inner) &&
+                                                AppSettings.Supersedes(outer, inner)))
+            .ToList();
+
+        // The built-in system list counts too, when it is switched on.
+        if (_excludeSystem.IsChecked == true)
+        {
+            var probe = new AppSettings { ExcludedFolders = models, ExcludeSystemDirectories = true };
+            foreach (var rule in probe.FindCoveredBySystemRules())
+                if (!redundant.Contains(rule)) redundant.Add(rule);
+        }
+
+        if (redundant.Count == 0)
+        {
+            MessageBox.Show(this, "Every rule in the list does something no other rule does.",
+                "Redundant rules", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (Policy != RedundantRuleAction.RemoveAutomatically && !AskAboutRedundant(redundant)) return;
+
+        foreach (var rule in redundant)
+        {
+            var row = _excluded.FirstOrDefault(r => ReferenceEquals(r.Model, rule));
+            if (row != null) _excluded.Remove(row);
+        }
+    }
+
+    private bool AskAboutRedundant(IReadOnlyList<ExcludedFolder> superseded) =>
+        MessageBox.Show(this,
+            $"{superseded.Count} existing rule(s) are already covered by a broader one:\n\n" +
+            string.Join("\n", superseded.Select(s => "    " + s.Path)) +
+            "\n\nRemove them? Nothing about what gets excluded changes either way — the list " +
+            "is simply shorter.",
+            "Redundant rules", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
 
     // --- Consolidation folders per category -------------------------------
 
@@ -629,17 +960,24 @@ public class SettingsWindow : Window
         var max = ParseSize(_maxSize.Text);
         if (min == null || max == null)
         {
-            MessageBox.Show(this,
-                "A size limit could not be read. Write a plain number of bytes, or a size " +
-                "like 50MB, 1.5 GB or 700 KB. Leave the box empty for no limit.",
-                "Size limits", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Complain("A size limit could not be read. Write a plain number of bytes, or a size " +
+                     "like 50MB, 1.5 GB or 700 KB. Leave the box empty for no limit.", SettingsTab.Scanning);
             return;
         }
         if (min > 0 && max > 0 && min > max)
         {
-            MessageBox.Show(this,
-                "The smallest size is larger than the largest, so no file could ever match.",
-                "Size limits", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Complain("The smallest size is larger than the largest, so no file could ever match.",
+                SettingsTab.Scanning);
+            return;
+        }
+
+        var url = _imdbUrl.Text.Trim();
+        if (url.Length > 0 &&
+            (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
+             (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)))
+        {
+            Complain($"'{url}' is not an http:// or https:// address. Clear the box to fall back " +
+                     "on the default, or press \"Use the default address\".", SettingsTab.DataSources);
             return;
         }
 
@@ -658,6 +996,7 @@ public class SettingsWindow : Window
         {
             TmdbApiKey = _apiKey.Text.Trim(),
             TmdbReadAccessToken = _readToken.Text.Trim(),
+            ImdbDownloadUrl = url,
             StartWithWindows = _startup.IsChecked == true,
             StartInTray = _startInTray.IsChecked == true,
             AlwaysStartMinimised = _alwaysMinimised.IsChecked == true,
@@ -669,6 +1008,8 @@ public class SettingsWindow : Window
             ProgressNamePosition = (ProgressNamePosition)(_progressName.SelectedItem ?? ProgressNamePosition.Left),
             UseImdbFirst = _useImdbFirst.IsChecked == true,
             ImdbInMemory = _imdbInMemory.IsChecked == true,
+            RenameOnTitleChange = _renameOnTitle.IsChecked == true,
+            RedundantExclusions = Policy,
             WatchedDrives = _driveChecks.Where(c => c.IsChecked == true)
                 .Select(c => (string)c.Tag).ToList(),
             RememberFilters = _rememberFilters.IsChecked == true,
@@ -685,11 +1026,26 @@ public class SettingsWindow : Window
             LastFilterNegate = _incoming.LastFilterNegate,
             SavedFilters = _incoming.SavedFilters,
             FolderCategoryRules = _incoming.FolderCategoryRules, // preserved
-            FolderTitleRules = _incoming.FolderTitleRules
+            FolderTitleRules = _incoming.FolderTitleRules,
+            ScanDrives = _incoming.ScanDrives,                   // owned by the scan wizard
+            ScanWizardCompleted = _incoming.ScanWizardCompleted
         };
         result.SyncLegacyFolders();
 
+        var tools = CollectTools();
+        if (tools.FfmpegPath != _incomingTools.FfmpegPath ||
+            tools.FfprobePath != _incomingTools.FfprobePath ||
+            tools.FpcalcPath != _incomingTools.FpcalcPath)
+            ToolsSaved?.Invoke(tools);
+
         Saved?.Invoke(result);
         Close();
+    }
+
+    /// <summary>Say what is wrong, on the tab where it can be put right.</summary>
+    private void Complain(string message, SettingsTab tab)
+    {
+        _tabs.SelectedIndex = (int)tab;
+        MessageBox.Show(this, message, "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 }
