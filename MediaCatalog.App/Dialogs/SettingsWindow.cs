@@ -114,6 +114,31 @@ public class SettingsWindow : Window
     };
     private readonly ComboBox _redundantRules = new() { Width = 260 };
 
+    // --- Deleting ---
+    private readonly CheckBox _skipRecycleBin = new()
+    {
+        Content = "Open the Delete files dialog with \"Skip the Recycle Bin\" already ticked"
+    };
+    private readonly CheckBox _offerEmptyFolders = new()
+    {
+        Content = "After deleting the last file in a folder, offer to remove the folder too"
+    };
+
+    // --- Titles and sorting ---
+    private readonly CheckBox _capitaliseTitles = new()
+    {
+        Content = "Capitalise the first letter of every word in a title"
+    };
+    private readonly CheckBox _articleLast = new()
+    {
+        Content = "File \"The Simpsons\" under S as \"Simpsons (The)\""
+    };
+    private readonly ComboBox _doubleClick = new() { Width = 190 };
+    private readonly CheckBox _probeDuringScan = new()
+    {
+        Content = "Read each file's length and quality during a scan (needs ffprobe)"
+    };
+
     // --- External tools ---
     private readonly TextBox _ffmpeg = new() { VerticalContentAlignment = VerticalAlignment.Center };
     private readonly TextBox _ffprobe = new() { VerticalContentAlignment = VerticalAlignment.Center };
@@ -230,11 +255,18 @@ public class SettingsWindow : Window
         _maxSize.Text = FormatSize(settings.MaxFileSizeBytes);
         _useImdbFirst.IsChecked = settings.UseImdbFirst;
         _imdbInMemory.IsChecked = settings.ImdbInMemory;
+        _skipRecycleBin.IsChecked = settings.SkipRecycleBinByDefault;
+        _offerEmptyFolders.IsChecked = settings.OfferRemoveEmptyFolders;
+        _capitaliseTitles.IsChecked = settings.CapitaliseTitles;
+        _articleLast.IsChecked = settings.SortLeadingArticleLast;
+        _probeDuringScan.IsChecked = settings.ProbeDuringScan;
 
         _scanFilter.ItemsSource = Enum.GetValues(typeof(ScanMediaFilter));
         _scanFilter.SelectedItem = settings.ScanMediaFilter;
         _progressName.ItemsSource = Enum.GetValues(typeof(ProgressNamePosition));
         _progressName.SelectedItem = settings.ProgressNamePosition;
+        _doubleClick.ItemsSource = new[] { "Play the file", "Open Edit details" };
+        _doubleClick.SelectedIndex = (int)settings.DoubleClickAction;
 
         _redundantRules.ItemsSource = new[]
         {
@@ -271,34 +303,42 @@ public class SettingsWindow : Window
     {
         var panel = new StackPanel();
 
-        panel.Children.Add(Section("Startup and window"));
-        _startup.Margin = new Thickness(0, 2, 0, 2);
-        _alwaysMinimised.Margin = new Thickness(0, 2, 0, 2);
-        _minimiseToTray.Margin = new Thickness(0, 2, 0, 2);
-        panel.Children.Add(_startup);
-        panel.Children.Add(_startInTray);
-        panel.Children.Add(_alwaysMinimised);
-        panel.Children.Add(_minimiseToTray);
+        panel.Children.Add(Group("Startup and window",
+            _startup, _startInTray, _alwaysMinimised, _minimiseToTray));
 
-        panel.Children.Add(Section("Watching for new files"));
-        _watch.Margin = new Thickness(0, 2, 0, 2);
-        panel.Children.Add(_watch);
-        panel.Children.Add(DriveWatchEditor(_incoming));
+        panel.Children.Add(Group("Watching for new files",
+            _watch, DriveWatchEditor(_incoming)));
 
-        panel.Children.Add(Section("Behaviour"));
-        _rememberFilters.Margin = new Thickness(0, 2, 0, 2);
-        _renameOnTitle.Margin = new Thickness(0, 2, 0, 2);
-        panel.Children.Add(_rememberFilters);
-        panel.Children.Add(_renameOnTitle);
-        panel.Children.Add(Hint("A corrected title changes the name the file should have. With this on, " +
-                                "the file on disk is renamed to match — \"Show - S01E02.mkv\" for an " +
-                                "episode, \"Title (Year).mkv\" for a film — so the next scan reads the " +
-                                "corrected name back rather than the old one."));
+        panel.Children.Add(Group("Titles and names",
+            _capitaliseTitles,
+            Hint("Applies to titles worked out from a file name: \"the.matrix.1999.mkv\" reads " +
+                 "*The Matrix*. A title confirmed against IMDb, or typed by you, is left exactly " +
+                 "as it was spelled either way."),
+            _renameOnTitle,
+            Hint("A corrected title changes the name the file should have. With this on, the file " +
+                 "on disk is renamed to match — \"Show - S01E02.mkv\" for an episode, " +
+                 "\"Title (Year).mkv\" for a film — so the next scan reads the corrected name back " +
+                 "rather than the old one.")));
 
-        panel.Children.Add(Labeled("Progress name:", _progressName, 120));
-        panel.Children.Add(Hint("Where the current file name goes in the progress message. Thousands of " +
-                                "small files a second make a name on the right flicker the whole line; " +
-                                "Left keeps \"Hashing & classifying\" still, and Hidden leaves it out."));
+        panel.Children.Add(Group("Deleting files",
+            _skipRecycleBin,
+            Warning("This is a bad idea, and it is here only because it was asked for. The Recycle " +
+                    "Bin is the one thing standing between a mis-click and a file that is simply " +
+                    "gone — and a recycled delete is the only kind Undo can put back. With this " +
+                    "ticked, every delete dialog opens armed."),
+            _offerEmptyFolders));
+
+        panel.Children.Add(Group("Behaviour",
+            _rememberFilters,
+            Labeled("Double-click:", _doubleClick, 120),
+            Hint("What double-clicking a row in the results does: hand the file to whatever " +
+                 "application Windows associates with it, or open Edit details to correct what " +
+                 "the catalogue says about it."),
+            Labeled("Progress name:", _progressName, 120),
+            Hint("Where the current file name goes in the progress message. Thousands of small " +
+                 "files a second make a name on the right flicker the whole line; Left keeps " +
+                 "\"Hashing & classifying\" still, and Hidden leaves it out.")));
+
         return panel;
     }
 
@@ -306,35 +346,55 @@ public class SettingsWindow : Window
     {
         var panel = new StackPanel();
 
-        panel.Children.Add(Section("What a scan picks up"));
-        panel.Children.Add(Labeled("Scan for:", _scanFilter, 110));
-        panel.Children.Add(Hint("VideoOnly and AudioOnly build one combined catalogue between them: a " +
-                                "filtered scan never removes the kind it wasn't looking for."));
-        panel.Children.Add(SizeLimitEditor());
+        panel.Children.Add(Group("What a scan picks up",
+            Labeled("Scan for:", _scanFilter, 110),
+            Hint("VideoOnly and AudioOnly build one combined catalogue between them: a filtered " +
+                 "scan never removes the kind it wasn't looking for."),
+            SizeLimitEditor()));
 
-        panel.Children.Add(Section("Folders scanned in addition to whole drives"));
-        panel.Children.Add(ScanFolderEditor());
-        panel.Children.Add(Hint("A download folder, say. These are watched along with the drives, and are " +
-                                "offered in the scan wizard so a folder can be rescanned on its own " +
-                                "without re-walking a whole drive."));
+        panel.Children.Add(Group("What a scan reads",
+            _probeDuringScan,
+            Hint("Fills in the Length and Quality columns as files are catalogued. It reads the " +
+                 "container header rather than the file, so it costs a fraction of what hashing " +
+                 "the same file costs, and entries that already know are skipped. Without ffprobe " +
+                 "it does nothing — set the tools up on the External tools tab.")));
 
-        panel.Children.Add(Hint("\nWhich drives to scan is chosen in the scan wizard — the Scan button on " +
-                                "the toolbar — where the choice belongs with the run it applies to."));
+        panel.Children.Add(Group("Folders scanned in addition to whole drives",
+            ScanFolderEditor(),
+            Hint("A download folder, say. These are watched along with the drives, and are offered " +
+                 "in the scan wizard so a folder can be rescanned on its own without re-walking a " +
+                 "whole drive."),
+            Hint("\nWhich drives to scan is chosen in the scan wizard — the Scan button on the " +
+                 "toolbar — where the choice belongs with the run it applies to.")));
+
         return panel;
     }
 
     private StackPanel LibraryTab()
     {
         var panel = new StackPanel();
-        panel.Children.Add(Section("Consolidation folders (one per category)"));
-        panel.Children.Add(CategoryFolderEditor(_incoming));
-        panel.Children.Add(Hint("A consolidation folder is the central location scattered files are moved into, e.g. all TV under T:\\TV\\. " +
-                                "TV goes to <folder>\\<A-Z or #>\\<Show>\\Season NN\\ with episodes renamed \"01 - name.ext\"; films to <folder>\\<A-Z or #>\\<Title (Year)>\\. " +
-                                "Specials and featurettes follow their show or film into an Extras subfolder."));
-        panel.Children.Add(Hint("\nA file counts as filed only when it is at the exact place its title, year " +
-                                "and numbering put it. Correct a title and its file stops being filed — " +
-                                "consolidating it again moves it under the new name rather than reporting " +
-                                "it as already done."));
+
+        panel.Children.Add(Group("Consolidation folders (one per category)",
+            CategoryFolderEditor(_incoming),
+            Hint(@"A consolidation folder is the central location scattered files are moved into, e.g. all TV under T:\TV\. " +
+                 @"TV goes to <folder>\<A-Z or #>\<Show>\Season NN\ with episodes renamed ""01 - name.ext""; films to <folder>\<A-Z or #>\<Title (Year)>\. " +
+                 "Specials and featurettes follow their show or film into an Extras subfolder."),
+            Hint("\nA folder is checked when you add it: a drive that is not there is almost always " +
+                 "a typo or an unplugged disk and is refused, and a folder on a drive that is there " +
+                 "is simply created."),
+            Hint("\nA file counts as filed only when it is at the exact place its title, year and " +
+                 "numbering put it. Correct a title and its file stops being filed — consolidating " +
+                 "it again moves it under the new name rather than reporting it as already done. " +
+                 "When a whole folder is misnamed it is renamed in place rather than having its " +
+                 "contents copied out one at a time.")));
+
+        panel.Children.Add(Group("Sorting",
+            _articleLast,
+            Hint("A library catalogue files \"The Simpsons\" under S, not T. With this on the show " +
+                 "folder becomes ..\\S\\Simpsons (The)\\, which puts it beside *Seinfeld* rather " +
+                 "than with every other programme whose name begins \"The\". Off by default: it " +
+                 "moves existing folders the next time they are consolidated.")));
+
         return panel;
     }
 
@@ -342,48 +402,44 @@ public class SettingsWindow : Window
     {
         var panel = new StackPanel();
 
-        panel.Children.Add(Section("Excluded folders"));
-        _excludeSystem.Margin = new Thickness(0, 2, 0, 6);
-        panel.Children.Add(_excludeSystem);
-        panel.Children.Add(ExcludedEditor());
-        panel.Children.Add(Hint(@"Paths may be exact folders (D:\Downloads) or patterns: * matches any run of characters, ? matches one. " +
-                                @"So *\Windows\* excludes every Windows folder on every drive, and ?:\$Recycle.Bin excludes the bin on all of them."));
+        panel.Children.Add(Group("Excluded folders",
+            _excludeSystem,
+            ExcludedEditor(),
+            Hint(@"Paths may be exact folders (D:\Downloads) or patterns: * matches any run of characters, ? matches one. " +
+                 @"So *\Windows\* excludes every Windows folder on every drive, and ?:\$Recycle.Bin excludes the bin on all of them.")));
 
-        panel.Children.Add(Section("When a new rule covers older ones"));
-        panel.Children.Add(Labeled("Redundant rules:", _redundantRules, 130));
-        panel.Children.Add(Hint(@"Excluding D:\Media makes an existing rule for D:\Media\Films pointless — the " +
-                                "broader rule already covers it. Leaving both is harmless but clutters the " +
-                                "list, so by default you are shown what has been superseded and asked."));
+        panel.Children.Add(Group("When a new rule covers older ones",
+            Labeled("Redundant rules:", _redundantRules, 130),
+            Hint(@"Excluding D:\Media makes an existing rule for D:\Media\Films pointless — the " +
+                 "broader rule already covers it. Leaving both is harmless but clutters the list. " +
+                 "Ask shows what has been superseded and lets you tick which of them to drop, all " +
+                 "or some; Remove automatically drops the lot without stopping.")));
 
-        panel.Children.Add(Section("Ignored file types (removed from results and skipped in future scans)"));
-        panel.Children.Add(ListEditor(_exts, addPrompt: "Extension e.g. .nfo", onAdd: AddExtension));
+        panel.Children.Add(Group("Ignored file types (removed from results and skipped in future scans)",
+            ListEditor(_exts, addPrompt: "Extension e.g. .nfo", onAdd: AddExtension)));
+
         return panel;
     }
 
     private StackPanel CategoriesTab()
     {
         var panel = new StackPanel();
-        panel.Children.Add(Section("Custom categories"));
-        panel.Children.Add(ListEditor(_categories, addPrompt: "New category name", onAdd: AddCategory));
-        panel.Children.Add(Hint("Added to the built-in Movie / TvShow / TvExtra / MovieExtra / Audio / Other " +
-                                "list wherever a category is chosen. Give a custom category a consolidation " +
-                                "folder on the Library tab and its files are filed straight into it."));
+
+        panel.Children.Add(Group("Custom categories",
+            ListEditor(_categories, addPrompt: "New category name", onAdd: AddCategory),
+            Hint("Added to the built-in Movie / TvShow / TvExtra / MovieExtra / Audio / Other list " +
+                 "wherever a category is chosen. Give a custom category a consolidation folder on " +
+                 "the Library tab and its files are filed straight into it."),
+            Hint("\nSeason and episode numbers belong to TvShow and TvExtra alone. Categorise a file " +
+                 "as anything else and its numbering is cleared: it was read out of a number in the " +
+                 "name that meant something else — the 13 in \"Apollo 13\", a track numbered 104.")));
+
         return panel;
     }
 
     private StackPanel ToolsTab()
     {
         var panel = new StackPanel();
-        panel.Children.Add(Section("FFmpeg, ffprobe and fpcalc"));
-        panel.Children.Add(Hint("The advanced features need external tools: fingerprinting, deep integrity " +
-                                "checks and duration probing. Easiest option — drop ffmpeg.exe, ffprobe.exe " +
-                                "and fpcalc.exe into a 'tools' folder next to this application and they are " +
-                                "found automatically. Otherwise set explicit paths here; an empty box means " +
-                                "auto-detect (PATH and the usual install folders)."));
-
-        panel.Children.Add(ToolRow("ffmpeg", _ffmpeg));
-        panel.Children.Add(ToolRow("ffprobe", _ffprobe));
-        panel.Children.Add(ToolRow("fpcalc", _fpcalc));
 
         var redetect = new Button
         {
@@ -391,12 +447,22 @@ public class SettingsWindow : Window
             Margin = new Thickness(0, 8, 0, 8)
         };
         redetect.Click += (_, _) => ShowToolDetection();
-        panel.Children.Add(redetect);
 
-        panel.Children.Add(_toolStatus);
-        panel.Children.Add(Hint("\nDownloads: FFmpeg → ffmpeg.org (the gyan.dev builds) provides ffmpeg.exe and " +
-                                "ffprobe.exe. Chromaprint → acoustid.org/chromaprint provides fpcalc.exe. " +
-                                "Both are free and portable — just unzip."));
+        panel.Children.Add(Group("FFmpeg, ffprobe and fpcalc",
+            Hint("The advanced features need external tools: fingerprinting, deep integrity checks, " +
+                 "and reading each file's length and quality. Easiest option — drop ffmpeg.exe, " +
+                 "ffprobe.exe and fpcalc.exe into a 'tools' folder next to this application and they " +
+                 "are found automatically. Otherwise set explicit paths here; an empty box means " +
+                 "auto-detect (PATH and the usual install folders)."),
+            ToolRow("ffmpeg", _ffmpeg),
+            ToolRow("ffprobe", _ffprobe),
+            ToolRow("fpcalc", _fpcalc),
+            redetect,
+            _toolStatus,
+            Hint("\nDownloads: FFmpeg → ffmpeg.org (the gyan.dev builds) provides ffmpeg.exe and " +
+                 "ffprobe.exe. Chromaprint → acoustid.org/chromaprint provides fpcalc.exe. " +
+                 "Both are free and portable — just unzip.")));
+
         ShowToolDetection();
         return panel;
     }
@@ -405,18 +471,8 @@ public class SettingsWindow : Window
     {
         var panel = new StackPanel();
 
-        panel.Children.Add(Section("Local IMDb data (no rate limit)"));
-        _useImdbFirst.Margin = new Thickness(0, 2, 0, 2);
-        _imdbInMemory.Margin = new Thickness(0, 2, 0, 2);
-        panel.Children.Add(_useImdbFirst);
-        panel.Children.Add(_imdbInMemory);
-        panel.Children.Add(_imdbStatus);
-
-        panel.Children.Add(Labeled("Download from:", _imdbUrl, 110));
-        panel.Children.Add(Hint("Where title.basics.tsv.gz is fetched from. The default is IMDb's own " +
-                                "published address; it is a setting so a changed address can be corrected " +
-                                "here rather than waiting for a new version."));
-
+        // The two sources take up a great deal of room between them and have nothing to do
+        // with each other, so each gets its own box rather than sharing one long column.
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
         if (_downloadImdb != null)
         {
@@ -442,26 +498,67 @@ public class SettingsWindow : Window
         };
         reset.Click += (_, _) => _imdbUrl.Text = AppSettings.DefaultImdbDownloadUrl;
         row.Children.Add(reset);
-        panel.Children.Add(row);
-        panel.Children.Add(Hint("The download is around 150 MB and is boiled down to a two-column extract " +
-                                "of titles and years — the only part this program uses. Progress is shown " +
-                                "in the status bar."));
 
-        panel.Children.Add(Section("themoviedb.org"));
-        panel.Children.Add(Labeled("API key (v3):", _apiKey, 110));
-        panel.Children.Add(Labeled("Read token (v4):", _readToken, 110));
-        panel.Children.Add(Hint("Get free credentials at themoviedb.org → account settings → API. Either the " +
-                                "v4 Read Access Token or the v3 API Key works (the token is preferred). " +
-                                "Queries are rate-limited to one every two seconds, which is why the local " +
-                                "IMDb data above is consulted first."));
+        panel.Children.Add(Group("IMDb — the local data (no rate limit)",
+            _useImdbFirst,
+            _imdbInMemory,
+            _imdbStatus,
+            Labeled("Download from:", _imdbUrl, 110),
+            Hint("Where title.basics.tsv.gz is fetched from. The default is IMDb's own published " +
+                 "address; it is a setting so a changed address can be corrected here rather than " +
+                 "waiting for a new version."),
+            row,
+            Hint("The download is around 150 MB and is boiled down to a two-column extract of " +
+                 "titles and years — the only part this program uses. Broadcast timestamps and " +
+                 "untitled-episode placeholders are dropped on the way in. Progress is shown in " +
+                 "the status bar.")));
+
+        panel.Children.Add(Group("themoviedb.org — the online fallback (deprecated)",
+            Warning("Only used when IMDBData.tsv does not exist. TMDb answers one query every two " +
+                    "seconds, so a library of any size spends hours there to reach an answer the " +
+                    "local extract gives in a single pass — which makes \"use both\" a choice nobody " +
+                    "would knowingly make. Once the extract is present TMDb is not consulted at all, " +
+                    "and it is expected to be removed in a future release."),
+            Labeled("API key (v3):", _apiKey, 110),
+            Labeled("Read token (v4):", _readToken, 110),
+            Hint("Get free credentials at themoviedb.org → account settings → API. Either the v4 " +
+                 "Read Access Token or the v3 API Key works (the token is preferred).")));
+
         return panel;
     }
 
     // --- Layout helpers ---------------------------------------------------
 
-    private static TextBlock Section(string text) => new()
+    /// <summary>
+    /// One titled box of related settings. Boxes rather than bold headings because these
+    /// tabs have grown long enough that a heading alone no longer says where one group of
+    /// options stops and the next begins.
+    /// </summary>
+    private static GroupBox Group(string header, params UIElement[] children)
     {
-        Text = text, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 12, 0, 4)
+        var panel = new StackPanel();
+        foreach (var child in children)
+        {
+            // Even spacing for the tick-boxes, without flattening an indent a caller has
+            // deliberately given one ("…and start hidden" hanging off the option above it).
+            if (child is CheckBox cb) cb.Margin = new Thickness(cb.Margin.Left, 3, 0, 3);
+            panel.Children.Add(child);
+        }
+
+        return new GroupBox
+        {
+            Header = header,
+            Margin = new Thickness(0, 0, 0, 10),
+            Padding = new Thickness(8, 4, 8, 8),
+            Content = panel
+        };
+    }
+
+    /// <summary>A hint that is telling the user they are about to do something unwise.</summary>
+    private static TextBlock Warning(string text) => new()
+    {
+        Text = text, Foreground = System.Windows.Media.Brushes.Firebrick,
+        TextWrapping = TextWrapping.Wrap, Margin = new Thickness(20, 2, 0, 4)
     };
 
     private static TextBlock Hint(string text) => new()
@@ -850,22 +947,24 @@ public class SettingsWindow : Window
             return;
         }
 
-        if (Policy != RedundantRuleAction.RemoveAutomatically && !AskAboutRedundant(redundant)) return;
+        var chosen = Policy == RedundantRuleAction.RemoveAutomatically
+            ? redundant
+            : AskAboutRedundant(redundant).ToList();
 
-        foreach (var rule in redundant)
+        foreach (var rule in chosen)
         {
             var row = _excluded.FirstOrDefault(r => ReferenceEquals(r.Model, rule));
             if (row != null) _excluded.Remove(row);
         }
     }
 
-    private bool AskAboutRedundant(IReadOnlyList<ExcludedFolder> superseded) =>
-        MessageBox.Show(this,
-            $"{superseded.Count} existing rule(s) are already covered by a broader one:\n\n" +
-            string.Join("\n", superseded.Select(s => "    " + s.Path)) +
-            "\n\nRemove them? Nothing about what gets excluded changes either way — the list " +
-            "is simply shorter.",
-            "Redundant rules", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+    /// <summary>
+    /// Put the superseded rules to the user one by one and hand back the ones they ticked.
+    /// Removing some but not all is a perfectly reasonable answer, so this is a list rather
+    /// than a yes or no.
+    /// </summary>
+    private IReadOnlyList<ExcludedFolder> AskAboutRedundant(IReadOnlyList<ExcludedFolder> superseded) =>
+        RedundantRulesWindow.Ask(this, superseded);
 
     // --- Consolidation folders per category -------------------------------
 
@@ -923,6 +1022,10 @@ public class SettingsWindow : Window
             if (dlg.ShowDialog(this) == true) box.Text = dlg.FolderName;
         };
 
+        // Checked as it is typed rather than only when Save is pressed, so a path with a
+        // wrong drive letter in it is caught while the user is still looking at it.
+        box.LostFocus += (_, _) => CheckConsolidationFolder(box.Text);
+
         var row = new CatFolderRow { Category = combo, Folder = box, Container = dp };
         remove.Click += (_, _) =>
         {
@@ -932,6 +1035,30 @@ public class SettingsWindow : Window
 
         _catFolders.Add(row);
         _catFolderPanel.Children.Add(dp);
+    }
+
+    /// <summary>
+    /// Check a consolidation folder and say so when it is wrong. A drive that is not there
+    /// cannot be created and is nearly always a typo or an unplugged disk; a folder on a
+    /// drive that *is* there is simply made, which is both the validation and the setup.
+    /// Returns false only for a problem the user was told about and chose not to accept.
+    /// </summary>
+    private bool CheckConsolidationFolder(string folder, bool blocking = false)
+    {
+        var problem = AppSettings.ValidateConsolidationFolder(folder);
+        if (problem == null) return true;
+
+        if (!blocking)
+        {
+            MessageBox.Show(this, problem, "Consolidation folder",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        return MessageBox.Show(this,
+            problem + "\n\nSave the setting anyway? Nothing can be consolidated there until " +
+            "the folder exists.",
+            "Consolidation folder", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
     }
 
     /// <summary>Categories offered in the row combos: the known ones plus any just added.</summary>
@@ -987,6 +1114,15 @@ public class SettingsWindow : Window
             var category = row.Category.Text.Trim();
             var folder = row.Folder.Text.Trim();
             if (category.Length == 0 || folder.Length == 0) continue;
+
+            // A folder that cannot be reached is worth stopping for: consolidation is the
+            // whole point of the setting, and it would fail silently on every file.
+            if (!CheckConsolidationFolder(folder, blocking: true))
+            {
+                _tabs.SelectedIndex = (int)SettingsTab.Library;
+                return;
+            }
+
             // Last row wins if a category is listed twice.
             folders.RemoveAll(f => string.Equals(f.Category, category, StringComparison.OrdinalIgnoreCase));
             folders.Add(new CategoryConsolidation { Category = category, Folder = folder });
@@ -1009,6 +1145,12 @@ public class SettingsWindow : Window
             UseImdbFirst = _useImdbFirst.IsChecked == true,
             ImdbInMemory = _imdbInMemory.IsChecked == true,
             RenameOnTitleChange = _renameOnTitle.IsChecked == true,
+            SkipRecycleBinByDefault = _skipRecycleBin.IsChecked == true,
+            OfferRemoveEmptyFolders = _offerEmptyFolders.IsChecked == true,
+            CapitaliseTitles = _capitaliseTitles.IsChecked == true,
+            SortLeadingArticleLast = _articleLast.IsChecked == true,
+            ProbeDuringScan = _probeDuringScan.IsChecked == true,
+            DoubleClickAction = (DoubleClickAction)Math.Max(0, _doubleClick.SelectedIndex),
             RedundantExclusions = Policy,
             WatchedDrives = _driveChecks.Where(c => c.IsChecked == true)
                 .Select(c => (string)c.Tag).ToList(),

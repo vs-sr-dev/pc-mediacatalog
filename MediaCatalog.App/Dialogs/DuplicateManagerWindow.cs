@@ -151,6 +151,10 @@ public class DuplicateManagerWindow : Window
     /// <summary>
     /// Keep the selected copy and remove every other one — then, if the survivor was not
     /// the copy in the library, move it there so the library keeps the file that was kept.
+    ///
+    /// The removal goes through the ordinary delete conversation, which lists exactly what
+    /// is about to go and offers the choice between the Recycle Bin and a permanent delete
+    /// — the same choice as everywhere else that deletes.
     /// </summary>
     private async Task KeepOneAsync()
     {
@@ -162,16 +166,18 @@ public class DuplicateManagerWindow : Window
             return;
         }
 
-        var all = AllCopies();
-        var others = all.Count - 1;
-        var confirm = MessageBox.Show(this,
-            $"Keep this copy and delete the other {others}?\n\n{files[0].FullPath}\n\n" +
-            "The others go to the Recycle Bin. If the copy kept is not the one in the " +
-            "library, it is moved there afterwards.",
-            "Keep one copy", MessageBoxButton.OKCancel, MessageBoxImage.Question);
-        if (confirm != MessageBoxResult.OK) return;
+        var keeper = files[0];
+        var others = AllCopies().Where(f => !ReferenceEquals(f, keeper)).ToList();
+        if (others.Count == 0)
+        {
+            MessageBox.Show(this, "That is the only copy — there is nothing to delete.",
+                "Keep one copy", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
 
-        var message = await _vm.KeepOneCopyAsync(files[0], all, toRecycleBin: true);
+        if (!await FileDeletion.RunAsync(this, _vm, others, "Delete the other copies")) return;
+
+        var message = await _vm.EnsureKeeperFiledAsync(keeper);
         MessageBox.Show(this, message, "Keep one copy", MessageBoxButton.OK, MessageBoxImage.Information);
         Reload();
     }
@@ -208,8 +214,13 @@ public class DuplicateManagerWindow : Window
         var group = _vm.DuplicateGroupBySha(_sha);
         if (group == null)
         {
+            // Nothing left to manage. A window whose whole subject has gone is just a box
+            // saying so, and one more click to dismiss, so it closes itself.
             _summary.Text = "No duplicates remain.";
             _list.ItemsSource = null;
+            // Guarded: Reload also runs from the constructor, and closing a window that has
+            // not been shown yet makes the ShowDialog that follows throw.
+            if (IsLoaded) Close();
             return;
         }
         _summary.Text = $"{group.Files.Count} copies • {Format.Bytes(group.SizeBytes)} each • " +

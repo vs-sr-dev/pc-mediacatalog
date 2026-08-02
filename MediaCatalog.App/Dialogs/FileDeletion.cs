@@ -8,13 +8,15 @@ using MediaCatalog.Core.Models;
 namespace MediaCatalog.App;
 
 /// <summary>
-/// The one delete conversation in the program: confirm what is about to go, delete it
-/// through the shared deleter — which clears read-only files rather than giving up on
-/// them — and, when the only thing in the way was permissions, offer to try again with
-/// administrative rights.
+/// The one delete conversation in the program: confirm what is about to go — every file
+/// listed, however the batch was arrived at — delete it through the shared deleter, which
+/// clears read-only files rather than giving up on them, offer another go with
+/// administrative rights when permissions were the only thing in the way, and clear away
+/// any folder the delete has left standing empty.
 ///
-/// Everywhere that deletes goes through here, so the results grid, the duplicate manager
-/// and the unhashed-files list all behave the same way and gain the same fixes.
+/// Everywhere that deletes goes through here, so the results grid, the duplicate managers
+/// and the unhashed-files list all behave the same way and gain the same fixes — including
+/// the option to skip the Recycle Bin, which is now offered wherever files are removed.
 /// </summary>
 public static class FileDeletion
 {
@@ -32,10 +34,11 @@ public static class FileDeletion
             return false;
         }
 
-        var dialog = new DeleteFilesWindow(files) { Owner = owner };
+        var dialog = new DeleteFilesWindow(files, vm.Settings.SkipRecycleBinByDefault) { Owner = owner };
         if (dialog.ShowDialog() != true) return false;
 
         var recycle = !dialog.DeletePermanently;
+        var wanted = files.Select(f => f.FullPath).ToList();
         var outcome = await vm.DeleteFilesAsync(files, recycle);
 
         // Files that refused over permissions are worth one more go with more rights; ones
@@ -54,6 +57,7 @@ public static class FileDeletion
                 var elevated = await vm.RetryDeleteElevatedAsync(stillThere, recycle);
                 MessageBox.Show(owner, elevated.Message, title,
                     MessageBoxButton.OK, MessageBoxImage.Information);
+                await OfferEmptyFoldersAsync(owner, vm, wanted, recycle);
                 return true;
             }
         }
@@ -61,6 +65,44 @@ public static class FileDeletion
         MessageBox.Show(owner, outcome.Message, title,
             MessageBoxButton.OK,
             outcome.Result.Failed > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+
+        if (outcome.Result.Deleted > 0)
+            await OfferEmptyFoldersAsync(owner, vm, wanted, recycle);
+
         return outcome.Result.Deleted > 0;
+    }
+
+    /// <summary>
+    /// A folder whose last file has just been deleted is left holding nothing. Offer to
+    /// take it away too, naming the folders so the answer is an informed one — and take
+    /// their parents with them when those are emptied in turn, which is what happens to a
+    /// season folder that was the last season of a show.
+    /// </summary>
+    private static async Task OfferEmptyFoldersAsync(
+        Window owner, MainViewModel vm, IReadOnlyList<string> deletedPaths, bool toRecycleBin)
+    {
+        if (!vm.Settings.OfferRemoveEmptyFolders) return;
+
+        var empty = vm.EmptyFoldersLeftBy(deletedPaths);
+        if (empty.Count == 0) return;
+
+        var listed = string.Join("\n", empty.Take(15).Select(f => "    " + f));
+        if (empty.Count > 15) listed += $"\n    …and {empty.Count - 15} more";
+
+        var ask = MessageBox.Show(owner,
+            (empty.Count == 1
+                ? "That was the last file in its folder, which now holds nothing:\n\n"
+                : $"{empty.Count} folders now hold nothing:\n\n") +
+            listed +
+            "\n\nRemove them as well? Any parent folder they leave empty goes too.",
+            "Empty folders", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (ask != MessageBoxResult.Yes) return;
+
+        var removed = await vm.RemoveEmptyFoldersAsync(empty, toRecycleBin);
+        MessageBox.Show(owner,
+            removed == 0
+                ? "The folders could not be removed — something else may be using them."
+                : $"{removed} empty folder(s) removed.",
+            "Empty folders", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 }

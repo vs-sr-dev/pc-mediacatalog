@@ -96,6 +96,12 @@
                 <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
                 <Button Content="Suggest consolidation…" Click="OnSuggestConsolidationClick" Padding="8,1" Margin="2,0"
                         VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"/>
+                <Button Content="Possible duplicates…" Click="OnShowTitleDuplicates" Padding="8,1" Margin="2,0"
+                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Files claiming the same title and year without being the same bytes — the same thing downloaded twice from two different releases, which a content hash cannot see."/>
+                <Button Content="Purge filed duplicates…" Click="OnPurgeConsolidatedDuplicatesClick" Padding="8,1" Margin="2,0"
+                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                        ToolTip="Delete every stray copy of a file that is already filed in the library. The library copy is kept; you choose the Recycle Bin or a permanent delete."/>
                 <Button x:Name="RefreshCatalogButton" Content="Refresh catalogue" Click="OnRefreshCatalogClick"
                         Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
                         ToolTip="Re-derive metadata for entries that predate the current features. Entries already up to date are skipped — nothing is re-scanned or re-hashed."/>
@@ -143,16 +149,20 @@
                         <MenuItem Header="Remove from results (keeps file on disk)" Click="OnRemoveFromResults"/>
                         <MenuItem Header="Delete file(s) from disk…" Click="OnDeleteFiles"/>
                         <Separator/>
+                        <!-- One editor for a single file: title, year, numbering, category,
+                             name and date together, with the file renamed to match a
+                             corrected title. The separate Edit title, Edit season/episode
+                             and Rename file dialogs said less and are gone. -->
                         <MenuItem Header="Edit details…" Click="OnEditDetails"
-                                  ToolTip="Every field at once — title, year, season, episode, category, name, date, integrity and kind."/>
-                        <MenuItem Header="Edit title…" Click="OnEditTitle"/>
-                        <MenuItem Header="Set title for this folder…" Click="OnSetTitleFolder"/>
-                        <MenuItem Header="Edit season / episode…" Click="OnEditSeasonEpisode"/>
-                        <MenuItem Header="Rename file…" Click="OnRenameFile"/>
+                                  ToolTip="Every field at once — title, year, season, episode, category, name, date, integrity and kind. Correcting the title renames the file to match."/>
+                        <MenuItem Header="Set title for this folder…" Click="OnSetTitleFolder"
+                                  ToolTip="Name a whole show in one go: every file under the chosen folder gets the same title."/>
                         <MenuItem Header="Set category" x:Name="CategoryMenu"/>
                         <MenuItem Header="Set category for this folder…" Click="OnSetCategoryFolder"/>
                         <MenuItem Header="Add new category…" Click="OnAddCategory"/>
                         <Separator/>
+                        <MenuItem Header="Verify (read length and quality)" Click="OnVerifyFilesClick"
+                                  ToolTip="Read the container header of the selected files for their length, quality and health. Quick — unlike a deep check, which decodes the whole file."/>
                         <MenuItem Header="Show duplicates of this file…" Click="OnShowDuplicates"/>
                         <MenuItem Header="Consolidate selected…" Click="OnConsolidateClick"/>
                         <MenuItem Header="Validate TV name (TMDb)" Click="OnValidateTvSelected"/>
@@ -187,6 +197,12 @@
                     <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="80"
                                         SortMemberPath="SizeBytes"
                                         ToolTipService.ToolTip="File size on disk. Sorted by the real byte count, so 900 MB comes before 1.2 GB."/>
+                    <DataGridTextColumn Header="Length" Binding="{Binding Length}" Width="70"
+                                        SortMemberPath="DurationSeconds"
+                                        ToolTipService.ToolTip="How long the file runs, as h:mm:ss. Read from the container header during a scan, or by 'Verify' on the right-click menu. Blank means nothing has measured it — which needs ffprobe."/>
+                    <DataGridTextColumn Header="Quality" Binding="{Binding Quality}" Width="76"
+                                        SortMemberPath="QualityValue"
+                                        ToolTipService.ToolTip="Picture height for video (720p, 1080p, 2160p) and bitrate for audio (320 kbps) — the one number that means something for each kind. Filled in alongside the length."/>
                     <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"
                                         ToolTipService.ToolTip="Ok = passed the checks run so far. IncompleteDownload = a .part/.crdownload-style file still arriving. Corrupt = zero bytes, or a deep check failed to decode it. NotChecked = no deep check has been run on it."/>
                     <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="380"

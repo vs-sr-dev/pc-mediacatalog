@@ -8,6 +8,7 @@ public class FileRow : ObservableObject
 {
     private bool _isDuplicate;
     private bool _isNearDuplicate;
+    private bool _isTitleDuplicate;
     private string _category = "";
 
     public FileRow(MediaFile model) => Model = model;
@@ -39,6 +40,18 @@ public class FileRow : ObservableObject
     /// <summary>Raw size, so the Size column sorts by magnitude rather than by text.</summary>
     public long SizeBytes => Model.SizeBytes;
 
+    /// <summary>How long the file runs, as "1:42:07". Blank until something has measured it.</summary>
+    public string Length => Model.LengthDisplay;
+
+    /// <summary>Raw seconds, so the Length column sorts by duration rather than by text.</summary>
+    public double DurationSeconds => Model.DurationSeconds;
+
+    /// <summary>Picture height for video ("1080p"), bitrate for audio ("320 kbps").</summary>
+    public string Quality => Model.QualityDisplay;
+
+    /// <summary>The raw figure, so the Quality column sorts by magnitude.</summary>
+    public int QualityValue => Model.Quality;
+
     public string Integrity => Model.Integrity.ToString();
     public string FullPath => Model.FullPath;
 
@@ -62,6 +75,8 @@ public class FileRow : ObservableObject
         "Year" => Year,
         "S/E" => SeasonEpisode,
         "Size" => SizeDisplay,
+        "Length" => Length,
+        "Quality" => Quality,
         "Integrity" => Integrity,
         "Path" => FullPath,
         "Dup" => DuplicateFlag,
@@ -82,8 +97,23 @@ public class FileRow : ObservableObject
         set { if (SetProperty(ref _isNearDuplicate, value)) OnPropertyChanged(nameof(DuplicateFlag)); }
     }
 
-    /// <summary>Exact byte-duplicate takes precedence over a perceptual near-match.</summary>
-    public string DuplicateFlag => IsDuplicate ? "DUP" : IsNearDuplicate ? "~dup" : "";
+    /// <summary>
+    /// Another file claims the same title, year and numbering without being the same
+    /// bytes — the same film downloaded twice from two different releases.
+    /// </summary>
+    public bool IsTitleDuplicate
+    {
+        get => _isTitleDuplicate;
+        set { if (SetProperty(ref _isTitleDuplicate, value)) OnPropertyChanged(nameof(DuplicateFlag)); }
+    }
+
+    /// <summary>
+    /// The strongest claim about this file, in order of how certain it is: byte-for-byte
+    /// identical, then the same content in a different encoding, then merely calling itself
+    /// the same thing.
+    /// </summary>
+    public string DuplicateFlag =>
+        IsDuplicate ? "DUP" : IsNearDuplicate ? "~dup" : IsTitleDuplicate ? "title" : "";
 
     public void Refresh()
     {
@@ -91,6 +121,8 @@ public class FileRow : ObservableObject
         OnPropertyChanged(nameof(FullPath));
         OnPropertyChanged(nameof(SizeDisplay));
         OnPropertyChanged(nameof(SizeBytes));
+        OnPropertyChanged(nameof(Length));
+        OnPropertyChanged(nameof(Quality));
         OnPropertyChanged(nameof(Title));
         OnPropertyChanged(nameof(TmdbFlag));
         OnPropertyChanged(nameof(FiledFlag));

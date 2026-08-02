@@ -104,6 +104,46 @@ application restart:
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
 
+## New in v2.1
+- ✅ **Seasons written in words** — `Season Three` reads as season 03, `Series twenty one`
+  as 21, and a folder that names the show *and* the season together — `Yes Minister,
+  Season Three` — gives up both halves
+- ✅ **An episode number leading a file name** — `01. Equal Opportunities.avi` under that
+  folder is S03E01 of *Yes Minister*: the season from the path, the episode from the name,
+  and the title from the folder, because what follows the number is the *episode's* name
+- ✅ **Release years that have not happened yet are passed over** —
+  `Blade.Runner.2049.2017.1080p.mkv` is a 2017 film, not a 2049 one
+- ✅ **Titles capitalised** — every word gets its initial capital, so `the.matrix.1999.mkv`
+  reads *The Matrix*. Words that already carry capitals of their own keep them
+- ✅ **Length and Quality columns** — how long each file runs, and the one number that means
+  something for its kind: picture height for video, bitrate for audio. Read during a scan
+  from the container header, or on demand with *Verify* on the right-click menu
+- ✅ **Possible duplicates** — the same film downloaded twice from two different releases:
+  identical in what they claim to be, different in every byte, and therefore invisible to a
+  content hash. Found by title, year and numbering; deep-checked and resolved side by side
+- ✅ **Purge filed duplicates** — clear out every stray copy of everything already in the
+  library in one pass, to the Recycle Bin or permanently
+- ✅ **Skip the Recycle Bin, wherever you delete** — every delete now goes through the one
+  confirmation, which lists every file and offers the choice. A setting arms it by default,
+  with a frank warning about why that is a bad idea
+- ✅ **Empty folders offered for removal** after the last file in them is deleted or moved,
+  along with any parent they empty in turn
+- ✅ **Misfiled folders renamed rather than copied out** — a show folder spelled wrongly is
+  put right by moving the folder, which costs nothing whatever it holds and leaves nothing
+  standing behind it
+- ✅ **Season/episode stripped from anything that is not a programme** — categorise a file as
+  a film and the numbering goes, because it came from a number that meant something else
+- ✅ **Sort "The Simpsons" under S** as `…\S\Simpsons (The)\` — off by default
+- ✅ **Pick which redundant exclusion rules to drop**, with Select all / Select none, instead
+  of all-or-nothing
+- ✅ **Consolidation folders checked as they are set** — a drive that isn't there is refused,
+  a folder on a drive that is there is created
+- ✅ **Double-click does what you want** — play the file, or open Edit details
+- ✅ **TMDb is only consulted when `IMDBData.tsv` does not exist**, and is deprecated
+- ✅ **Settings grouped into boxes**, with the two data sources separated
+- ✅ **Three dialogs retired** — Edit title, Edit season/episode and Rename file all did less
+  than Edit details, which now does the renaming they were kept for
+
 ## What's implemented (Phases 1–3)
 - ✅ **Scan wizard** — start fresh or add to the catalogue, pick drives and folders, set the
   media filter and size limits, and decide what to do about drives that aren't connected
@@ -201,9 +241,26 @@ at them manually; that tab shows what was resolved, and the status bar shows
   **Near-duplicates** view to review them. Already-fingerprinted files are skipped.
 - **Deep integrity check** — fully decodes files with FFmpeg to catch corruption/
   truncation that the quick scan can't. Thorough but slow — select suspect files first.
+- **Verify** (right-click) — reads a file's **length and quality** from its container
+  header. A moment per file rather than the minutes a deep check takes, because it reads
+  the header rather than the file.
 
 > Near-duplicate video matching is perceptual and therefore **fuzzy** — treat matches
 > as strong candidates to confirm, not absolute proof.
+
+### Length and Quality
+Two columns describing what the file actually is, rather than what its name claims:
+
+- **Length** — how long it runs, as `h:mm:ss`, sorted by real duration.
+- **Quality** — the one number that means something for its kind: **picture height** for
+  video (`720p`, `1080p`, `2160p`) and **bitrate** for audio (`320 kbps`).
+
+Both are filled in **during a scan**, from the container header — which costs a fraction of
+what hashing the same file costs, and is skipped entirely for entries that already know, so
+re-scanning a measured library costs nothing. They need `ffprobe`; without it the columns
+stay blank and nothing else changes. Turn scan-time reading off with *Read each file's
+length and quality during a scan* on **Settings… → Scanning**, and fill individual files in
+on demand with **Verify** on the right-click menu.
 
 ## Library management
 
@@ -229,13 +286,29 @@ made of it) belongs to that one file. A corrected date is written to the file on
 well as to the catalogue — left in the catalogue alone, the next scan would read the old one
 straight back and treat the file as changed.
 
-**Titles** — right-click → *Edit title…* to correct a title by hand; the box starts from
-the current title, or from the file name without its extension when there isn't one. The
-correction is applied to the selected file and **to its byte-identical copies** — so a copy
-that never had a title gets one too — and to nothing else. *Set title for this folder…*
-names a whole folder (or a parent) at once, again reaching the copies of those files
-wherever they live. A hand-typed title counts as validated (shown as ✎ in the TMDb column;
-✓ means confirmed by IMDb or TMDb).
+> This is now the **only** per-file editor. *Edit title*, *Edit season / episode* and
+> *Rename file* each did a fraction of what it does and have been retired; correcting a
+> title here renames the file exactly as *Edit title* used to, and clearing a category's
+> numbering is handled by the category rather than by hand.
+
+**Titles** — correct a title in *Edit details…*; the box starts from the current title, or
+from the file name without its extension when there isn't one. The correction is applied to
+the selected file and **to its byte-identical copies** — so a copy that never had a title
+gets one too — and to nothing else. *Set title for this folder…* names a whole folder (or a
+parent) at once, again reaching the copies of those files wherever they live. A hand-typed
+title counts as validated (shown as ✎ in the TMDb column; ✓ means confirmed by IMDb or TMDb).
+
+Titles worked out from a file name get **an initial capital on every word**, so
+`the.matrix.1999.mkv` reads *The Matrix*. Only the first letter is touched: a word that
+already carries capitals of its own — *MASH*, *iCarly* — keeps them, because there is no way
+to tell a deliberate capital from an accidental one. Turn it off with *Capitalise the first
+letter of every word in a title* on **Settings… → General**. Titles confirmed against IMDb,
+or typed by you, are left exactly as they were spelled either way.
+
+**Season and episode numbers belong to television.** Categorise a file as anything but
+*TvShow* or *TvExtra* and its numbering is cleared: it was read out of a number in the name
+that meant something else — the 13 in *Apollo 13*, a track numbered 104 — and keeping it
+would only file the thing wrongly. Nothing is lost that was ever right.
 
 > **Titles travel by hash, never by matching title.** Two files can both be called *xyz* and
 > still be two different things — and one of them may already be correct. Sharing a name is
@@ -277,11 +350,36 @@ give it. That distinction is what makes a corrected title work properly: a file 
 **moves it under the corrected name** instead of announcing that it is already in the
 library.
 
+**A misnamed folder is renamed, not copied out of.** A file already inside the library but
+under a wrongly spelled show folder does not want copying anywhere — it wants its folder put
+right. When every catalogued file in a folder agrees on where it should go, the *folder* is
+moved or renamed: one operation, no matter what it holds, and nothing left standing behind
+it. Only when the folder disagrees with itself, or something already occupies the
+destination, does it fall back on relocating the files one at a time. Folders emptied on the
+way out are offered for removal afterwards, parents included.
+
 **Already consolidated** — a file that really is exactly where it belongs is never copied
 onto itself. If no other copy of it exists you are simply told so. If copies do exist, this
 is the natural moment to deal with them: **delete all duplicates**, or **pick which copy to
 keep** — and if the one you pick isn't the library copy, the others go and the keeper is
-moved into the library in its place.
+moved into the library in its place. **Deep check** decodes the copies first: they are the
+same bytes, but not necessarily on the same quality of disk, and "which of these still
+reads" is exactly the question that decides which to keep. Tick *do the same for the rest*
+and the questions stop there — every remaining group's copies are gathered into a **single
+delete confirmation** that lists all of them at once.
+
+**Purge filed duplicates** — the same tidy-up over the whole catalogue in one pass. Every
+file that is correctly filed in the library keeps its library copy; every stray copy of it
+anywhere else is listed for deletion, to the Recycle Bin or permanently. Sets with no filed
+copy at all are left alone: choosing between scattered copies is a decision, not a tidy-up.
+
+**Possible duplicates** — the duplicates a hash cannot find. The same film downloaded twice
+from two different releases is identical in what it *is* and different in every byte, so it
+never groups by content. These are found by title, year and — for a programme — season and
+episode, and put side by side with their size, length, quality and integrity so the choice
+of which to keep is an informed one. A **deep check** decodes them first, so a damaged copy
+is not the one that survives. Files carrying a `title` flag in the **Dup** column are these;
+the **SameTitle** view lists them.
 
 **Suggest consolidation** — click **Suggest consolidation…** to scan the catalogue and get a
 reviewable list of proposed moves: current location → new location, with name-collision and
@@ -342,12 +440,20 @@ default; skipping it demands a separate confirmation tick. Anything refused for 
 reasons can be retried with administrative rights, and anything held open reports **which
 application is holding it**.
 
+Because there is one implementation, there is one confirmation: **every** delete — the
+grid, both duplicate managers, *keep this one and delete the rest*, the already-consolidated
+tidy-up, the purge — now lists exactly what is about to go and offers the same choice
+between the Recycle Bin and a permanent delete. Nowhere silently picks one for you.
+
 **Redundant exclusion rules** — excluding `D:\Media` makes an existing rule for
 `D:\Media\Films` pointless. When a new rule covers older ones you are shown what has been
-superseded and asked whether to prune them; *Settings… → Exclusions* can change that to
-removing them automatically or leaving them alone. Patterns count too — `*\Windows\*`
-supersedes `C:\Windows` — and *Find redundant rules* sweeps the whole list at once,
-including anything the built-in system-folder list already covers.
+superseded and **tick which of them to drop** — all, some or none, with *Select all* and
+*Select none* for when the answer really is all or nothing. "All or nothing" was never the
+right question: a broad rule can supersede a dozen narrow ones, and wanting ten gone and two
+kept is perfectly reasonable. *Settings… → Exclusions* can change the whole thing to removing
+them automatically without stopping, or to leaving them alone. Patterns count too —
+`*\Windows\*` supersedes `C:\Windows` — and *Find redundant rules* sweeps the whole list at
+once, including anything the built-in system-folder list already covers.
 
 **Watching & startup** — in **Settings…**, enable *Watch for new files* to have new media
 auto-added to the catalogue with a taskbar notification, and *Start with Windows* to launch
@@ -430,6 +536,17 @@ A refusal is not taken at face value:
 - a **permissions** refusal is offered a retry with administrative rights, which relaunches
   the program elevated for that job alone;
 - anything still refusing is explained in full — file, reason, holders and path.
+
+*Skip the Recycle Bin (delete permanently)* can be **armed by default** with a setting on
+**Settings… → General**. It sits under a frank warning: the bin is the one thing standing
+between a mis-click and a file that is simply gone, and a recycled delete is the only kind
+Undo can put back. The destructive confirmation still starts clear every single time — the
+setting arms the dialog, never the confirmation.
+
+When a delete takes the **last file out of a folder**, you are asked whether the now-empty
+folder should go too, and any parent it empties in turn goes with it — a season folder that
+was the last season of a show takes the show folder with it. Turn the offer off with *After
+deleting the last file in a folder…* in Settings.
 
 **Moving files** — right-click → *Move to folder…* picks a destination, and can take the
 **rest of the containing folder** along with the selection, which is what you usually want
@@ -533,8 +650,11 @@ The first time titles are verified, the file is boiled down to **`IMDBData.tsv`*
 only the two columns that matter: **primary title** and **year**. The source is over a
 gigabyte, so it is streamed a line at a time and never loaded into memory. IMDb's
 placeholder rows for untitled episodes — `Episode #1.4`, `Episode dated 3 May 1999`,
-`Episode 12` — are dropped, since they would only ever match by accident. If `IMDBData.tsv`
-is already there the raw file is left alone.
+`Episode 12` — are dropped, since they would only ever match by accident. So are the
+**broadcast timestamps** some feeds leave in the title column — rows reading
+`22. sep. 2016 kl. 07:30` — which are a transmission slot rather than the name of anything,
+are numerous, and match nothing anyone will ever search for. If `IMDBData.tsv` is already
+there the raw file is left alone.
 
 **Verify titles** then confirms film and programme names against it and fills in any
 **missing years**. A name that cannot be identified from the file itself is looked up under
@@ -553,7 +673,15 @@ Turn *Keep the IMDb data in memory* off in **Settings…** and it is read from d
 slower, but free. Even then a whole run is answered in one pass over the file, not one pass
 per title.
 
-### TMDb (themoviedb.org) validation
+### TMDb (themoviedb.org) validation — deprecated
+
+> **TMDb is only used when `IMDBData.tsv` does not exist.** It answers one query every two
+> seconds, so a library of any size spends hours there to reach an answer the local extract
+> gives in a single pass over a local file — which makes "use both" a choice nobody would
+> knowingly make. Once the extract is present TMDb is not consulted at all, and *Validate
+> TV (TMDb)* says so rather than starting a job that had a local answer all along. It is
+> expected to be removed in a future release.
+
 Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** on **Settings… → Data
 sources** (the token is preferred if both are given), then **Validate TV (TMDb)** confirms
 show names against TMDb. **Verify titles** also falls back to TMDb for anything the local
@@ -571,8 +699,8 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.0` for
-v2.0 — with the product version kept as the number people talk about (`2.0`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.1` for
+v2.1 — with the product version kept as the number people talk about (`2.1`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
@@ -581,7 +709,9 @@ in the toolbar shows both, next to the program icon.
 
 ## Roadmap / possible extensions
 - Acting on near-duplicate groups directly (keep-best / bulk delete) from the UI — the
-  exact-duplicate manager already does this; the perceptual groups do not yet.
+  exact-duplicate manager and the same-title manager both do this; the perceptual groups
+  do not yet.
+- Removing TMDb entirely, now that the local IMDb extract supersedes it.
 - Retiring folder rules altogether, once existing catalogues have migrated off them.
 - Using a folder's year as well as its name when a film is identified from the folder.
 

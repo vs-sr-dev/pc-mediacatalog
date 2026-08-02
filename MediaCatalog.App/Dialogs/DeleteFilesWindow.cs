@@ -8,9 +8,12 @@ using MediaCatalog.Core.Models;
 namespace MediaCatalog.App;
 
 /// <summary>
-/// Confirms deleting files from disk. Files go to the Recycle Bin by default; skipping
-/// the bin is irreversible, so it additionally requires a confirmation tick that starts
-/// clear every time the dialog is opened.
+/// Confirms deleting files from disk, and lists every one of them — a batch answered once
+/// is still a batch the user is entitled to read before it happens.
+///
+/// Files go to the Recycle Bin by default. Skipping the bin is irreversible, so it takes a
+/// second confirmation; that confirmation starts clear every time the dialog opens, even
+/// when the setting has pre-ticked the skip itself.
 /// </summary>
 public class DeleteFilesWindow : Window
 {
@@ -30,16 +33,20 @@ public class DeleteFilesWindow : Window
 
     private readonly Button _delete = new()
     {
-        Content = "Delete", Width = 160, FontWeight = FontWeights.Bold,
+        Content = "Delete", Width = 180, FontWeight = FontWeights.Bold,
         Margin = new Thickness(0, 0, 6, 0)
     };
 
     /// <summary>True when the user chose to bypass the Recycle Bin.</summary>
     public bool DeletePermanently => _permanent.IsChecked == true;
 
-    public DeleteFilesWindow(IReadOnlyList<MediaFile> files)
+    /// <param name="defaultSkipRecycleBin">
+    /// Open with the bin already skipped, because the user has asked for that in Settings.
+    /// The destructive confirmation is still theirs to tick.
+    /// </param>
+    public DeleteFilesWindow(IReadOnlyList<MediaFile> files, bool defaultSkipRecycleBin = false)
     {
-        Title = "Delete files"; Width = 620; Height = 460;
+        Title = "Delete files"; Width = 700; Height = 500;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         var dock = new DockPanel { Margin = new Thickness(14) };
@@ -59,7 +66,9 @@ public class DeleteFilesWindow : Window
         options.Children.Add(_confirm);
         options.Children.Add(new TextBlock
         {
-            Text = "Recycled files can be restored from the Recycle Bin. Permanently deleted files cannot.",
+            Text = "Recycled files can be restored from the Recycle Bin, and an accidental delete " +
+                   "can be undone. Permanently deleted files are gone: nothing in this program or " +
+                   "in Windows will bring them back.",
             Foreground = System.Windows.Media.Brushes.Gray, TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 6, 0, 0)
         });
@@ -80,7 +89,8 @@ public class DeleteFilesWindow : Window
 
         dock.Children.Add(new ListBox
         {
-            ItemsSource = files.Select(f => $"{Format.Bytes(f.SizeBytes)}   {f.FullPath}").ToList(),
+            ItemsSource = files.Select(f => $"{Format.Bytes(f.SizeBytes),10}   {f.FullPath}").ToList(),
+            FontFamily = new System.Windows.Media.FontFamily("Consolas, Courier New, monospace"),
             HorizontalContentAlignment = HorizontalAlignment.Stretch
         });
 
@@ -96,6 +106,10 @@ public class DeleteFilesWindow : Window
         };
         _confirm.Checked += (_, _) => UpdateDeleteButton();
         _confirm.Unchecked += (_, _) => UpdateDeleteButton();
+
+        // Setting the tick raises Checked, which arms the confirmation for them; what it
+        // must never do is tick the confirmation as well.
+        if (defaultSkipRecycleBin) _permanent.IsChecked = true;
         UpdateDeleteButton();
 
         Content = dock;

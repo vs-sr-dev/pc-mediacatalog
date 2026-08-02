@@ -345,16 +345,13 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Put the exclusion rules a new one has made redundant to the user. Only reached when
-    /// the policy is to ask — the other two settings decide without stopping.
+    /// Put the exclusion rules a new one has made redundant to the user, one by one, and
+    /// hand back the ones they chose to drop. Only reached when the policy is to ask — the
+    /// other two settings decide without stopping.
     /// </summary>
-    private bool AskAboutRedundantExclusions(IReadOnlyList<ExcludedFolder> superseded) =>
-        MessageBox.Show(this,
-            $"This rule already covers {superseded.Count} existing exclusion(s):\n\n" +
-            string.Join("\n", superseded.Select(s => "    " + s.Path)) +
-            "\n\nRemove them? Nothing about what gets excluded changes either way — the list " +
-            "is simply shorter. You can change how this is handled on the Exclusions tab in Settings.",
-            "Redundant rules", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+    private IReadOnlyList<ExcludedFolder> AskAboutRedundantExclusions(
+        IReadOnlyList<ExcludedFolder> superseded) =>
+        RedundantRulesWindow.Ask(this, superseded);
 
     /// <summary>
     /// Two files want the same name: show both, and every known copy of either, and let the
@@ -529,6 +526,7 @@ public partial class MainWindow : Window
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
         await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
+        await OfferEmptiedFoldersAsync(outcome.EmptiedFolders);
     }
 
     /// <summary>
@@ -583,9 +581,39 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Folders a consolidation run has emptied on its way out. A move that files everything
+    /// correctly and leaves a trail of empty folders behind it has only done half the job.
+    /// </summary>
+    private async Task OfferEmptiedFoldersAsync(IReadOnlyList<string> emptied)
+    {
+        if (emptied.Count == 0 || !_vm.Settings.OfferRemoveEmptyFolders) return;
+
+        var listed = string.Join("\n", emptied.Take(15).Select(f => "    " + f));
+        if (emptied.Count > 15) listed += $"\n    …and {emptied.Count - 15} more";
+
+        var ask = MessageBox.Show(this,
+            $"{emptied.Count} folder(s) the files came out of now hold nothing:\n\n{listed}\n\n" +
+            "Remove them? Any parent folder they leave empty goes too.",
+            "Empty folders", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (ask != MessageBoxResult.Yes) return;
+
+        var removed = await _vm.RemoveEmptyFoldersAsync(emptied, toRecycleBin: true);
+        MessageBox.Show(this,
+            removed == 0
+                ? "The folders could not be removed — something else may be using them."
+                : $"{removed} empty folder(s) removed.",
+            "Empty folders", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
     /// Deal with the files that were already exactly where they belong. On its own that is
     /// simply "already consolidated" and worth no more than saying so — but when other
     /// copies of the same content exist, this is the moment to sort them out.
+    ///
+    /// Answering one group with "do the same for the rest" ends the questions there: the
+    /// remaining groups' copies are gathered up and put in a single delete confirmation
+    /// that lists every one of them, rather than a run of identical dialogs the user has
+    /// already said they do not want to see.
     /// </summary>
     private async Task HandleAlreadyConsolidatedAsync(IReadOnlyList<MediaFile> consolidated)
     {
@@ -605,9 +633,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        var standing = ConsolidatedDuplicateAction.Nothing;
-        var applyToAll = false;
-
         for (var i = 0; i < withCopies.Count; i++)
         {
             var file = withCopies[i];
@@ -615,28 +640,22 @@ public partial class MainWindow : Window
             copies.AddRange(_vm.CopiesOf(file));
             if (copies.Count < 2) continue;    // the earlier rounds may have cleared them
 
-            var action = standing;
-            MediaFile? keeper = file;
+            var dlg = new ConsolidatedDuplicatesWindow(
+                file, copies, withCopies.Count - i - 1,
+                _vm.CanDoVideo ? f => _vm.DeepCheckOneAsync(f) : null)
+            { Owner = this };
+            if (dlg.ShowDialog() != true) continue;
 
-            if (!applyToAll)
+            if (dlg.ApplyToAll)
             {
-                var dlg = new ConsolidatedDuplicatesWindow(file, copies, withCopies.Count - i - 1)
-                { Owner = this };
-                if (dlg.ShowDialog() != true) continue;
-
-                action = dlg.Action;
-                keeper = dlg.Keeper ?? file;
-                if (dlg.ApplyToAll)
-                {
-                    applyToAll = true;
-                    // "The same" can only mean the same policy, not the same file: the
-                    // keeper is chosen per group. Deleting the extras is the policy that
-                    // carries over.
-                    standing = ConsolidatedDuplicateAction.DeleteAllDuplicates;
-                }
+                // "The same" can only mean the same policy, not the same file: the keeper
+                // is chosen per group, and the only policy that carries over is "the
+                // library copy is the one that survives".
+                await DeleteRemainingDuplicatesAsync(withCopies.Skip(i));
+                break;
             }
 
-            switch (action)
+            switch (dlg.Action)
             {
                 case ConsolidatedDuplicateAction.DeleteAllDuplicates:
                     await FileDeletion.RunAsync(this, _vm,
@@ -644,13 +663,33 @@ public partial class MainWindow : Window
                     break;
 
                 case ConsolidatedDuplicateAction.KeepChosen:
-                    var message = await _vm.KeepOneCopyAsync(keeper, copies, toRecycleBin: true);
+                    var keeper = dlg.Keeper ?? file;
+                    var others = copies.Where(c => !ReferenceEquals(c, keeper)).ToList();
+                    if (!await FileDeletion.RunAsync(this, _vm, others, "Delete the other copies"))
+                        break;
+                    var message = await _vm.EnsureKeeperFiledAsync(keeper);
                     MessageBox.Show(this, message, "Keep one copy",
                         MessageBoxButton.OK, MessageBoxImage.Information);
                     break;
             }
         }
         UpdateUndoButton();
+    }
+
+    /// <summary>
+    /// Every remaining group's other copies, in one delete confirmation. The user has said
+    /// the library copy wins throughout — what is left is to show them the whole list once
+    /// and let them choose the Recycle Bin or a permanent delete for the lot.
+    /// </summary>
+    private async Task DeleteRemainingDuplicatesAsync(IEnumerable<MediaFile> libraryCopies)
+    {
+        var doomed = new List<MediaFile>();
+        foreach (var file in libraryCopies)
+            foreach (var copy in _vm.CopiesOf(file))
+                if (!doomed.Contains(copy)) doomed.Add(copy);
+
+        if (doomed.Count == 0) return;
+        await FileDeletion.RunAsync(this, _vm, doomed, "Delete duplicates");
     }
 
     private void OnMissingFilesClick(object sender, RoutedEventArgs e)
@@ -692,6 +731,7 @@ public partial class MainWindow : Window
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
         await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
+        await OfferEmptiedFoldersAsync(outcome.EmptiedFolders);
     }
 
     // --- TMDb -------------------------------------------------------------
@@ -794,7 +834,11 @@ public partial class MainWindow : Window
                 "Edit details", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+        EditDetails(row);
+    }
 
+    private void EditDetails(FileRow row)
+    {
         var copies = _vm.CopiesOf(row.Model).Count;
         var dlg = new FileDetailsWindow(row.Model, _vm.Categories, row.Category, copies) { Owner = this };
         if (dlg.ShowDialog() != true || dlg.Edits == null) return;
@@ -802,34 +846,6 @@ public partial class MainWindow : Window
         var result = _vm.ApplyFileEdits(row.Model, dlg.Edits);
         UpdateUndoButton();
         MessageBox.Show(this, result, "Edit details", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
-
-    private void OnEditTitle(object sender, RoutedEventArgs e)
-    {
-        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
-        if (rows.Count == 0)
-        {
-            MessageBox.Show(this, "Select one or more files in the list first.",
-                "Edit title", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
-        // Only the byte-identical copies come along. Another file that happens to carry the
-        // same title may well be something else entirely, and is left alone.
-        var copies = rows.Count == 1 ? _vm.CopiesOf(rows[0].Model).Count : 0;
-        var note = copies > 0
-            ? $"\n\n{copies} identical copy(ies) of this file will be given the same title."
-            : "";
-        var prompt = rows.Count == 1
-            ? $"Title for '{rows[0].FileName}':{note}"
-            : $"Title for the {rows.Count} selected file(s):";
-
-        var typed = PromptWindow.Ask(this, "Edit title", prompt, TitleSeed(rows[0].Model));
-        if (string.IsNullOrWhiteSpace(typed)) return;
-
-        var result = _vm.SetTitleForFiles(rows, typed.Trim());
-        UpdateUndoButton();
-        MessageBox.Show(this, result, "Edit title", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     /// <summary>
@@ -865,43 +881,6 @@ public partial class MainWindow : Window
         var result = _vm.SetTitleForFolder(dlg.SelectedFolder, dlg.Title_, dlg.IncludeSubdirectories);
         UpdateUndoButton();
         MessageBox.Show(this, result, "Set title for folder", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
-
-    private void OnEditSeasonEpisode(object sender, RoutedEventArgs e)
-    {
-        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
-        if (rows.Count == 0)
-        {
-            MessageBox.Show(this, "Select one or more files in the list first.",
-                "Season / episode", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
-        var dlg = new SeasonEpisodeWindow(rows.Select(r => r.Model).ToList()) { Owner = this };
-        if (dlg.ShowDialog() != true) return;
-
-        var result = _vm.SetSeasonEpisode(rows, dlg.Season, dlg.Episode);
-        UpdateUndoButton();
-        MessageBox.Show(this, result, "Season / episode", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
-
-    private void OnRenameFile(object sender, RoutedEventArgs e)
-    {
-        var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
-        if (row == null)
-        {
-            MessageBox.Show(this, "Select the file to rename first.",
-                "Rename file", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
-        var typed = PromptWindow.Ask(this, "Rename file",
-            $"New name for the file (keep the extension):\n\n{row.FullPath}", row.FileName);
-        if (string.IsNullOrWhiteSpace(typed) || typed.Trim() == row.FileName) return;
-
-        var result = _vm.RenameFile(row, typed.Trim());
-        UpdateUndoButton();
-        MessageBox.Show(this, result, "Rename file", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     // --- Moving, scanning and checking folders -----------------------------
@@ -1123,10 +1102,19 @@ public partial class MainWindow : Window
 
     // --- Duplicates -------------------------------------------------------
 
+    /// <summary>
+    /// Double-click does whatever the user has said it should: play the file, or open its
+    /// details for editing. Both are reasonable defaults for a catalogue — one treats it as
+    /// a library to watch, the other as a catalogue to correct — and which one is right
+    /// depends entirely on what the user is doing with it today.
+    /// </summary>
     private void OnGridDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        // Double-click opens the file with its associated application.
-        if (FilesGrid.SelectedItem is FileRow row)
+        if (FilesGrid.SelectedItem is not FileRow row) return;
+
+        if (_vm.Settings.DoubleClickAction == DoubleClickAction.EditDetails)
+            EditDetails(row);
+        else
             OpenFile(row);
     }
 
@@ -1153,52 +1141,12 @@ public partial class MainWindow : Window
             OpenFile(row);
     }
 
-    private void OpenFile(FileRow row)
-    {
-        if (!File.Exists(row.FullPath))
-        {
-            MessageBox.Show(this, "The file no longer exists on disk.",
-                "Open file", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
-        try
-        {
-            Process.Start(new ProcessStartInfo(row.FullPath) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Could not open the file:\n{ex.Message}",
-                "Open file", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-    }
+    private void OpenFile(FileRow row) => ShellOpen.Open(this, row.FullPath);
 
     private void OnOpenFolder(object sender, RoutedEventArgs e)
     {
-        var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
-        if (row == null) return;
-        try
-        {
-            if (File.Exists(row.FullPath))
-            {
-                // Open Explorer with the file selected.
-                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{row.FullPath}\"")
-                { UseShellExecute = true });
-            }
-            else
-            {
-                var dir = Path.GetDirectoryName(row.FullPath);
-                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
-                    Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true });
-                else
-                    MessageBox.Show(this, "The containing folder no longer exists.",
-                        "Open folder", MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Could not open the folder:\n{ex.Message}",
-                "Open folder", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
+        if (FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault() is { } row)
+            ShellOpen.SelectInExplorer(this, row.FullPath);
     }
 
     private void OnShowDuplicates(object sender, RoutedEventArgs e)
@@ -1212,10 +1160,94 @@ public partial class MainWindow : Window
         var group = _vm.DuplicateGroupFor(row.Model);
         if (group == null)
         {
+            // No byte-identical copy — but the catalogue may still hold something claiming
+            // to be the same film, which is the other half of the same question.
+            if (_vm.TitleDuplicateGroupFor(row.Model) != null)
+            {
+                var open = MessageBox.Show(this,
+                    "This file has no byte-for-byte duplicates, but other file(s) claim the same " +
+                    "title and year — the same thing downloaded twice from different releases.\n\n" +
+                    "Open the possible-duplicates list?",
+                    "Duplicates", MessageBoxButton.YesNo, MessageBoxImage.Information);
+                if (open == MessageBoxResult.Yes) OpenTitleDuplicates();
+                return;
+            }
+
             MessageBox.Show(this, "This file has no exact duplicates.",
                 "Duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         new DuplicateManagerWindow(_vm, group) { Owner = this }.ShowDialog();
+    }
+
+    // --- Possible duplicates (same title, different bytes) -----------------
+
+    private void OnShowTitleDuplicates(object sender, RoutedEventArgs e) => OpenTitleDuplicates();
+
+    private void OpenTitleDuplicates()
+    {
+        if (!_vm.HasTitleDuplicates)
+        {
+            MessageBox.Show(this,
+                "No files share a title and year without also sharing their contents.\n\n" +
+                "This looks for the same thing downloaded twice from two different releases — " +
+                "identical in what they are, different in every byte, so a content hash cannot " +
+                "see them. Titles have to be filled in for it to find anything, so run Verify " +
+                "titles first if the Title column is mostly empty.",
+                "Possible duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        new TitleDuplicatesWindow(_vm) { Owner = this }.ShowDialog();
+        UpdateUndoButton();
+    }
+
+    /// <summary>
+    /// Clear out every stray copy of everything already filed in the library, in one go.
+    /// The library copy is the one being kept by definition, so there is nothing to choose
+    /// between — only how firmly the rest should go, which the delete confirmation asks.
+    /// </summary>
+    private async void OnPurgeConsolidatedDuplicatesClick(object sender, RoutedEventArgs e)
+    {
+        var redundant = _vm.DuplicatesOfConsolidatedFiles();
+        if (redundant.Count == 0)
+        {
+            MessageBox.Show(this,
+                "Nothing to purge: no file that is filed in the library has another copy " +
+                "sitting anywhere else.",
+                "Purge duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var bytes = redundant.Sum(f => f.SizeBytes);
+        var confirm = MessageBox.Show(this,
+            $"{redundant.Count} file(s) — {Format.Bytes(bytes)} — are copies of files already " +
+            "filed in the library.\n\n" +
+            "The library copy of each is kept; every other copy is listed on the next screen, " +
+            "where you can send them to the Recycle Bin or delete them permanently.\n\n" +
+            "Go on to review the list?",
+            "Purge duplicates", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.OK) return;
+
+        await FileDeletion.RunAsync(this, _vm, redundant, "Purge duplicates");
+        UpdateUndoButton();
+    }
+
+    /// <summary>
+    /// Read the length and quality of the selected files — the single-file answer to what a
+    /// scan works out for everything. Only the container header is read, so it is a moment
+    /// per file rather than the minutes a deep check takes.
+    /// </summary>
+    private async void OnVerifyFilesClick(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Select the files to verify first.",
+                "Verify", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var result = await _vm.VerifyFilesAsync(rows.Select(r => r.Model).ToList());
+        MessageBox.Show(this, result, "Verify", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 }
