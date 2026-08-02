@@ -7,6 +7,7 @@
         xmlns:vm="clr-namespace:MediaCatalog.App.ViewModels"
         mc:Ignorable="d"
         Title="Media Catalog" Height="680" Width="1160"
+        MinHeight="420" MinWidth="720"
         Icon="Assets/MediaCatalog.ico"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
@@ -78,43 +79,55 @@
             </ToolBar>
         </ToolBarTray>
 
-        <!-- Filter bar -->
+        <!-- Filter bar. A ToolBar rather than a horizontal StackPanel: a StackPanel gives
+             every child the width it asks for and then clips at the window edge, so the
+             last button in the row loses all but its first letter on a narrow window with
+             nothing to say it is there. A ToolBar moves what does not fit into its overflow
+             chevron instead, where it can still be reached. The filter controls themselves
+             are pinned, since a filter box you cannot see is not a filter box. -->
         <StackPanel Grid.Row="1" Margin="2,6">
-            <StackPanel Orientation="Horizontal">
-                <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="2,0"/>
-                <ComboBox ItemsSource="{Binding Columns}" SelectedItem="{Binding FilterColumn}"
-                          Width="100" VerticalAlignment="Center" Margin="4,0"/>
-                <CheckBox Content="not" IsChecked="{Binding FilterNegate}" VerticalAlignment="Center"
-                          Margin="2,0" ToolTip="Exclude rows that match (e.g. Category not Audio)."/>
-                <TextBox Text="{Binding FilterPattern, UpdateSourceTrigger=PropertyChanged, Delay=200}"
-                         Width="280" VerticalAlignment="Center" Margin="4,0"
-                         ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains."/>
-                <Button Content="Add filter" Click="OnAddFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"
-                        ToolTip="Stack this as an additional filter (multiple filters per column allowed)."/>
-                <Button Content="Clear all" Click="OnClearFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
-                <Separator/>
-                <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
-                <Button Content="Suggest consolidation…" Click="OnSuggestConsolidationClick" Padding="8,1" Margin="2,0"
-                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"/>
-                <Button Content="Possible duplicates…" Click="OnShowTitleDuplicates" Padding="8,1" Margin="2,0"
-                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Files claiming the same title and year without being the same bytes — the same thing downloaded twice from two different releases, which a content hash cannot see."/>
-                <Button Content="Purge filed duplicates…" Click="OnPurgeConsolidatedDuplicatesClick" Padding="8,1" Margin="2,0"
-                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Delete every stray copy of a file that is already filed in the library. The library copy is kept; you choose the Recycle Bin or a permanent delete."/>
-                <Button x:Name="RefreshCatalogButton" Content="Refresh catalogue" Click="OnRefreshCatalogClick"
-                        Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Re-derive metadata for entries that predate the current features. Entries already up to date are skipped — nothing is re-scanned or re-hashed."/>
-                <Button x:Name="RehashButton" Content="Re-hash pending" Click="OnRehashClick"
-                        Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Re-hash files that were catalogued while they may still have been downloading."/>
-                <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
-                        VerticalAlignment="Center" Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
-                <Button Content="Unhashed files…" Click="OnUnhashedFilesClick" Padding="8,1" Margin="2,0"
-                        VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                        Visibility="{Binding HasUnhashedFiles, Converter={StaticResource BoolToVis}}"
-                        ToolTip="Files the scan could not read to hash. Without a hash they are invisible to duplicate detection."/>
-            </StackPanel>
+            <ToolBarTray>
+                <ToolBar>
+                    <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="2,0"
+                               ToolBar.OverflowMode="Never"/>
+                    <ComboBox ItemsSource="{Binding Columns}" SelectedItem="{Binding FilterColumn}"
+                              Width="100" VerticalAlignment="Center" Margin="4,0"
+                              ToolBar.OverflowMode="Never"/>
+                    <CheckBox Content="not" IsChecked="{Binding FilterNegate}" VerticalAlignment="Center"
+                              Margin="2,0" ToolBar.OverflowMode="Never"
+                              ToolTip="Exclude rows that match (e.g. Category not Audio)."/>
+                    <TextBox Text="{Binding FilterPattern, UpdateSourceTrigger=PropertyChanged, Delay=200}"
+                             Width="280" VerticalAlignment="Center" Margin="4,0"
+                             ToolBar.OverflowMode="Never"
+                             ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains."/>
+                    <Button Content="Add filter" Click="OnAddFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"
+                            ToolBar.OverflowMode="AsNeeded"
+                            ToolTip="Stack this as an additional filter (multiple filters per column allowed)."/>
+                    <Button Content="Clear all" Click="OnClearFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
+                    <Separator/>
+                    <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
+                    <Button Content="Suggest consolidation…" Click="OnSuggestConsolidationClick" Padding="8,1" Margin="2,0"
+                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"/>
+                    <Button Content="Possible duplicates…" Click="OnShowTitleDuplicates" Padding="8,1" Margin="2,0"
+                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                            ToolTip="Files claiming the same title and year without being the same bytes — the same thing downloaded twice from two different releases, which a content hash cannot see."/>
+                    <Button Content="Purge filed duplicates…" Click="OnPurgeConsolidatedDuplicatesClick" Padding="8,1" Margin="2,0"
+                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                            ToolTip="Delete every stray copy of a file that is already filed in the library. The library copy is kept; you choose the Recycle Bin or a permanent delete."/>
+                    <Button x:Name="RefreshCatalogButton" Content="Refresh catalogue" Click="OnRefreshCatalogClick"
+                            Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                            ToolTip="Re-derive metadata for entries that predate the current features. Entries already up to date are skipped — nothing is re-scanned or re-hashed."/>
+                    <Button x:Name="RehashButton" Content="Re-hash pending" Click="OnRehashClick"
+                            Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                            ToolTip="Re-hash files that were catalogued while they may still have been downloading."/>
+                    <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
+                            VerticalAlignment="Center" Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
+                    <Button Content="Unhashed files…" Click="OnUnhashedFilesClick" Padding="8,1" Margin="2,0"
+                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                            Visibility="{Binding HasUnhashedFiles, Converter={StaticResource BoolToVis}}"
+                            ToolTip="Files the scan could not read to hash. Without a hash they are invisible to duplicate detection."/>
+                </ToolBar>
+            </ToolBarTray>
             <ItemsControl ItemsSource="{Binding ActiveFilters}" Margin="40,4,0,0">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
