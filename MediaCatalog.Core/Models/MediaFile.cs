@@ -81,6 +81,14 @@ public class MediaFile
     /// <summary>Media duration in seconds, from ffprobe. 0 if unknown.</summary>
     public double DurationSeconds { get; set; }
 
+    /// <summary>
+    /// How good the file is, in the one number that means something for its kind: the
+    /// picture height in pixels for video (720, 1080, 2160) and the bitrate in kbps for
+    /// audio. 0 until something has looked. See <see cref="QualityDisplay"/> for how it
+    /// is written out, which depends on <see cref="Kind"/>.
+    /// </summary>
+    public int Quality { get; set; }
+
     /// <summary>Chromaprint raw fingerprint (comma-separated uint32) for audio matching.</summary>
     public string AudioFingerprint { get; set; } = string.Empty;
 
@@ -116,4 +124,30 @@ public class MediaFile
     [XmlIgnore]
     public bool IsExtra =>
         VideoCategory is VideoCategory.TvExtra or VideoCategory.MovieExtra;
+
+    /// <summary>
+    /// The duration as "1:42:07" / "3:58", or blank when nothing has measured it yet.
+    /// </summary>
+    [XmlIgnore]
+    public string LengthDisplay
+    {
+        get
+        {
+            if (DurationSeconds <= 0) return string.Empty;
+            var span = TimeSpan.FromSeconds(Math.Round(DurationSeconds));
+            return span.TotalHours >= 1
+                ? $"{(int)span.TotalHours}:{span.Minutes:00}:{span.Seconds:00}"
+                : $"{span.Minutes}:{span.Seconds:00}";
+        }
+    }
+
+    /// <summary>
+    /// The quality with the unit its kind is measured in — "1080p" for video, "320 kbps"
+    /// for audio — or blank when it has not been measured.
+    /// </summary>
+    [XmlIgnore]
+    public string QualityDisplay =>
+        Quality <= 0 ? string.Empty
+        : Kind == MediaKind.Audio ? $"{Quality} kbps"
+        : $"{Quality}p";
 }

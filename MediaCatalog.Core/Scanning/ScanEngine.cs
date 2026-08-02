@@ -88,6 +88,11 @@ public class ScanEngine
     /// When true, the scan does not finish while a chosen drive is still unattached: it
     /// waits, watching for it, and scans it as soon as it appears. Cancel stops the wait.
     /// </param>
+    /// <param name="probeMedia">
+    /// Reads each file's length and quality as it is catalogued. Supplied by the caller,
+    /// which owns the external tools; null leaves those columns to be filled in later by an
+    /// analysis run or by verifying a single file.
+    /// </param>
     public async Task<ScanReport> ScanAsync(
         IReadOnlyList<string> roots,
         IProgress<ScanProgress>? progress = null,
@@ -98,6 +103,7 @@ public class ScanEngine
         AppSettings? settings = null,
         bool pruneMissing = true,
         bool waitForMissingRoots = false,
+        Func<MediaFile, CancellationToken, Task>? probeMedia = null,
         CancellationToken ct = default)
     {
         settings ??= new AppSettings();
@@ -236,7 +242,7 @@ public class ScanEngine
             }
 
             var entry = MergeEntry(info);
-            MediaClassifier.Classify(entry);
+            MediaClassifier.Classify(entry, settings);
             Classification.DuplicateMetadata.ApplyFolderTitle(entry, settings);
             QuickIntegrityCheck(entry, info);
 
@@ -252,6 +258,16 @@ public class ScanEngine
                 // and reported rather than quietly left out.
                 entry.HashFailed = !entry.HasHash;
                 if (entry.HashFailed) unhashed.Add(entry);
+            }
+
+            // How long it runs and how good it is. Read from the container header, which is
+            // cheap next to hashing the file — and only for entries that don't know yet, so
+            // re-scanning a library it has already measured costs nothing.
+            if (probeMedia != null && Integrity.MediaProbe.NeedsProbe(entry))
+            {
+                try { await probeMedia(entry, ct); }
+                catch (OperationCanceledException) { throw; }
+                catch { /* a file the prober choked on is not a reason to stop the scan */ }
             }
 
             entry.IndexedUtc = DateTime.UtcNow;

@@ -17,7 +17,10 @@ public record ImdbExtractReport(long Kept, long Skipped, string Path);
 /// cheap to search or load.
 ///
 /// Generic episode rows ("Episode #1.4", "Episode dated 3 May 1999") are dropped: they
-/// are placeholders for untitled episodes and would only ever match by accident.
+/// are placeholders for untitled episodes and would only ever match by accident. So are
+/// the broadcast timestamps that sit in the same column for some feeds — rows whose
+/// "title" reads "22. sep. 2016 kl. 07:30" — which are a transmission slot rather than
+/// the name of anything.
 /// </summary>
 public static class ImdbExtractor
 {
@@ -26,9 +29,30 @@ public static class ImdbExtractor
         @"^Episode\s*(?:#|dated\b|\d{1,4}(?!\d))",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    /// <summary>
+    /// A date, or a date and a time, standing where a title should be. Two forms are
+    /// enough to catch the lot: a clock reference ("kl. 17:00", "12:30"), and a
+    /// day-month-year opening ("21. jan. 2015", "4 feb 2015"). Nothing anyone would call a
+    /// film matches either.
+    /// </summary>
+    private static readonly Regex Timestamp = new(
+        @"^\d{1,2}\s*[.\-/]\s*\p{L}{3,}\.?\s*[.\-/]?\s*\d{4}\b" +   // 21. jan. 2015
+        @"|^\d{1,2}\s*[.\-/]\s*\d{1,2}\s*[.\-/]\s*\d{4}\b" +        // 21.01.2015
+        @"|\bkl\.?\s*\d{1,2}[:.]\d{2}\b" +                          // kl. 17:00
+        @"|^\d{1,2}[:.]\d{2}(?::\d{2})?$",                          // 17:00
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     /// <summary>True when a row's primary title is a placeholder rather than a real name.</summary>
     public static bool IsGenericEpisodeTitle(string title) =>
         !string.IsNullOrWhiteSpace(title) && GenericEpisode.IsMatch(title.TrimStart());
+
+    /// <summary>
+    /// True when a row's primary title is a broadcast date or time rather than a name.
+    /// These are worse than useless in the extract: they are numerous, they match nothing
+    /// anyone searches for, and they make the file bigger for no purpose.
+    /// </summary>
+    public static bool IsTimestampTitle(string title) =>
+        !string.IsNullOrWhiteSpace(title) && Timestamp.IsMatch(title.Trim());
 
     /// <summary>
     /// The source file to extract from: the plain TSV if it is there, otherwise the
@@ -85,6 +109,7 @@ public static class ImdbExtractor
                     var title = fields[titleCol];
                     if (title.Length == 0 || title == NullField) { skipped++; continue; }
                     if (IsGenericEpisodeTitle(title)) { skipped++; continue; }
+                    if (IsTimestampTitle(title)) { skipped++; continue; }
 
                     var year = fields[yearCol];
                     if (year == NullField) year = string.Empty;

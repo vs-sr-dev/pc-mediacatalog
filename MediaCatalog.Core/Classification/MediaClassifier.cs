@@ -1,6 +1,8 @@
 using System.Text.RegularExpressions;
 using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Naming;
 using MediaCatalog.Core.Scanning;
+using MediaCatalog.Core.Storage;
 
 namespace MediaCatalog.Core.Classification;
 
@@ -20,6 +22,13 @@ public static class MediaClassifier
         @"\b(?:s|se|season|series)\s*\.?\s*(?<s>\d{1,3})\s*[._\-]?\s*(?:e|ep|eps|episode|episodes|pt|part)\s*\.?\s*(?<e>\d{1,3})\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // The same in words: "Season Three Episode One". Kept apart from the pattern above so
+    // the common all-digits form stays cheap and unambiguous.
+    private static readonly Regex SeasonEpisodeWords = new(
+        $@"\b(?:season|series)\s*[._\-]?\s*(?<s>{NumberWords.NumberPattern})\s*[._\-]?\s*" +
+        $@"(?:e|ep|eps|episode|episodes|part|pt)\s*[._\-]?\s*(?<e>{NumberWords.NumberPattern})\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     // 1x02 / 01x02
     private static readonly Regex XFormat = new(
         @"(?<![a-zA-Z0-9])(?<s>\d{1,2})x(?<e>\d{1,3})(?![a-zA-Z0-9])",
@@ -32,9 +41,9 @@ public static class MediaClassifier
         @"(?<![a-z0-9])(?:e|ep|episode|part|pt)\s*\.?\s*(?<e>\d{1,3})(?![0-9])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // "Season 1", "Series 1"
+    // "Season 1", "Series 1", "Season Three" — a season with no episode beside it.
     private static readonly Regex SeasonWord = new(
-        @"\b(?:season|series)\s*\d{1,2}\b",
+        $@"\b(?:season|series)\s*[._\-]?\s*(?<s>{NumberWords.NumberPattern})\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // A bare 3-digit number: "123" => season 1, episode 23 (a common compact scheme).
@@ -73,7 +82,12 @@ public static class MediaClassifier
         @"remux|proper|repack|internal|extended|uncut)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    public static void Classify(MediaFile file)
+    /// <param name="settings">
+    /// The user's preferences, for the handful of choices classification exposes (title
+    /// capitalisation). Null keeps the defaults, which is what a caller with no settings
+    /// to hand would want anyway.
+    /// </param>
+    public static void Classify(MediaFile file, AppSettings? settings = null)
     {
         file.Kind = MediaExtensions.Classify(file.Extension);
 
@@ -83,6 +97,7 @@ public static class MediaClassifier
         file.Season = null;
         file.Episode = null;
 
+        var capitalise = settings?.CapitaliseTitles ?? true;
         var name = Path.GetFileNameWithoutExtension(file.FileName);
 
         // Where the encoding details sit in the name. Numbers inside them describe the
@@ -91,11 +106,12 @@ public static class MediaClassifier
         var noise = NoiseSpans(name);
 
         // Year applies to both movies and TV; capture the first plausible one.
-        var yearMatch = FirstOutsideNoise(Year, name, noise);
+        var yearMatch = FirstPlausibleYear(name, noise);
         if (yearMatch != null && int.TryParse(yearMatch.Groups["y"].Value, out var y))
             file.Year = y;
 
         var se = SeasonEpisode.Match(name);
+        if (!se.Success) se = SeasonEpisodeWords.Match(name);
         var xf = XFormat.Match(name);
 
         if (file.Kind != MediaKind.Video)
@@ -104,50 +120,61 @@ public static class MediaClassifier
             // content — record it so the category can pick it up.
             if (se.Success)
             {
-                file.Season = ParseInt(se.Groups["s"].Value);
-                file.Episode = ParseInt(se.Groups["e"].Value);
-                file.ParsedTitle = CleanTitle(name, se.Index);
+                file.Season = ParseNumber(se.Groups["s"].Value);
+                file.Episode = ParseNumber(se.Groups["e"].Value);
+                file.ParsedTitle = CleanTitle(name, se.Index, capitalise);
                 return;
             }
             if (xf.Success)
             {
-                file.Season = ParseInt(xf.Groups["s"].Value);
-                file.Episode = ParseInt(xf.Groups["e"].Value);
-                file.ParsedTitle = CleanTitle(name, xf.Index);
+                file.Season = ParseNumber(xf.Groups["s"].Value);
+                file.Episode = ParseNumber(xf.Groups["e"].Value);
+                file.ParsedTitle = CleanTitle(name, xf.Index, capitalise);
                 return;
             }
 
             // Audio and friends: just derive a cleaned title.
-            file.ParsedTitle = CleanTitle(name, cutAt: -1);
+            file.ParsedTitle = CleanTitle(name, cutAt: -1, capitalise);
             return;
         }
 
         int titleCut = -1;
 
         // What the surrounding folders say. A well-filed library carries the season in a
-        // "Season 04" folder and the show name in the folder above it, which is often
-        // everything the file name itself leaves out.
+        // "Season 04" folder — or in a "Yes Minister, Season Three" one — and the show name
+        // in that same folder or the one above it, which is often everything the file name
+        // itself leaves out.
         var pathSeason = PathMetadata.SeasonFromPath(file.FullPath);
 
-        // The episode when the name gives only that and no season: a bare "1" or "12", or
-        // an "E07"-style marker. Longer runs of digits are compact season/episode codes
-        // and are left to TryCompactEpisode, which reads the season out of them.
+        // The episode when the name gives only that and no season: a bare "1" or "12", a
+        // leading "01. Equal Opportunities", or an "E07"-style marker. Longer runs of digits
+        // are compact season/episode codes and are left to TryCompactEpisode, which reads
+        // the season out of them.
+        var leadingEpisode = pathSeason is null
+            ? null
+            : PathMetadata.EpisodeFromLeadingNumber(name);
         var pathEpisode = pathSeason is null
             ? null
-            : PathMetadata.EpisodeFromBareName(name) ?? EpisodeOnlyNumber(name);
+            : PathMetadata.EpisodeFromBareName(name) ?? leadingEpisode ?? EpisodeOnlyNumber(name);
+
+        // Set when the numbering came from the folder rather than the name. A name that
+        // opens with its episode number goes on to give the *episode's* title, not the
+        // programme's — "01. Equal Opportunities" is an episode of something the folders
+        // name — so the title is taken from the path below.
+        var titleIsEpisodeName = false;
 
         if (se.Success)
         {
             file.VideoCategory = VideoCategory.TvShow;
-            file.Season = ParseInt(se.Groups["s"].Value);
-            file.Episode = ParseInt(se.Groups["e"].Value);
+            file.Season = ParseNumber(se.Groups["s"].Value);
+            file.Episode = ParseNumber(se.Groups["e"].Value);
             titleCut = se.Index;
         }
         else if (xf.Success)
         {
             file.VideoCategory = VideoCategory.TvShow;
-            file.Season = ParseInt(xf.Groups["s"].Value);
-            file.Episode = ParseInt(xf.Groups["e"].Value);
+            file.Season = ParseNumber(xf.Groups["s"].Value);
+            file.Episode = ParseNumber(xf.Groups["e"].Value);
             titleCut = xf.Index;
         }
         else if (pathSeason is { } folderSeason && pathEpisode is { } folderEpisode)
@@ -158,10 +185,12 @@ public static class MediaClassifier
             file.VideoCategory = VideoCategory.TvShow;
             file.Season = folderSeason;
             file.Episode = folderEpisode;
+            titleIsEpisodeName = leadingEpisode == folderEpisode;
         }
         else if (SeasonWord.Match(name) is { Success: true } sw)
         {
             file.VideoCategory = VideoCategory.TvShow;
+            file.Season = NumberWords.Parse(sw.Groups["s"].Value);
             titleCut = sw.Index;
         }
         else if (file.Year.HasValue)
@@ -199,13 +228,17 @@ public static class MediaClassifier
         if (ExtraDetector.Detect(file) is { } extra)
             file.VideoCategory = extra;
 
-        file.ParsedTitle = CleanTitle(name, titleCut);
+        file.ParsedTitle = CleanTitle(name, titleCut, capitalise);
 
-        // A name that was all episode code leaves nothing to call the show by, so fall
-        // back to the folder it lives in — "King Of The Hill" for the example above.
-        if (!HasUsefulTitle(file.ParsedTitle) &&
+        // A name that was all episode code — or all episode *name* — leaves nothing to call
+        // the show by, so fall back to the folder it lives in.
+        if ((titleIsEpisodeName || !HasUsefulTitle(file.ParsedTitle)) &&
             PathMetadata.TitleFromPath(file.FullPath) is { } fromPath)
-            file.ParsedTitle = fromPath;
+            file.ParsedTitle = capitalise ? TitleCase.Apply(fromPath) : fromPath;
+
+        // A season/episode on something that is not a programme was read out of a number
+        // that meant something else, so it goes.
+        MetadataNormaliser.StripNonTvNumbering(file, CategoryResolver.Auto(file));
     }
 
     /// <summary>
@@ -216,15 +249,15 @@ public static class MediaClassifier
         !string.IsNullOrWhiteSpace(title) &&
         !title.All(c => char.IsDigit(c) || char.IsWhiteSpace(c));
 
-    private static int? ParseInt(string s) =>
-        int.TryParse(s, out var v) ? v : null;
+    /// <summary>A season or episode number written in digits or in words.</summary>
+    private static int? ParseNumber(string s) => NumberWords.Parse(s);
 
     /// <summary>
     /// The number in a lone episode marker — "E07", "Ep 7", "Episode 12" — or null.
     /// Only meaningful once a season folder has supplied the season.
     /// </summary>
     private static int? EpisodeOnlyNumber(string name) =>
-        EpisodeOnly.Match(name) is { Success: true } m ? ParseInt(m.Groups["e"].Value) : null;
+        EpisodeOnly.Match(name) is { Success: true } m ? ParseNumber(m.Groups["e"].Value) : null;
 
     /// <summary>
     /// Where the encoding/quality tokens sit in a name, as half-open character ranges.
@@ -232,13 +265,27 @@ public static class MediaClassifier
     private static List<(int Start, int End)> NoiseSpans(string name) =>
         Noise.Matches(name).Select(m => (m.Index, m.Index + m.Length)).ToList();
 
-    /// <summary>The first match of <paramref name="pattern"/> that is not inside a noise token.</summary>
-    private static Match? FirstOutsideNoise(
-        Regex pattern, string name, IReadOnlyList<(int Start, int End)> noise)
+    /// <summary>
+    /// The year the file is actually from. Release names carry more than one four-digit
+    /// number often enough to matter — "Blade.Runner.2049.2017.1080p" is a 2017 film about
+    /// the year 2049 — and the giveaway is that a year in the future has not happened yet.
+    /// So candidates that cannot be release years are passed over, and only if every one of
+    /// them is impossible is the first taken anyway, on the grounds that a wrong year still
+    /// beats no year at all.
+    /// </summary>
+    private static Match? FirstPlausibleYear(string name, IReadOnlyList<(int Start, int End)> noise)
     {
-        foreach (Match m in pattern.Matches(name))
-            if (!Overlaps(m, noise)) return m;
-        return null;
+        // One year's grace: a film announced for next year is dated next year.
+        var latest = DateTime.Now.Year + 1;
+
+        Match? first = null;
+        foreach (Match m in Year.Matches(name))
+        {
+            if (Overlaps(m, noise)) continue;
+            first ??= m;
+            if (int.TryParse(m.Groups["y"].Value, out var value) && value <= latest) return m;
+        }
+        return first;
     }
 
     /// <summary>True when a match falls inside a codec/resolution token.</summary>
@@ -287,14 +334,16 @@ public static class MediaClassifier
 
     /// <summary>
     /// Turn "The.Movie.2010.1080p.BluRay" into "The Movie" by cutting at the first
-    /// season/episode/year marker and stripping separators and release noise.
+    /// season/episode/year marker and stripping separators and release noise. Every word
+    /// then gets its initial capital, so a title read out of a lower-case release name
+    /// reads like a title.
     /// </summary>
-    private static string CleanTitle(string name, int cutAt)
+    private static string CleanTitle(string name, int cutAt, bool capitalise)
     {
         var head = cutAt > 0 ? name[..cutAt] : name;
         head = head.Replace('.', ' ').Replace('_', ' ').Replace('-', ' ');
         head = Noise.Replace(head, " ");
         head = Regex.Replace(head, @"\s+", " ").Trim(' ', '(', ')', '[', ']');
-        return head;
+        return capitalise ? TitleCase.Apply(head) : head;
     }
 }

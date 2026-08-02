@@ -133,6 +133,20 @@ public static class FileDeleter
     }
 
     /// <summary>
+    /// Send a folder to the Recycle Bin, so a folder emptied by a delete can be tidied
+    /// away as recoverably as the files that were in it. False when the shell refuses, in
+    /// which case the caller can fall back on removing it outright.
+    /// </summary>
+    public static bool TryRecycleDirectory(string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !OperatingSystem.IsWindows()) return false;
+        if (!Directory.Exists(folder)) return true;   // already gone is the wanted outcome
+
+        try { return Recycle(folder) == 0 && !Directory.Exists(folder); }
+        catch { return false; }
+    }
+
+    /// <summary>
     /// Clear the read-only attribute. True only when it was set and has now gone, so the
     /// caller can tell "worth retrying" from "that was never the problem".
     /// </summary>

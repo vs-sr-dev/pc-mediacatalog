@@ -30,7 +30,7 @@ public static class ConsolidationPlanner
         var dir = settings.ConsolidationDirFor(category);
         if (string.IsNullOrWhiteSpace(dir)) return null;
 
-        var title = Title(file);
+        var title = SortName(Title(file), settings);
 
         if (category is CategoryResolver.TvShow or CategoryResolver.TvExtra)
         {
@@ -176,6 +176,29 @@ public static class ConsolidationPlanner
     /// <summary>Prefer a TMDb-validated name over the filename-parsed one.</summary>
     private static string Title(MediaFile file) =>
         !string.IsNullOrWhiteSpace(file.TmdbName) ? file.TmdbName : file.ParsedTitle;
+
+    // The articles a library catalogue files under the following word instead.
+    private static readonly Regex LeadingArticle = new(
+        @"^(?<article>the|a|an)\s+(?<rest>\S.*)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The name a folder is filed under. Normally the title as it reads; with the article
+    /// setting on, "The Simpsons" becomes "Simpsons (The)" so it sits under S beside
+    /// *Seinfeld* rather than under T with every other programme beginning "The".
+    ///
+    /// Only the folder is affected — the file inside it keeps the title the naming scheme
+    /// gives it, because a file name is read rather than sorted.
+    /// </summary>
+    public static string SortName(string title, AppSettings settings)
+    {
+        if (!settings.SortLeadingArticleLast || string.IsNullOrWhiteSpace(title)) return title;
+
+        var match = LeadingArticle.Match(title.Trim());
+        return match.Success
+            ? $"{match.Groups["rest"].Value.Trim()} ({match.Groups["article"].Value.Trim()})"
+            : title;
+    }
 
     /// <summary>First-letter bucket: A–Z, or '#' for a digit / anything else.</summary>
     public static string Bucket(string name)

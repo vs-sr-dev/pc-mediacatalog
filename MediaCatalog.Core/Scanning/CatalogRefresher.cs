@@ -17,9 +17,13 @@ public record RefreshProgress(int Done, int Total, string Current, string Phase 
 /// <param name="Adopted">Files that took a category or title off a folder rule.</param>
 /// <param name="RulesRetired">Folder rules removed once their files were labelled outright.</param>
 /// <param name="Verified">What the title verification pass managed, when one ran.</param>
+/// <param name="Unnumbered">
+/// Entries that had a season/episode taken off them because they are not programmes.
+/// </param>
 public record RefreshReport(
     int Refreshed, int Skipped, int Linked, int Pruned, int Shared = 0,
-    int Numbered = 0, int Adopted = 0, int RulesRetired = 0, VerifyReport? Verified = null);
+    int Numbered = 0, int Adopted = 0, int RulesRetired = 0, VerifyReport? Verified = null,
+    int Unnumbered = 0);
 
 /// <summary>
 /// Brings an existing catalogue up to date with features added since it was built —
@@ -37,9 +41,12 @@ public static class CatalogRefresher
     /// Bumped whenever a release derives something new from data already in the
     /// catalogue. Entries below it are re-derived on the next refresh.
     /// 1 = classification/titles, 2 = extras detection + linking,
-    /// 3 = compact 4-digit episode codes, season/title read from the folder path.
+    /// 3 = compact 4-digit episode codes, season/title read from the folder path,
+    /// 4 = seasons written in words, episode numbers leading a name, release years that
+    ///     have not happened yet passed over, titles capitalised, season/episode numbers
+    ///     stripped off anything that is not a programme.
     /// </summary>
-    public const int CurrentFeatureVersion = 3;
+    public const int CurrentFeatureVersion = 4;
 
     /// <summary>True when this entry predates the current feature set.</summary>
     public static bool NeedsRefresh(MediaFile file) =>
@@ -95,7 +102,7 @@ public static class CatalogRefresher
             // Re-derive everything that comes from the name and path. User overrides,
             // TMDb results, hashes and fingerprints are all stored elsewhere on the
             // entry and survive untouched.
-            MediaClassifier.Classify(file);
+            MediaClassifier.Classify(file, settings);
             DuplicateMetadata.ApplyFolderTitle(file, settings);
             file.FeatureVersion = CurrentFeatureVersion;
 
@@ -111,6 +118,12 @@ public static class CatalogRefresher
         var shared = DuplicateMetadata.Propagate(catalog.Files);
         var linked = ExtraLinker.Link(catalog.Files);
 
+        // Last, so it sees the categories the user set as well as the ones just derived: a
+        // season/episode on anything but a programme was read out of a number that meant
+        // something else, and is simply wrong.
+        var unnumbered = MetadataNormaliser.StripNonTvNumbering(
+            catalog.Files, f => CategoryResolver.Effective(f, settings));
+
         VerifyReport? verified = null;
         if (verifier != null)
         {
@@ -122,7 +135,7 @@ public static class CatalogRefresher
         catalog.RebuildIndex();
         progress?.Report(new RefreshProgress(stale.Count, stale.Count, string.Empty));
         return new RefreshReport(stale.Count, skipped, linked, pruned, shared,
-            numbered, adopted, retired, verified);
+            numbered, adopted, retired, verified, unnumbered);
     }
 
     /// <summary>

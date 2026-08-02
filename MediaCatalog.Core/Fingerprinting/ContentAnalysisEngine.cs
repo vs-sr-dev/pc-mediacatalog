@@ -49,12 +49,12 @@ public class ContentAnalysisEngine
 
             if (!File.Exists(file.FullPath)) continue;
 
-            // 1. Probe for duration + basic integrity (needed for fingerprint bucketing).
-            if (_tools.HasFfprobe && (file.DurationSeconds <= 0 || deepCheck))
+            // 1. Probe for duration, quality and basic integrity (the duration is also what
+            //    buckets the fingerprints).
+            if (_tools.HasFfprobe && (MediaProbe.NeedsProbe(file) || deepCheck))
             {
                 var probe = await _integrity.ProbeAsync(file.FullPath, ct);
-                if (probe.DurationSeconds > 0) file.DurationSeconds = probe.DurationSeconds;
-                if (probe.Status != IntegrityStatus.NotChecked) file.Integrity = probe.Status;
+                MediaProbe.Apply(file, probe);
             }
 
             // 2. Fingerprints (skip if already present and file unchanged).

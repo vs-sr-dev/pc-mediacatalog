@@ -76,6 +76,15 @@ public enum MissingDriveAction
     ProceedWithout
 }
 
+/// <summary>What double-clicking a row in the results grid does.</summary>
+public enum DoubleClickAction
+{
+    /// <summary>Open the file with whatever application Windows associates with it.</summary>
+    Play = 0,
+    /// <summary>Open the Edit details dialog for it.</summary>
+    EditDetails
+}
+
 /// <summary>Result of the lightweight integrity check performed during a scan.</summary>
 public enum IntegrityStatus
 {

@@ -66,6 +66,50 @@ public static class RenameService
     }
 
     /// <summary>
+    /// A rename that swaps one title for another inside the name the file already has:
+    /// "the italian job 1969.avi" becomes "The Italian Job 1969.avi".
+    ///
+    /// For the categories the naming scheme declines to name — an extra, a file still
+    /// filed as Other, a programme with no episode number — this is what "rename to match
+    /// the corrected title" can honestly mean. It changes the part of the name that was
+    /// wrong and leaves everything else the file was called alone, rather than inventing a
+    /// name nobody asked for. Null when the old title isn't in the name to begin with, or
+    /// when either title is missing.
+    /// </summary>
+    public static RenameProposal? BuildTitleSwap(MediaFile file, string? oldTitle, string? newTitle)
+    {
+        var previous = (oldTitle ?? string.Empty).Trim();
+        var current = (newTitle ?? string.Empty).Trim();
+        if (previous.Length == 0 || current.Length == 0) return null;
+        if (string.Equals(previous, current, StringComparison.Ordinal)) return null;
+
+        var stem = Path.GetFileNameWithoutExtension(file.FileName);
+        var at = stem.IndexOf(previous, StringComparison.OrdinalIgnoreCase);
+        if (at < 0) return null;
+
+        var swapped = stem[..at] + current + stem[(at + previous.Length)..];
+        var proposed = Sanitize(swapped) + Path.GetExtension(file.FileName);
+        if (proposed.Length <= Path.GetExtension(file.FileName).Length) return null;
+
+        var dir = Path.GetDirectoryName(file.FullPath) ?? string.Empty;
+        return new RenameProposal
+        {
+            File = file,
+            CurrentName = file.FileName,
+            ProposedName = proposed,
+            ProposedPath = Path.Combine(dir, proposed)
+        };
+    }
+
+    private static string Sanitize(string stem)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(stem.Select(c => invalid.Contains(c) ? ' ' : c).ToArray());
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s+", " ").Trim();
+        return cleaned.TrimEnd('.', ' ');
+    }
+
+    /// <summary>
     /// Rename a single file. Handles case-only renames on Windows and avoids
     /// clobbering an unrelated existing file by disambiguating the name.
     /// </summary>

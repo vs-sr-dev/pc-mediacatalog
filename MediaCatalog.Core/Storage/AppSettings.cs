@@ -191,6 +191,45 @@ public class AppSettings
     public bool RenameOnTitleChange { get; set; } = true;
 
     /// <summary>
+    /// Open the Delete files dialog with "Skip the Recycle Bin" already ticked.
+    ///
+    /// Off by default, and deliberately so: the bin is the only thing standing between a
+    /// mis-click and a file that is simply gone. The option exists because people with very
+    /// large libraries ask for it, not because it is a good idea.
+    /// </summary>
+    public bool SkipRecycleBinByDefault { get; set; }
+
+    /// <summary>
+    /// After deleting the last file in a folder, offer to remove the folder too. On by
+    /// default: an empty folder left behind is litter from an operation the user asked for.
+    /// </summary>
+    public bool OfferRemoveEmptyFolders { get; set; } = true;
+
+    /// <summary>
+    /// Give every word of a parsed title its initial capital, so a title read out of
+    /// "the.matrix.1999.mkv" reads *The Matrix*. On by default; confirmed titles are left
+    /// exactly as their source spelled them either way.
+    /// </summary>
+    public bool CapitaliseTitles { get; set; } = true;
+
+    /// <summary>
+    /// File "The Simpsons" under S as "Simpsons (The)" rather than under T. Off by default:
+    /// it is how a library catalogue sorts, but not how most people expect a folder tree to
+    /// look, and turning it on moves existing folders the next time they are consolidated.
+    /// </summary>
+    public bool SortLeadingArticleLast { get; set; }
+
+    /// <summary>What double-clicking a row does: play the file, or edit its details.</summary>
+    public DoubleClickAction DoubleClickAction { get; set; } = DoubleClickAction.Play;
+
+    /// <summary>
+    /// Read each file's length and quality during a scan, using ffprobe. On by default,
+    /// and near-free: it reads the container header rather than the file, and entries that
+    /// already know are skipped. Without external tools it does nothing at all.
+    /// </summary>
+    public bool ProbeDuringScan { get; set; } = true;
+
+    /// <summary>
     /// Drives the scan wizard last ran over, so it opens on the same choice next time.
     /// </summary>
     [XmlArray("ScanDrives"), XmlArrayItem("Drive")]
@@ -333,6 +372,38 @@ public class AppSettings
         !Directory.Exists(path.TrimEnd('\\', '/'));
 
     /// <summary>
+    /// What is wrong with a folder chosen as a consolidation target, or null when it is
+    /// fine. A drive that is not there cannot be created and is almost always a typo or an
+    /// unplugged disk; a folder on a drive that *is* there is simply made.
+    /// </summary>
+    public static string? ValidateConsolidationFolder(string folder, bool create = true)
+    {
+        var path = (folder ?? string.Empty).Trim();
+        if (path.Length == 0) return null;   // an empty row is not a mistake, it is unset
+
+        string root;
+        try { root = Path.GetPathRoot(Path.GetFullPath(path)) ?? string.Empty; }
+        catch (Exception ex) { return $"'{path}' is not a usable folder path: {ex.Message}"; }
+
+        if (root.Length == 0)
+            return $"'{path}' has no drive or share to sit on — give the full path.";
+        if (!Directory.Exists(root))
+            return $"Drive {root.TrimEnd('\\', '/')} is not there. Connect it, or correct the path.";
+
+        if (Directory.Exists(path) || !create) return null;
+
+        try
+        {
+            Directory.CreateDirectory(path);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return $"'{path}' could not be created: {ex.Message}";
+        }
+    }
+
+    /// <summary>
     /// Folders that are never worth cataloguing. Wildcard rules, so they cover every
     /// drive: <c>?:</c> is any drive letter.
     /// </summary>
@@ -433,14 +504,16 @@ public class AppSettings
     /// it is applied.
     /// </summary>
     /// <param name="ask">
-    /// Put the redundant rules to the user; true to prune. Only consulted under
-    /// <see cref="RedundantRuleAction.Ask"/>.
+    /// Put the redundant rules to the user and hand back the ones they chose to drop —
+    /// which may be all of them, some of them, or none. Only consulted under
+    /// <see cref="RedundantRuleAction.Ask"/>; removing some but not all is a perfectly
+    /// reasonable answer, so the choice is a list rather than a yes or no.
     /// </param>
     public static List<ExcludedFolder> PruneSuperseded(
         IList<ExcludedFolder> rules,
         ExcludedFolder candidate,
         RedundantRuleAction policy,
-        Func<IReadOnlyList<ExcludedFolder>, bool>? ask = null)
+        Func<IReadOnlyList<ExcludedFolder>, IReadOnlyList<ExcludedFolder>>? ask = null)
     {
         var none = new List<ExcludedFolder>();
         if (policy == RedundantRuleAction.Keep) return none;
@@ -450,10 +523,13 @@ public class AppSettings
             .ToList();
         if (superseded.Count == 0) return none;
 
-        if (policy == RedundantRuleAction.Ask && (ask == null || !ask(superseded))) return none;
+        // Asking is the default; the other policies decide without stopping.
+        var chosen = policy == RedundantRuleAction.Ask
+            ? ask?.Invoke(superseded)?.ToList() ?? none
+            : superseded;
 
-        foreach (var rule in superseded) rules.Remove(rule);
-        return superseded;
+        foreach (var rule in chosen) rules.Remove(rule);
+        return chosen;
     }
 
     /// <summary>
