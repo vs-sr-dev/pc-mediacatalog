@@ -18,8 +18,13 @@ public static class MediaClassifier
     //   "Season 1 Episode 01", "Series 1 Episode 1", "S1 Episode 1", "Season 2 Ep 3".
     // The word forms are matched at a word boundary so "Friends 1 e 2" cannot look like
     // season 1 episode 2 on the strength of a trailing "s".
+    //
+    // A trailing second episode is picked up too: a file holding a double episode writes it
+    // "S06E11E12" or "S01E01-E02", and calling that episode 11 alone loses half of what the
+    // name says — and makes it look like a duplicate of the real episode 11.
     private static readonly Regex SeasonEpisode = new(
-        @"\b(?:s|se|season|series)\s*\.?\s*(?<s>\d{1,3})\s*[._\-]?\s*(?:e|ep|eps|episode|episodes|pt|part)\s*\.?\s*(?<e>\d{1,3})\b",
+        @"\b(?:s|se|season|series)\s*\.?\s*(?<s>\d{1,3})\s*[._\-]?\s*(?:e|ep|eps|episode|episodes|pt|part)\s*\.?\s*(?<e>\d{1,3})" +
+        @"(?:\s*[._\-]?\s*(?:e|ep|episode)?\s*\.?\s*(?<e2>\d{1,3}))?\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // The same in words: "Season Three Episode One". Kept apart from the pattern above so
@@ -29,17 +34,24 @@ public static class MediaClassifier
         $@"(?:e|ep|eps|episode|episodes|part|pt)\s*[._\-]?\s*(?<e>{NumberWords.NumberPattern})\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // 1x02 / 01x02
+    // 1x02 / 01x02, and the double-episode forms 1x01x02 and 1x01-02.
     private static readonly Regex XFormat = new(
-        @"(?<![a-zA-Z0-9])(?<s>\d{1,2})x(?<e>\d{1,3})(?![a-zA-Z0-9])",
+        @"(?<![a-zA-Z0-9])(?<s>\d{1,2})x(?<e>\d{1,3})(?:\s*[-._]?\s*x?(?<e2>\d{1,3}))?(?![a-zA-Z0-9])",
         RegexOptions.Compiled);
 
-    // An episode marker with no season beside it: "E07", "Ep 7", "Episode 12". Only ever
-    // consulted when a "Season NN" folder has already supplied the season, which is what
-    // keeps "Part 2" in a film title from being read as an episode number.
+    // An episode marker with no season beside it: "E07", "Ep 7", "Episode 12", "E07E08".
+    // Only ever consulted when a "Season NN" folder has already supplied the season, which
+    // is what keeps "Part 2" in a film title from being read as an episode number.
     private static readonly Regex EpisodeOnly = new(
-        @"(?<![a-z0-9])(?:e|ep|episode|part|pt)\s*\.?\s*(?<e>\d{1,3})(?![0-9])",
+        @"(?<![a-z0-9])(?:e|ep|episode|part|pt)\s*\.?\s*(?<e>\d{1,3})(?:\s*[-._]?\s*(?:e|ep|episode)?\s*\.?\s*(?<e2>\d{1,3}))?(?![0-9])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The furthest apart two episode numbers in one file can plausibly be. A double —
+    /// occasionally a triple — episode is what this is for; "S01E01" followed by a number
+    /// forty higher is two unrelated numbers that happened to end up side by side.
+    /// </summary>
+    private const int MaxEpisodeRun = 8;
 
     // "Season 1", "Series 1", "Season Three" — a season with no episode beside it.
     private static readonly Regex SeasonWord = new(
@@ -89,6 +101,22 @@ public static class MediaClassifier
     /// </param>
     public static void Classify(MediaFile file, AppSettings? settings = null)
     {
+        // Numbering somebody typed in is not a guess to be made again. Everything below
+        // re-derives what the name says; this puts back what the user said, whatever that
+        // turns out to be — a rescan or a catalogue refresh must not undo a correction.
+        var typed = file.NumberingManuallySet
+            ? (file.Season, file.Episode, file.EpisodeEnd)
+            : ((int?, int?, int?)?)null;
+
+        Derive(file, settings);
+
+        if (typed is not { } numbering) return;
+        (file.Season, file.Episode, file.EpisodeEnd) = numbering;
+    }
+
+    /// <summary>Everything the file's name and folders imply, read from scratch.</summary>
+    private static void Derive(MediaFile file, AppSettings? settings)
+    {
         file.Kind = MediaExtensions.Classify(file.Extension);
 
         // Start from scratch: classifying an existing entry again (a catalogue refresh)
@@ -96,6 +124,7 @@ public static class MediaClassifier
         file.Year = null;
         file.Season = null;
         file.Episode = null;
+        file.EpisodeEnd = null;
 
         var capitalise = settings?.CapitaliseTitles ?? true;
         var name = Path.GetFileNameWithoutExtension(file.FileName);
@@ -122,6 +151,7 @@ public static class MediaClassifier
             {
                 file.Season = ParseNumber(se.Groups["s"].Value);
                 file.Episode = ParseNumber(se.Groups["e"].Value);
+                file.EpisodeEnd = ParseEpisodeEnd(se, file.Episode);
                 file.ParsedTitle = CleanTitle(name, se.Index, capitalise);
                 return;
             }
@@ -129,6 +159,7 @@ public static class MediaClassifier
             {
                 file.Season = ParseNumber(xf.Groups["s"].Value);
                 file.Episode = ParseNumber(xf.Groups["e"].Value);
+                file.EpisodeEnd = ParseEpisodeEnd(xf, file.Episode);
                 file.ParsedTitle = CleanTitle(name, xf.Index, capitalise);
                 return;
             }
@@ -153,9 +184,11 @@ public static class MediaClassifier
         var leadingEpisode = pathSeason is null
             ? null
             : PathMetadata.EpisodeFromLeadingNumber(name);
+        var marker = pathSeason is null ? null : EpisodeOnly.Match(name);
+        var markerEpisode = marker is { Success: true } ? ParseNumber(marker.Groups["e"].Value) : null;
         var pathEpisode = pathSeason is null
             ? null
-            : PathMetadata.EpisodeFromBareName(name) ?? leadingEpisode ?? EpisodeOnlyNumber(name);
+            : PathMetadata.EpisodeFromBareName(name) ?? leadingEpisode ?? markerEpisode;
 
         // Set when the numbering came from the folder rather than the name. A name that
         // opens with its episode number goes on to give the *episode's* title, not the
@@ -168,6 +201,7 @@ public static class MediaClassifier
             file.VideoCategory = VideoCategory.TvShow;
             file.Season = ParseNumber(se.Groups["s"].Value);
             file.Episode = ParseNumber(se.Groups["e"].Value);
+            file.EpisodeEnd = ParseEpisodeEnd(se, file.Episode);
             titleCut = se.Index;
         }
         else if (xf.Success)
@@ -175,6 +209,7 @@ public static class MediaClassifier
             file.VideoCategory = VideoCategory.TvShow;
             file.Season = ParseNumber(xf.Groups["s"].Value);
             file.Episode = ParseNumber(xf.Groups["e"].Value);
+            file.EpisodeEnd = ParseEpisodeEnd(xf, file.Episode);
             titleCut = xf.Index;
         }
         else if (pathSeason is { } folderSeason && pathEpisode is { } folderEpisode)
@@ -185,6 +220,10 @@ public static class MediaClassifier
             file.VideoCategory = VideoCategory.TvShow;
             file.Season = folderSeason;
             file.Episode = folderEpisode;
+            // Only the "E07E08" form carries a second episode; a bare or leading number
+            // says one episode and nothing more.
+            if (marker is { Success: true } && markerEpisode == folderEpisode)
+                file.EpisodeEnd = ParseEpisodeEnd(marker, folderEpisode);
             titleIsEpisodeName = leadingEpisode == folderEpisode;
         }
         else if (SeasonWord.Match(name) is { Success: true } sw)
@@ -253,11 +292,22 @@ public static class MediaClassifier
     private static int? ParseNumber(string s) => NumberWords.Parse(s);
 
     /// <summary>
-    /// The number in a lone episode marker — "E07", "Ep 7", "Episode 12" — or null.
-    /// Only meaningful once a season folder has supplied the season.
+    /// The second episode number of a double episode — the 12 in "S06E11E12" — or null when
+    /// the file holds one episode.
+    ///
+    /// It has to follow the first and stay close to it: a number that is smaller, equal, or
+    /// several episodes away is not the other half of a double, it is a number that happened
+    /// to be sitting next to an episode code.
     /// </summary>
-    private static int? EpisodeOnlyNumber(string name) =>
-        EpisodeOnly.Match(name) is { Success: true } m ? ParseNumber(m.Groups["e"].Value) : null;
+    private static int? ParseEpisodeEnd(Match match, int? first)
+    {
+        if (first is not { } start) return null;
+        var group = match.Groups["e2"];
+        if (!group.Success) return null;
+
+        var last = ParseNumber(group.Value);
+        return last is { } end && end > start && end - start <= MaxEpisodeRun ? end : null;
+    }
 
     /// <summary>
     /// Where the encoding/quality tokens sit in a name, as half-open character ranges.

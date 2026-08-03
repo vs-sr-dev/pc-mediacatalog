@@ -44,9 +44,11 @@ public static class CatalogRefresher
     /// 3 = compact 4-digit episode codes, season/title read from the folder path,
     /// 4 = seasons written in words, episode numbers leading a name, release years that
     ///     have not happened yet passed over, titles capitalised, season/episode numbers
-    ///     stripped off anything that is not a programme.
+    ///     stripped off anything that is not a programme,
+    /// 5 = double episodes — "S06E11E12", "S01E01-E02" — read as the two episodes they hold
+    ///     rather than as the first one alone.
     /// </summary>
-    public const int CurrentFeatureVersion = 4;
+    public const int CurrentFeatureVersion = 5;
 
     /// <summary>True when this entry predates the current feature set.</summary>
     public static bool NeedsRefresh(MediaFile file) =>

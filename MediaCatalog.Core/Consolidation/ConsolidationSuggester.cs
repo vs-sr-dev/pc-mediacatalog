@@ -63,7 +63,7 @@ public static class ConsolidationSuggester
                 if (destDir == null) continue;
 
                 var proposed = System.IO.Path.Combine(destDir,
-                    ConsolidationPlanner.PlanFileName(file, category));
+                    ConsolidationPlanner.PlanFileName(file, category, settings));
                 var s = new ConsolidationSuggestion
                 {
                     File = file,

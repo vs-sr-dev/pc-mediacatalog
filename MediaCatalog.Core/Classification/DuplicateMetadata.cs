@@ -28,7 +28,11 @@ public static class DuplicateMetadata
             var titleSource = copies.FirstOrDefault(f => f.TitleManuallySet)
                               ?? copies.FirstOrDefault(f => f.ImdbVerified)
                               ?? copies.FirstOrDefault(f => f.TmdbVerified);
-            var numbering = copies.FirstOrDefault(f => f is { Season: not null, Episode: not null });
+            // Numbering somebody typed in beats numbering read out of a file name, for the
+            // same reason a hand-typed title does.
+            var numbering =
+                copies.FirstOrDefault(f => f is { NumberingManuallySet: true, Season: not null, Episode: not null })
+                ?? copies.FirstOrDefault(f => f is { Season: not null, Episode: not null });
 
             foreach (var copy in copies)
             {
@@ -44,10 +48,14 @@ public static class DuplicateMetadata
                 }
 
                 if (numbering != null && !ReferenceEquals(copy, numbering) &&
-                    (copy.Season != numbering.Season || copy.Episode != numbering.Episode))
+                    !(copy.NumberingManuallySet && !numbering.NumberingManuallySet) &&
+                    (copy.Season != numbering.Season || copy.Episode != numbering.Episode ||
+                     copy.EpisodeEnd != numbering.EpisodeEnd))
                 {
                     copy.Season = numbering.Season;
                     copy.Episode = numbering.Episode;
+                    copy.EpisodeEnd = numbering.EpisodeEnd;
+                    copy.NumberingManuallySet = numbering.NumberingManuallySet;
                     changed++;
                 }
             }

@@ -37,8 +37,10 @@ public static class NamingScheme
 
         var stem = category switch
         {
-            Classification.CategoryResolver.TvShow when file is { Season: { } s, Episode: { } e }
-                => $"{title} - S{s:00}E{e:00}",
+            // "Show - S06E11-E12" for a double episode, so the name says both of the
+            // episodes the file actually holds.
+            Classification.CategoryResolver.TvShow when file is { Season: not null, Episode: not null }
+                => $"{title} - {file.NumberingDisplay}",
 
             Classification.CategoryResolver.Movie when file.Year is { } y
                 => $"{title} ({y})",

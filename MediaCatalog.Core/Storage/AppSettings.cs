@@ -32,6 +32,13 @@ public class CategoryConsolidation
 {
     public string Category { get; set; } = string.Empty;
     public string Folder { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The name pattern consolidated files of this category are filed under — see
+    /// <see cref="Consolidation.ConsolidationNaming"/>. Blank means the built-in naming,
+    /// which is what every existing catalogue has been using.
+    /// </summary>
+    public string NameTemplate { get; set; } = string.Empty;
 }
 
 /// <summary>Remembered width/visibility of a results-grid column.</summary>
@@ -80,6 +87,21 @@ public class AppSettings
     /// </summary>
     [XmlArray("WatchedDrives"), XmlArrayItem("Drive")]
     public List<string> WatchedDrives { get; set; } = new();
+
+    /// <summary>
+    /// Particular folders to watch, rather than whole drives. Watching E:\dump\ and
+    /// watching E:\ are very different propositions on a disk holding a hundred thousand
+    /// files, and one of them is usually what was meant.
+    /// </summary>
+    [XmlArray("WatchedFolders"), XmlArrayItem("Folder")]
+    public List<string> WatchedFolders { get; set; } = new();
+
+    /// <summary>
+    /// True when the user has named somewhere in particular to watch. Without one, watching
+    /// falls back on whatever was last scanned, which is what earlier versions did.
+    /// </summary>
+    [XmlIgnore]
+    public bool HasExplicitWatchTargets => WatchedDrives.Count > 0 || WatchedFolders.Count > 0;
 
     // --- Exclusions ---
     [XmlArray("IgnoredExtensions"), XmlArrayItem("Extension")]
@@ -321,6 +343,26 @@ public class AppSettings
         return null;
 
         static string? Blank(string s) => string.IsNullOrWhiteSpace(s) ? null : s;
+    }
+
+    /// <summary>
+    /// The file-name pattern for a category, or null when it has none and the built-in
+    /// naming applies. Extras follow the show or film they belong to, as their folder does.
+    /// </summary>
+    public string? NameTemplateFor(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return null;
+
+        var match = CategoryFolders.FirstOrDefault(c =>
+            string.Equals(c.Category, category, StringComparison.OrdinalIgnoreCase));
+        if (match != null && !string.IsNullOrWhiteSpace(match.NameTemplate)) return match.NameTemplate;
+
+        if (string.Equals(category, "TvExtra", StringComparison.OrdinalIgnoreCase))
+            return NameTemplateFor("TvShow");
+        if (string.Equals(category, "MovieExtra", StringComparison.OrdinalIgnoreCase))
+            return NameTemplateFor("Movie");
+
+        return null;
     }
 
     /// <summary>

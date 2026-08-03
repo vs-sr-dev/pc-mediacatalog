@@ -31,6 +31,23 @@ public class MediaFile
     public int? Season { get; set; }
     public int? Episode { get; set; }
 
+    /// <summary>
+    /// The last episode in a file that holds more than one — "S06E11E12" is episodes 11
+    /// *and* 12 of season 6, and "S01E01-E02" is episodes 1 and 2 of season 1. Null for the
+    /// usual single-episode file. <see cref="Episode"/> is always the first of the run, so
+    /// everything that reads one episode number keeps working.
+    /// </summary>
+    public int? EpisodeEnd { get; set; }
+
+    /// <summary>
+    /// True when the season/episode was typed in by hand rather than read out of the name.
+    ///
+    /// Numbering the user entered is never cleared. A film does not have a season and an
+    /// episode — but somebody typing one into a file filed as a film is telling us the file
+    /// was filed wrongly, not asking for their correction to be thrown away.
+    /// </summary>
+    public bool NumberingManuallySet { get; set; }
+
     // --- User overrides / enrichment (all optional; default empty for old catalogues) ---
     /// <summary>Explicit per-file category set by the user; overrides <see cref="VideoCategory"/>.</summary>
     public string CategoryOverride { get; set; } = string.Empty;
@@ -119,6 +136,33 @@ public class MediaFile
     [XmlIgnore]
     public string EffectiveTitle =>
         !string.IsNullOrWhiteSpace(TmdbName) ? TmdbName : ParsedTitle;
+
+    /// <summary>
+    /// The numbering as it reads: "S01E02", or "S06E11-E12" for a double episode. Blank
+    /// when the file has none.
+    /// </summary>
+    [XmlIgnore]
+    public string NumberingDisplay =>
+        this is { Season: { } s, Episode: { } e }
+            ? EpisodeEnd is { } last && last > e
+                ? $"S{s:00}E{e:00}-E{last:00}"
+                : $"S{s:00}E{e:00}"
+            : string.Empty;
+
+    /// <summary>
+    /// Every episode number this file holds — one for an ordinary episode, two or more for
+    /// a double. Empty when it has no numbering at all.
+    /// </summary>
+    [XmlIgnore]
+    public IReadOnlyList<int> Episodes
+    {
+        get
+        {
+            if (Episode is not { } first) return Array.Empty<int>();
+            var last = EpisodeEnd is { } end && end > first ? end : first;
+            return Enumerable.Range(first, last - first + 1).ToList();
+        }
+    }
 
     /// <summary>True for specials/featurettes attached to a film or show.</summary>
     [XmlIgnore]

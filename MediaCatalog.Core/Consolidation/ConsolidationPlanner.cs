@@ -119,29 +119,40 @@ public static class ConsolidationPlanner
     }
 
     /// <summary>
-    /// The file name to use at the destination. Episodes are prefixed with their episode
-    /// number ("01 - Name.mkv") so a season folder sorts into broadcast order; everything
-    /// else keeps its name. Re-consolidating an already-prefixed file is a no-op.
+    /// The file name to use at the destination.
+    ///
+    /// A name pattern set for the category decides it outright — see
+    /// <see cref="ConsolidationNaming"/>. Failing that, episodes are prefixed with their
+    /// episode number ("01 - Name.mkv", "11-12 - Name.mkv" for a double) so a season folder
+    /// sorts into broadcast order, and everything else keeps the name it has. Re-consolidating
+    /// an already-prefixed file is a no-op either way.
     /// </summary>
-    public static string PlanFileName(MediaFile file, string category)
+    public static string PlanFileName(MediaFile file, string category, AppSettings? settings = null)
     {
+        if (settings != null &&
+            ConsolidationNaming.Apply(file, settings.NameTemplateFor(category)) is { Length: > 0 } patterned)
+            return patterned;
+
         if (category != CategoryResolver.TvShow || file.Episode is not { } episode || episode < 0)
             return file.FileName;
         if (EpisodePrefix.IsMatch(file.FileName)) return file.FileName;
 
-        var number = episode < 100 ? episode.ToString("D2") : episode.ToString();
-        return $"{number} - {file.FileName}";
+        var prefix = Pad(episode);
+        if (file.EpisodeEnd is { } last && last > episode) prefix += "-" + Pad(last);
+        return $"{prefix} - {file.FileName}";
+
+        static string Pad(int n) => n < 100 ? n.ToString("D2") : n.ToString();
     }
 
     /// <summary>The full destination path (directory + planned file name), or null.</summary>
     public static string? PlanPath(MediaFile file, string category, AppSettings settings)
     {
         var dir = PlanDirectory(file, category, settings);
-        return dir == null ? null : Path.Combine(dir, PlanFileName(file, category));
+        return dir == null ? null : Path.Combine(dir, PlanFileName(file, category, settings));
     }
 
-    // "01 - Name.mkv" / "101 - Name.mkv": already numbered for sorting.
-    private static readonly Regex EpisodePrefix = new(@"^\d{2,3}\s*-\s+", RegexOptions.Compiled);
+    // "01 - Name.mkv" / "101 - Name.mkv" / "11-12 - Name.mkv": already numbered for sorting.
+    private static readonly Regex EpisodePrefix = new(@"^\d{2,3}(-\d{2,3})?\s*-\s+", RegexOptions.Compiled);
 
     /// <summary>The canonical show folder: &lt;TvDir&gt;\&lt;bucket&gt;\&lt;Show&gt;.</summary>
     public static string ShowFolder(string tvDir, string title) =>

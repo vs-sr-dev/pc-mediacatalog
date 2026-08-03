@@ -54,14 +54,41 @@ public class MediaIntegrityChecker
     }
 
     /// <summary>Full decode pass. Any decode error marks the file corrupt.</summary>
-    public async Task<IntegrityCheckResult> DeepDecodeAsync(string path, CancellationToken ct = default)
+    /// <param name="durationSeconds">
+    /// How long the file runs, when that is known. Without it there is nothing to measure
+    /// the decode's progress against and <paramref name="progress"/> is never called.
+    /// </param>
+    /// <param name="progress">
+    /// How far through the file the decode has reached, 0 to 1. A deep check of a
+    /// feature-length film takes minutes, and a progress bar that sits at nothing for all
+    /// of them is indistinguishable from one that has hung.
+    /// </param>
+    public async Task<IntegrityCheckResult> DeepDecodeAsync(
+        string path,
+        CancellationToken ct = default,
+        double durationSeconds = 0,
+        IProgress<double>? progress = null)
     {
         if (!_tools.HasFfmpeg)
             return new IntegrityCheckResult(IntegrityStatus.NotChecked, 0, "ffmpeg not available.");
 
-        // Decode everything, discard output; -xerror aborts on the first error.
-        var args = $"-v error -xerror -i \"{path}\" -f null -";
-        var result = await ProcessRunner.RunAsync(_tools.FfmpegPath!, args, ct, timeoutMs: 600_000);
+        // Decode everything, discard output; -xerror aborts on the first error. The decoded
+        // frames go to the platform's null device rather than to standard output, which is
+        // where ffmpeg is asked to write its progress instead.
+        var sink = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        var args = progress != null && durationSeconds > 0
+            ? $"-v error -xerror -progress pipe:1 -nostats -i \"{path}\" -f null {sink}"
+            : $"-v error -xerror -i \"{path}\" -f null {sink}";
+
+        var result = await ProcessRunner.RunAsync(
+            _tools.FfmpegPath!, args, ct, timeoutMs: 600_000,
+            onStdOutLine: progress == null || durationSeconds <= 0
+                ? null
+                : line =>
+                {
+                    if (ReadOutTime(line) is { } seconds)
+                        progress.Report(Math.Clamp(seconds / durationSeconds, 0, 1));
+                });
 
         if (result.TimedOut)
             return new IntegrityCheckResult(IntegrityStatus.NotChecked, 0, "Decode timed out.");
@@ -72,6 +99,26 @@ public class MediaIntegrityChecker
 
         return new IntegrityCheckResult(IntegrityStatus.Corrupt, 0,
             Firstline(errors) ?? "Decode reported errors.");
+    }
+
+    /// <summary>
+    /// How far into the file ffmpeg has decoded, from a line of its <c>-progress</c> output.
+    /// Null for the many lines that say something else.
+    ///
+    /// <c>out_time</c> is used rather than <c>out_time_ms</c>: the latter has been reported
+    /// in microseconds by every build since it was introduced, despite its name, and a
+    /// thousand-fold error in a progress bar is not a small one.
+    /// </summary>
+    private static double? ReadOutTime(string line)
+    {
+        const string key = "out_time=";
+        if (!line.StartsWith(key, StringComparison.Ordinal)) return null;
+
+        var value = line[key.Length..].Trim();
+        // "00:01:23.456789", or "N/A" before the first frame has come out.
+        return TimeSpan.TryParse(value, CultureInfo.InvariantCulture, out var elapsed)
+            ? elapsed.TotalSeconds
+            : null;
     }
 
     /// <summary>

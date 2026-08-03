@@ -47,9 +47,22 @@ public static class FileRelocator
         if (!File.Exists(file.FullPath))
             return new RelocationResult(false, "Source file no longer exists.", file.FullPath);
 
+        // Worth saying before a single byte is copied: an unplugged drive or a share that
+        // has gone is not a failure to report at the end of a long operation, it is a
+        // reason not to start one.
+        if (RelocationDiagnosis.RootProblem(destinationDir) is { } unreachable)
+            return new RelocationResult(false, $"Could not move '{file.FileName}' — {unreachable}",
+                file.FullPath);
+
         try
         {
-            Directory.CreateDirectory(destinationDir);
+            try { Directory.CreateDirectory(destinationDir); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new RelocationResult(false,
+                    $"Could not create '{destinationDir}' — " +
+                    RelocationDiagnosis.Explain(ex, file.FullPath, destinationDir), file.FullPath);
+            }
             var desired = Path.Combine(destinationDir,
                 string.IsNullOrWhiteSpace(newFileName) ? file.FileName : newFileName);
 
@@ -77,7 +90,15 @@ public static class FileRelocator
                 ? file.Sha256
                 : await FileHasher.ComputeSha256Async(file.FullPath, ct);
             if (string.IsNullOrEmpty(sourceHash))
-                return new RelocationResult(false, "Could not read source to hash it.", file.FullPath);
+            {
+                var holders = FileLocks.ProcessesUsing(file.FullPath);
+                return new RelocationResult(false,
+                    $"Could not read '{file.FileName}' to verify the copy against" +
+                    (holders.Count > 0
+                        ? $" — it is open in {string.Join(", ", holders)}."
+                        : " — it may be locked, or the drive may be failing."),
+                    file.FullPath);
+            }
 
             // Never make a second copy of something that is already in the library.
             if (File.Exists(desired) && !PathsEqual(desired, file.FullPath))
@@ -105,14 +126,35 @@ public static class FileRelocator
                 return new RelocationResult(true, "Moved on the same drive (no copy needed).", destPath);
             }
 
-            await CopyAsync(file.FullPath, destPath, copiedBytes, ct);
+            // A copy that will not fit is better refused now than half-written and rolled
+            // back, which costs the same time and leaves the drive full on the way.
+            if (RelocationDiagnosis.SpaceProblem(destPath, file.SizeBytes) is { } tooBig)
+                return new RelocationResult(false,
+                    $"Could not copy '{file.FileName}' — {tooBig}", file.FullPath);
+
+            try
+            {
+                await CopyAsync(file.FullPath, destPath, copiedBytes, ct);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // A part-written copy is worse than none: it looks like the file it is not.
+                FileDeleter.TryDeleteQuietly(destPath);
+                return new RelocationResult(false,
+                    $"Could not copy '{file.FileName}' to {destinationDir} — " +
+                    RelocationDiagnosis.Explain(ex, file.FullPath, destPath), file.FullPath);
+            }
 
             var copyHash = await FileHasher.ComputeSha256Async(destPath, ct);
             if (!string.Equals(copyHash, sourceHash, StringComparison.OrdinalIgnoreCase))
             {
                 FileDeleter.TryDeleteQuietly(destPath); // roll back the bad copy
                 return new RelocationResult(false,
-                    "Verification failed: copy did not match source. Original kept.", file.FullPath);
+                    $"The copy of '{file.FileName}' did not match the original, so it was " +
+                    "removed and the original left where it is. This usually means failing " +
+                    "storage at one end or the other, or the file being written to while it " +
+                    "was copied.", file.FullPath);
             }
 
             if (deleteOriginal)
@@ -138,9 +180,12 @@ public static class FileRelocator
         {
             throw;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                                       PathTooLongException or NotSupportedException)
         {
-            return new RelocationResult(false, $"Relocation failed: {ex.Message}", file.FullPath);
+            return new RelocationResult(false,
+                $"Could not move '{file.FileName}' to {destinationDir} — " +
+                RelocationDiagnosis.Explain(ex, file.FullPath, destinationDir), file.FullPath);
         }
     }
 

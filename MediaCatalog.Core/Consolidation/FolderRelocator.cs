@@ -106,10 +106,10 @@ public static class FolderRelocator
         // per-file path where each collision can be put to the user.
         if (Directory.Exists(destination) || File.Exists(destination)) return null;
 
-        // The files under it must be a folder's worth of files, not a folder that also
-        // holds a hundred other things: subfolders are carried along by the move, and only
-        // a folder whose contents are all accounted for can safely be taken as a unit.
-        return HasUncataloguedSubfolders(folder) ? null : destination;
+        // Subfolders travel with the move, so everything under them has to want to travel
+        // too. A film folder with its \Extras\ beside it does; somebody's whole library,
+        // which happens to have one misfiled film in it, very much does not.
+        return SubtreeAgrees(folder, destination, catalogue, settings, categoryOf) ? destination : null;
     }
 
     /// <summary>
@@ -148,13 +148,42 @@ public static class FolderRelocator
     }
 
     /// <summary>
-    /// True when the folder holds subfolders. Those travel with a move, which is right for
-    /// a show's season folders but wrong if the folder turns out to be somebody's whole
-    /// library; the conservative reading is to leave it to the per-file path.
+    /// True when every catalogued file below <paramref name="folder"/> — not just the ones
+    /// sitting directly in it — would end up exactly where the move puts it.
+    ///
+    /// This is what makes renaming a misnamed folder safe. Moving the folder carries its
+    /// whole subtree along at the same relative position, so the question is whether each
+    /// file's own planned home is that same position under the new name. For a film folder
+    /// with an \Extras\ inside it, it is: the extras follow their film. For a folder that
+    /// turns out to be somebody's whole library, it is not, and the files are relocated one
+    /// at a time in the ordinary way instead.
+    ///
+    /// A subfolder that holds no catalogued files at all — artwork, subtitles — is no
+    /// obstacle: nothing in the catalogue says it belongs anywhere else.
     /// </summary>
-    private static bool HasUncataloguedSubfolders(string folder)
+    private static bool SubtreeAgrees(
+        string folder,
+        string destination,
+        IReadOnlyList<MediaFile> catalogue,
+        AppSettings settings,
+        Func<MediaFile, string> categoryOf)
     {
-        try { return Directory.EnumerateDirectories(folder).Any(); }
-        catch { return true; }
+        var prefix = folder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+
+        foreach (var file in catalogue)
+        {
+            if (!file.FullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var relative = Path.GetDirectoryName(file.FullPath[prefix.Length..]) ?? string.Empty;
+            if (relative.Length == 0) continue;   // directly in the folder, already checked
+
+            var planned = ConsolidationPlanner.PlanDirectory(file, categoryOf(file), settings);
+            if (planned == null) return false;    // nothing to say about it, so nothing to risk
+
+            if (!ConsolidationPlanner.PathsEqual(planned, Path.Combine(destination, relative)))
+                return false;
+        }
+
+        return true;
     }
 }

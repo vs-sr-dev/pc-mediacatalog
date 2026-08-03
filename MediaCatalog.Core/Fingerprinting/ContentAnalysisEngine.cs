@@ -6,8 +6,14 @@ namespace MediaCatalog.Core.Fingerprinting;
 
 /// <param name="BytesDone">Bytes of media already processed — a far better basis for an
 /// ETA than the file count, since decode time tracks size rather than number of files.</param>
+/// <param name="FileFraction">
+/// How far through the current file the work has reached, 0 to 1. A deep check of one
+/// feature-length film is minutes of work on a single item, so "3 of 5" on its own says
+/// almost nothing about how long is left.
+/// </param>
 public record AnalysisProgress(
-    int Done, int Total, string CurrentFile, long BytesDone = 0, long BytesTotal = 0);
+    int Done, int Total, string CurrentFile, long BytesDone = 0, long BytesTotal = 0,
+    double FileFraction = 0);
 
 /// <summary>
 /// Batch content analysis backed by the external tools: probe duration/integrity,
@@ -44,6 +50,7 @@ public class ContentAnalysisEngine
         {
             ct.ThrowIfCancellationRequested();
             var file = files[i];
+            var fileStartBytes = doneBytes;
             progress?.Report(new AnalysisProgress(i, total, file.FileName, doneBytes, totalBytes));
             doneBytes += file.SizeBytes;
 
@@ -73,10 +80,21 @@ public class ContentAnalysisEngine
                 }
             }
 
-            // 3. Optional deep decode (authoritative but slow).
+            // 3. Optional deep decode (authoritative but slow). Slow enough that how far
+            //    through *this file* it has got is worth reporting on its own.
             if (deepCheck && _tools.HasFfmpeg)
             {
-                var deep = await _integrity.DeepDecodeAsync(file.FullPath, ct);
+                var index = i;
+                var name = file.FileName;
+                var size = file.SizeBytes;
+                var within = progress == null
+                    ? null
+                    : new Progress<double>(fraction => progress.Report(new AnalysisProgress(
+                        index, total, name,
+                        fileStartBytes + (long)(size * fraction), totalBytes, fraction)));
+
+                var deep = await _integrity.DeepDecodeAsync(
+                    file.FullPath, ct, file.DurationSeconds, within);
                 if (deep.Status != IntegrityStatus.NotChecked) file.Integrity = deep.Status;
             }
         }

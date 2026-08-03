@@ -8,12 +8,18 @@ public record ProcessResult(int ExitCode, string StdOut, string StdErr, bool Tim
 /// <summary>Runs an external console tool and captures its output, with a timeout.</summary>
 public static class ProcessRunner
 {
+    /// <param name="onStdOutLine">
+    /// Called for each line the tool writes to standard output as it writes it, so a long
+    /// job can say how far along it is instead of going quiet for ten minutes. Fires on a
+    /// background thread.
+    /// </param>
     public static async Task<ProcessResult> RunAsync(
         string exePath,
         string arguments,
         CancellationToken ct = default,
         int timeoutMs = 120_000,
-        byte[]? captureStdoutBinary = null)
+        byte[]? captureStdoutBinary = null,
+        Action<string>? onStdOutLine = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -29,7 +35,14 @@ public static class ProcessRunner
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
 
-        process.OutputDataReceived += (_, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+            stdout.AppendLine(e.Data);
+            if (onStdOutLine == null) return;
+            try { onStdOutLine(e.Data); }
+            catch { /* a progress report must never take the job down with it */ }
+        };
         process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
 
         process.Start();

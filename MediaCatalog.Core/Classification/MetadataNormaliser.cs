@@ -15,15 +15,23 @@ public static class MetadataNormaliser
     /// numbered 104 — and the number is simply wrong. So the moment a file is categorised
     /// as anything but a programme or a programme's extra, the numbering goes.
     ///
+    /// Numbering the user typed in by hand is the one exception, and is left exactly as it
+    /// was entered. A film has no season and no episode — so somebody typing one in is
+    /// telling us the file was filed as a film wrongly, which is a correction to act on
+    /// rather than one to throw away. The category is what wants putting right there, and
+    /// the editor offers to do exactly that.
+    ///
     /// Returns true when something was cleared, so the caller can persist and say so.
     /// </summary>
     public static bool StripNonTvNumbering(MediaFile file, string category)
     {
         if (KeepsNumbering(category)) return false;
-        if (file.Season is null && file.Episode is null) return false;
+        if (file.NumberingManuallySet) return false;
+        if (file.Season is null && file.Episode is null && file.EpisodeEnd is null) return false;
 
         file.Season = null;
         file.Episode = null;
+        file.EpisodeEnd = null;
         return true;
     }
 
