@@ -30,10 +30,8 @@ public class FileRow : ObservableObject
 
     public string Year => Model.Year?.ToString() ?? "";
 
-    public string SeasonEpisode =>
-        Model is { Season: { } s, Episode: { } e }
-            ? $"S{s:00}E{e:00}"
-            : "";
+    /// <summary>"S01E02", or "S06E11-E12" when the file holds a double episode.</summary>
+    public string SeasonEpisode => Model.NumberingDisplay;
 
     public string SizeDisplay => Format.Bytes(Model.SizeBytes);
 

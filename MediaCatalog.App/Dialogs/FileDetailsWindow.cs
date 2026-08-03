@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Controls;
 using MediaCatalog.App.Infrastructure;
 using MediaCatalog.App.ViewModels;
+using MediaCatalog.Core.Classification;
 using MediaCatalog.Core.Models;
 
 namespace MediaCatalog.App;
@@ -27,6 +28,7 @@ public class FileDetailsWindow : Window
     private readonly TextBox _year = new() { Width = 80 };
     private readonly TextBox _season = new() { Width = 80 };
     private readonly TextBox _episode = new() { Width = 80 };
+    private readonly TextBox _episodeEnd = new() { Width = 80 };
     private readonly ComboBox _category = new() { IsEditable = true, Width = 200 };
     private readonly TextBox _date = new() { Width = 190 };
     private readonly ComboBox _integrity = new() { Width = 200 };
@@ -48,6 +50,7 @@ public class FileDetailsWindow : Window
         _year.Text = file.Year?.ToString() ?? "";
         _season.Text = file.Season?.ToString() ?? "";
         _episode.Text = file.Episode?.ToString() ?? "";
+        _episodeEnd.Text = file.EpisodeEnd?.ToString() ?? "";
         _category.ItemsSource = categories;
         _category.Text = effectiveCategory;
         _date.Text = file.LastModifiedUtc == default
@@ -75,6 +78,10 @@ public class FileDetailsWindow : Window
         panel.Children.Add(Labeled("Year:", _year));
         panel.Children.Add(Labeled("Season:", _season));
         panel.Children.Add(Labeled("Episode:", _episode));
+        panel.Children.Add(Labeled("…to episode:", _episodeEnd));
+        panel.Children.Add(Hint("Only for a double episode — \"S06E11E12\" is episodes 11 and 12, so " +
+                                "its episode is 11 and its \"to episode\" is 12. Leave it empty for an " +
+                                "ordinary single episode."));
         panel.Children.Add(Labeled("Category:", _category));
         panel.Children.Add(Hint(identicalCopies > 0
             ? $"These are written to this file and to its {identicalCopies} identical copy(ies): " +
@@ -119,6 +126,20 @@ public class FileDetailsWindow : Window
         if (!TryNumber(_year.Text, "year", 1800, 2999, out var year)) return;
         if (!TryNumber(_season.Text, "season", 0, 999, out var season)) return;
         if (!TryNumber(_episode.Text, "episode", 0, 9999, out var episode)) return;
+        if (!TryNumber(_episodeEnd.Text, "last episode", 0, 9999, out var episodeEnd)) return;
+
+        if (episodeEnd is { } last && (episode is not { } first || last <= first))
+        {
+            MessageBox.Show(this,
+                "The \"to episode\" is the last episode of a double, so it has to come after the " +
+                "episode itself — 11 to 12, not the other way round. Leave it empty unless the " +
+                "file really does hold more than one episode.",
+                "Edit details", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var category = _category.Text.Trim();
+        if (!ConfirmNumberingCategory(season, episode, ref category)) return;
 
         var modified = _file.LastModifiedUtc;
         var typed = _date.Text.Trim();
@@ -152,12 +173,43 @@ public class FileDetailsWindow : Window
             year,
             season,
             episode,
-            _category.Text.Trim(),
+            episodeEnd,
+            category,
             modified,
             (IntegrityStatus)(_integrity.SelectedItem ?? IntegrityStatus.NotChecked),
             (MediaKind)(_kind.SelectedItem ?? MediaKind.Unknown),
             name);
         DialogResult = true;
+    }
+
+    /// <summary>
+    /// A season and an episode are things only a programme has. Somebody typing one onto a
+    /// file filed as a film is not asking for it to be thrown away — they are telling us
+    /// the file was identified wrongly, and the category is what wants correcting. So the
+    /// numbering is kept either way, and changing the category is offered rather than done.
+    /// </summary>
+    private bool ConfirmNumberingCategory(int? season, int? episode, ref string category)
+    {
+        if (season is null && episode is null) return true;
+        if (category is CategoryResolver.TvShow or CategoryResolver.TvExtra) return true;
+
+        var answer = MessageBox.Show(this,
+            $"A season and episode number belong to a programme, and this file is filed as " +
+            $"'{(category.Length == 0 ? "nothing in particular" : category)}'.\n\n" +
+            "Yes — change the category to TvShow as well, which is almost certainly what the " +
+            "numbering means.\n" +
+            "No — keep the numbering and leave the category alone.\n" +
+            "Cancel — go back to the editor.",
+            "Season and episode", MessageBoxButton.YesNoCancel, MessageBoxImage.Question,
+            MessageBoxResult.Yes);
+
+        if (answer == MessageBoxResult.Cancel) return false;
+        if (answer == MessageBoxResult.Yes)
+        {
+            category = CategoryResolver.TvShow;
+            _category.Text = category;
+        }
+        return true;
     }
 
     private bool TryNumber(string text, string what, int min, int max, out int? value)

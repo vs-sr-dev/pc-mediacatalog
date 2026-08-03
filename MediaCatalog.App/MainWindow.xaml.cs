@@ -7,6 +7,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using MediaCatalog.App.Infrastructure;
 using MediaCatalog.App.ViewModels;
+using MediaCatalog.Core.Consolidation;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Relocation;
 using MediaCatalog.Core.Storage;
@@ -46,6 +47,7 @@ public partial class MainWindow : Window
         _vm.ScanRequested = () => _ = RunScanWizardAsync();
         _vm.ResumeRequested = () => _ = ResumeScanAsync();
         _vm.CollisionResolver = ResolveCollisionAsync;
+        _vm.EpisodeConflictResolver = ResolveEpisodeConflictAsync;
         _vm.ConfirmRedundantExclusions = AskAboutRedundantExclusions;
         UpdateUndoButton();
 
@@ -111,11 +113,12 @@ public partial class MainWindow : Window
 
         if (!_exiting && _vm.Settings.WatchForNewFiles)
         {
-            // Still needed in the background: hide rather than quit.
+            // Still needed in the background: hide rather than quit. Said nothing about —
+            // the tray icon is there to be seen, and a notification every time the window
+            // is closed is a notification about something the user just did on purpose.
             e.Cancel = true;
             Hide();
             ShowInTaskbar = false;
-            _tray.Notify("Media Catalog", "Still watching for new files. Right-click the tray icon to quit.");
             return;
         }
 
@@ -364,6 +367,20 @@ public partial class MainWindow : Window
         return Task.FromResult(dlg.Resolution);
     }
 
+    /// <summary>
+    /// The episode being consolidated is already in the library under another name. Both
+    /// are put in front of the user with everything that decides between them, since only
+    /// one of them can stay: a consolidation location that holds the same episode twice is
+    /// not doing the one job it exists to do.
+    /// </summary>
+    private Task<CollisionResolution> ResolveEpisodeConflictAsync(EpisodeConflict conflict)
+    {
+        var dlg = new EpisodeConflictWindow(
+            conflict, _vm.CanDoVideo ? file => _vm.DeepCheckOneAsync(file) : null) { Owner = this };
+        dlg.ShowDialog();
+        return Task.FromResult(dlg.Resolution);
+    }
+
     private async void OnRefreshCatalogClick(object sender, RoutedEventArgs e)
     {
         var stale = _vm.StaleEntryCount;
@@ -490,6 +507,26 @@ public partial class MainWindow : Window
 
     private void OnAddFilter(object sender, RoutedEventArgs e) => _vm.AddCurrentFilter();
 
+    /// <summary>
+    /// Enter in the filter box stacks the filter, which is what pressing Enter in a box
+    /// beside an Add button has always meant. The binding is on a delay, so what has just
+    /// been typed is pushed through first — otherwise Enter would commit the pattern as it
+    /// stood a fifth of a second ago.
+    /// </summary>
+    private void OnFilterValueKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+
+        // The drop-down is open: Enter is choosing an item from it, not committing.
+        if (sender is ComboBox { IsDropDownOpen: true }) return;
+
+        if (sender is ComboBox box)
+            box.GetBindingExpression(ComboBox.TextProperty)?.UpdateSource();
+
+        _vm.AddCurrentFilter();
+        e.Handled = true;
+    }
+
     private void OnRemoveFilter(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: FilterClause clause })
@@ -517,12 +554,14 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog() != true) return;
         var chosen = dlg.Selected;
         if (chosen.Count == 0) return;
-        var deleteOriginal = MessageBox.Show(this,
+        var confirm = MessageBox.Show(this,
             $"Move {chosen.Count} file(s) to their consolidation folders?\n\n" +
-            "Yes = move (copy, verify, delete original). No = copy only.",
-            "Consolidate", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-        if (deleteOriginal == MessageBoxResult.Cancel) return;
-        var outcome = await _vm.ApplyConsolidationAsync(chosen, deleteOriginal == MessageBoxResult.Yes);
+            "Files are renamed or moved where that will do; anything genuinely copied is " +
+            "verified against the original first, and the original is then permanently " +
+            "deleted, leaving one copy in the library.",
+            "Consolidate", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.OK) return;
+        var outcome = await _vm.ApplyConsolidationAsync(chosen, deleteOriginal: true);
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
         await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
@@ -713,21 +752,23 @@ public partial class MainWindow : Window
         }
         if (!await EnsureTitlesAsync(rows.Select(r => r.Model).ToList())) return;
 
-        var deleteOriginal = DeleteOriginalCheck.IsChecked == true;
-        var verb = deleteOriginal ? "MOVE (copy, verify, delete original)" : "COPY (verify)";
         var extras = _vm.LinkedExtras(rows.Select(r => r.Model)).Count;
         var confirm = MessageBox.Show(this,
-            $"{verb} {rows.Count} file(s) into the structured library folders?\n\n" +
+            $"MOVE {rows.Count} file(s) into the structured library folders?\n\n" +
             "TV → <TvDir>\\<A-Z or #>\\<Show>\\Season NN\\NN - name.ext\n" +
             "Films → <FilmDir>\\<A-Z or #>\\<Title (Year)>\\\n" +
             "Specials/featurettes → the same folder, under \\Extras\\\n\n" +
-            (extras > 0 ? $"{extras} linked extra(s) will travel with the selection.\n" : "") +
-            "Files without a category or a configured target are skipped, and files already " +
-            "in the library are reported rather than copied again.",
+            (extras > 0 ? $"{extras} linked extra(s) will travel with the selection.\n\n" : "") +
+            "A file already on the destination's drive is moved without being copied, and a " +
+            "whole folder in the wrong place is renamed rather than emptied out. Anything " +
+            "that does have to be copied is verified against the original, and only then is " +
+            "the original permanently deleted — consolidating leaves one copy, in the library.\n\n" +
+            "Files without a category or a configured target are skipped, and an episode " +
+            "already in the library is never filed a second time.",
             "Consolidate", MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (confirm != MessageBoxResult.OK) return;
 
-        var outcome = await _vm.ConsolidateAsync(rows, deleteOriginal);
+        var outcome = await _vm.ConsolidateAsync(rows, deleteOriginal: true);
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
         await HandleAlreadyConsolidatedAsync(outcome.Consolidated);

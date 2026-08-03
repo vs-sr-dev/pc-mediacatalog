@@ -73,6 +73,13 @@ public record ScanPlan(
     ScanStartMode StartMode,
     bool WaitForMissingDrives)
 {
+    /// <summary>
+    /// Every folder the wizard listed, ticked or not. This replaces the remembered list
+    /// outright, so a folder removed there is genuinely gone rather than quietly kept
+    /// because it happened not to be ticked when the scan started.
+    /// </summary>
+    public IReadOnlyList<string> AllFolders { get; init; } = Array.Empty<string>();
+
     /// <summary>Smallest file worth cataloguing, in bytes. 0 = no lower limit.</summary>
     public long MinSizeBytes { get; init; }
 
@@ -170,6 +177,7 @@ public class MainViewModel : ObservableObject
         CancelCommand = new RelayCommand(() => { _isPausing = false; _cts?.Cancel(); }, () => IsScanning);
 
         RestoreFilters();
+        RefreshFilterValues();
 
         CanResume = _session.IsResumable;
         if (CanResume)
@@ -314,12 +322,74 @@ public class MainViewModel : ObservableObject
 
     public Array Columns => FilterColumns;
 
+    /// <summary>
+    /// What the user picks to mean "this column is empty here". Some of the most useful
+    /// filters in the grid are about a blank cell — every file that is *not* a duplicate,
+    /// every title nothing has confirmed — and an empty filter box cannot say that, because
+    /// an empty box is how you say "no filter at all".
+    /// </summary>
+    public const string BlankFilterToken = "(blank)";
+
+    /// <summary>
+    /// The values a column can actually hold, for the columns that hold a fixed few. Typing
+    /// "~dup" or "TvExtra" correctly from memory is not a reasonable thing to ask of anyone,
+    /// so those columns offer their values instead. Columns with open-ended contents — a
+    /// name, a path, a title — come back empty and are typed into as before.
+    /// </summary>
+    public IReadOnlyList<string> ValuesFor(string column) => column switch
+    {
+        "Dup" => new[] { BlankFilterToken, "DUP", "~dup", "title" },
+        "Kind" => Enum.GetNames<MediaKind>(),
+        "Filed" => new[] { "yes", "no" },
+        "Integrity" => Enum.GetNames<IntegrityStatus>(),
+        "TMDb" => new[] { BlankFilterToken, "✓", "✎" },
+        "Category" => Categories.ToArray(),
+        _ => Array.Empty<string>()
+    };
+
+    /// <summary>The values offered for the column the filter box is pointed at.</summary>
+    public ObservableCollection<string> FilterValues { get; } = new();
+
+    /// <summary>True when this column offers a list to pick from rather than free text.</summary>
+    public bool FilterHasFixedValues => FilterValues.Count > 0;
+
+    private void RefreshFilterValues()
+    {
+        var values = ValuesFor(_filterColumn);
+        if (FilterValues.SequenceEqual(values, StringComparer.Ordinal)) return;
+
+        // Emptying the list drops the combo box's selection, and an editable combo box
+        // clears its text along with it — so what was typed is put back afterwards rather
+        // than lost to a rebuild that had nothing to do with it.
+        var wanted = _filterPattern;
+
+        FilterValues.Clear();
+        foreach (var value in values) FilterValues.Add(value);
+        OnPropertyChanged(nameof(FilterHasFixedValues));
+
+        // A pattern left over from the last column is nearly always meaningless against
+        // this one — "Blade Runner" is not a value the Kind column has ever held.
+        var keep = values.Count > 0 && !values.Contains(wanted, StringComparer.OrdinalIgnoreCase)
+            ? ""
+            : wanted;
+
+        // Announced whether or not it changed here, since the combo box may have cleared
+        // its own text on the rebuild above and needs telling what the value really is.
+        _filterPattern = keep;
+        OnPropertyChanged(nameof(FilterPattern));
+    }
+
     private bool _filterNegate;
 
     public string FilterColumn
     {
         get => _filterColumn;
-        set { if (SetProperty(ref _filterColumn, value)) ApplyFilter(); }
+        set
+        {
+            if (!SetProperty(ref _filterColumn, value)) return;
+            RefreshFilterValues();
+            ApplyFilter();
+        }
     }
 
     public string FilterPattern
@@ -442,11 +512,21 @@ public class MainViewModel : ObservableObject
     /// trailing file name flicker the whole line about — the counter never lands in the
     /// same place twice — so the name can be moved to the front, where it pushes nothing
     /// around, or dropped entirely.
+    ///
+    /// Every operation that works through files a file at a time comes through here —
+    /// scanning, verifying, hashing, moving, analysing — so the setting means the same
+    /// thing wherever the user sees a file name go past.
     /// </summary>
-    private string ProgressLine(string phase, int done, int total, string currentFile)
+    /// <param name="extra">
+    /// Anything worth adding after the counter, such as how far through the current file a
+    /// slow job has reached. Always sits with the counter rather than with the name, so it
+    /// does not move about as names change length.
+    /// </param>
+    private string ProgressLine(
+        string phase, int done, int total, string currentFile, string extra = "")
     {
-        if (total <= 0) return phase;
-        var counted = $"{phase}: {done}/{total}";
+        var counted = total > 0 ? $"{phase}: {done}/{total}" : phase;
+        if (extra.Length > 0) counted += " " + extra;
         if (string.IsNullOrEmpty(currentFile)) return counted;
 
         return _settings.ProgressNamePosition switch
@@ -459,7 +539,10 @@ public class MainViewModel : ObservableObject
 
     private static bool Matches(FileRow row, FilterClause clause)
     {
-        var m = WildcardMatcher.IsMatch(row.ColumnValue(clause.Column), clause.Pattern);
+        var value = row.ColumnValue(clause.Column);
+        var m = string.Equals(clause.Pattern, BlankFilterToken, StringComparison.OrdinalIgnoreCase)
+            ? string.IsNullOrWhiteSpace(value)
+            : WildcardMatcher.IsMatch(value, clause.Pattern);
         return clause.Negate ? !m : m;
     }
 
@@ -535,9 +618,14 @@ public class MainViewModel : ObservableObject
         _settings.ScanMediaFilter = plan.MediaFilter;
         _settings.MinFileSizeBytes = plan.MinSizeBytes;
         _settings.MaxFileSizeBytes = plan.MaxSizeBytes;
-        foreach (var folder in plan.Folders.Where(f =>
-                     !_settings.AdditionalScanFolders.Contains(f, StringComparer.OrdinalIgnoreCase)))
-            _settings.AdditionalScanFolders.Add(folder);
+
+        // The wizard's list replaces the remembered one rather than being merged into it:
+        // a merge can only ever add, which is why a folder removed there used to come back.
+        _settings.AdditionalScanFolders = plan.AllFolders
+            .Concat(plan.Folders)
+            .Where(f => !string.IsNullOrWhiteSpace(f))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
         _settings.Save(_settingsPath);
         OnPropertyChanged(nameof(ScanFilter));
 
@@ -831,7 +919,8 @@ public class MainViewModel : ObservableObject
         // Files that say they are the same thing without being the same bytes: the same
         // film downloaded twice from two different releases. Invisible to a hash, so they
         // are found by what the files claim about themselves instead.
-        _titleDuplicates = TitleDuplicateFinder.Find(_catalog.Files);
+        _titleDuplicates = TitleDuplicateFinder.Find(
+            _catalog.Files, f => CategoryResolver.Effective(f, _settings));
         foreach (var g in _titleDuplicates)
             foreach (var f in g.Files)
                 if (rowByPath.TryGetValue(f.FullPath, out var row)) row.IsTitleDuplicate = true;
@@ -1006,7 +1095,7 @@ public class MainViewModel : ObservableObject
             {
                 _cts.Token.ThrowIfCancellationRequested();
                 var file = targets[i];
-                StatusText = $"Verifying {i + 1}/{targets.Count}: {file.FileName}";
+                StatusText = ProgressLine("Verifying", i + 1, targets.Count, file.FileName);
                 ProgressValue = i;
                 UpdateEta(i, targets.Count);
 
@@ -1080,7 +1169,9 @@ public class MainViewModel : ObservableObject
                 ProgressValue = p.Done;
                 UpdateEta(p.Done, p.Total);
             }
-            StatusText = $"{(deepCheck ? "Deep checking" : "Analysing")} {p.Done}/{p.Total} — {p.CurrentFile}";
+            StatusText = ProgressLine(
+                deepCheck ? "Deep checking" : "Analysing", p.Done + 1, p.Total, p.CurrentFile,
+                p.FileFraction > 0 ? $"({p.FileFraction:P0} of this file)" : "");
         });
 
         try
@@ -1176,7 +1267,8 @@ public class MainViewModel : ObservableObject
 
         // The numbering is snapshotted along with the category: calling a file a film takes
         // its season and episode off it, and undoing the one has to undo the other.
-        var before = affected.Select(f => (File: f, f.CategoryOverride, f.Season, f.Episode)).ToList();
+        var before = affected
+            .Select(f => (File: f, f.CategoryOverride, f.Season, f.Episode, f.EpisodeEnd)).ToList();
         Undo.Push($"category '{category}' on {affected.Count} file(s)", () =>
         {
             foreach (var b in before)
@@ -1184,6 +1276,7 @@ public class MainViewModel : ObservableObject
                 b.File.CategoryOverride = b.CategoryOverride;
                 b.File.Season = b.Season;
                 b.File.Episode = b.Episode;
+                b.File.EpisodeEnd = b.EpisodeEnd;
             }
             ExtraLinker.Link(_catalog.Files);
             PersistAndRefresh();
@@ -1328,11 +1421,16 @@ public class MainViewModel : ObservableObject
     /// The file's own facts — its name, its date on disk, what a decode made of it — belong
     /// to that one file; what the content *is* belongs to every byte-identical copy of it.
     /// </summary>
+    /// <param name="EpisodeEnd">
+    /// The last episode of a double episode, when the file holds more than one. Null for
+    /// the ordinary single-episode case.
+    /// </param>
     public record FileEdits(
         string Title,
         int? Year,
         int? Season,
         int? Episode,
+        int? EpisodeEnd,
         string Category,
         DateTime ModifiedUtc,
         IntegrityStatus Integrity,
@@ -1350,7 +1448,8 @@ public class MainViewModel : ObservableObject
         copies.AddRange(CopiesOf(file));
 
         var before = copies.Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified,
-            f.TitleManuallySet, f.Year, f.Season, f.Episode, f.CategoryOverride)).ToList();
+            f.TitleManuallySet, f.Year, f.Season, f.Episode, f.EpisodeEnd,
+            f.NumberingManuallySet, f.CategoryOverride)).ToList();
         var previousModified = file.LastModifiedUtc;
         var previousIntegrity = file.Integrity;
         var previousKind = file.Kind;
@@ -1364,6 +1463,11 @@ public class MainViewModel : ObservableObject
                            !string.Equals(title, previousTitle, StringComparison.Ordinal);
         var category = (edits.Category ?? string.Empty).Trim();
 
+        // Numbering the user typed is theirs and stays: the editor asks about the category
+        // when it does not fit, rather than quietly throwing the correction away.
+        var numberingTyped = edits.Season != file.Season || edits.Episode != file.Episode ||
+                             edits.EpisodeEnd != file.EpisodeEnd;
+
         foreach (var copy in copies)
         {
             // Exactly what the old Edit title dialog did to a title, so the two agree now
@@ -1375,13 +1479,19 @@ public class MainViewModel : ObservableObject
             copy.Year = edits.Year;
             copy.Season = edits.Season;
             copy.Episode = edits.Episode;
+            copy.EpisodeEnd = edits.EpisodeEnd;
+            if (numberingTyped)
+                copy.NumberingManuallySet = edits.Season is not null || edits.Episode is not null;
             copy.CategoryOverride = category;
         }
         if (titleChanged) changes.Add($"title '{title}'");
+        if (numberingTyped && file.NumberingDisplay is { Length: > 0 } typed)
+            changes.Add($"numbering {typed}");
 
-        // A season and episode belong to a programme; on anything else they are wrong.
-        if (MetadataNormaliser.StripNonTvNumbering(copies, _ => category) > 0 &&
-            (edits.Season is not null || edits.Episode is not null))
+        // A season and episode belong to a programme; on anything else they were read out
+        // of a number that meant something else. Numbering typed in by hand is exempt —
+        // see MetadataNormaliser.
+        if (MetadataNormaliser.StripNonTvNumbering(copies, _ => category) > 0)
             changes.Add($"season/episode cleared — '{category}' is not a programme");
 
         file.Integrity = edits.Integrity;
@@ -1446,6 +1556,8 @@ public class MainViewModel : ObservableObject
                 b.File.Year = b.Year;
                 b.File.Season = b.Season;
                 b.File.Episode = b.Episode;
+                b.File.EpisodeEnd = b.EpisodeEnd;
+                b.File.NumberingManuallySet = b.NumberingManuallySet;
                 b.File.CategoryOverride = b.CategoryOverride;
             }
             file.Integrity = previousIntegrity;
@@ -1574,7 +1686,7 @@ public class MainViewModel : ObservableObject
         var withDuplicates = affected.Concat(DuplicatesOf(affected)).Distinct().ToList();
 
         var before = withDuplicates
-            .Select(f => (File: f, f.CategoryOverride, f.Season, f.Episode)).ToList();
+            .Select(f => (File: f, f.CategoryOverride, f.Season, f.Episode, f.EpisodeEnd)).ToList();
         Undo.Push($"category '{category}' on {withDuplicates.Count} file(s)", () =>
         {
             foreach (var b in before)
@@ -1582,6 +1694,7 @@ public class MainViewModel : ObservableObject
                 b.File.CategoryOverride = b.CategoryOverride;
                 b.File.Season = b.Season;
                 b.File.Episode = b.Episode;
+                b.File.EpisodeEnd = b.EpisodeEnd;
             }
             PersistAndRefresh();
             return Task.FromResult($"Reverted the category '{category}'.");
@@ -1761,6 +1874,13 @@ public class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Asked when the episode being consolidated is already in the library under a
+    /// different name. Set by the window; left unset, the library's copy is kept and the
+    /// arrival is left where it is, which is the answer that cannot lose anything.
+    /// </summary>
+    public Func<EpisodeConflict, Task<CollisionResolution>>? EpisodeConflictResolver { get; set; }
+
+    /// <summary>
     /// Consolidate specific catalogue entries: each goes to the folder its category
     /// dictates, under its planned name, with progress and an ETA.
     /// </summary>
@@ -1790,6 +1910,12 @@ public class MainViewModel : ObservableObject
                 toFile.Add(file);
         }
 
+        // An episode already in the library under a different name is not a name collision
+        // and would sail straight past every check below — leaving the library holding the
+        // same episode twice, which is the one thing a consolidation location exists to
+        // prevent. So it is settled before anything moves.
+        var episodes = await ResolveEpisodeConflictsAsync(toFile);
+
         // Where the files were before anything moved, so folders the move empties can be
         // offered for removal afterwards.
         var sourceFolders = toFile
@@ -1798,9 +1924,12 @@ public class MainViewModel : ObservableObject
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var skipped = 0;
+        // Files the run declined to move, which are failures as far as the loop counting
+        // them is concerned but are not failures to report as such.
+        var unfiled = 0;
         var origins = toFile.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
         var run = new CollisionRun("consolidated");
+        if (episodes.Cancelled) run.Cancelled = true;
 
         var report = toFile.Count == 0
             ? new OperationReport(0, 0, new List<MediaFile>())
@@ -1813,23 +1942,25 @@ public class MainViewModel : ObservableObject
                 var destDir = ConsolidationPlanner.PlanDirectory(file, category, _settings);
                 if (destDir == null)
                 {
-                    skipped++;
-                    return new RelocationResult(false, "No category or target folder.", file.FullPath);
+                    unfiled++;
+                    return new RelocationResult(false,
+                        $"'{file.FileName}' has no category with a consolidation folder set, " +
+                        "so there is nowhere to file it.", file.FullPath);
                 }
 
-                var name = ConsolidationPlanner.PlanFileName(file, category);
+                var name = ConsolidationPlanner.PlanFileName(file, category, _settings);
                 return await FileInLibraryAsync(file, destDir, name, deleteOriginal, run, bytes);
             });
 
-        var tidied = await FinishCollisionRunAsync(run);
-        skipped += run.Skipped;
+        var tidied = await FinishCollisionRunAsync(run) + episodes.Removed;
+        var skipped = unfiled + run.Skipped + episodes.Skipped;
 
         // Anything that arrived is now filed; anything that moved for a corrected title is
-        // filed under the new one.
-        foreach (var file in files)
+        // filed under the new one. The library copies kept over an arrival count too — they
+        // are what the run decided should be the filed copy.
+        foreach (var file in files.Concat(episodes.Kept))
             file.Consolidated = ConsolidationPlanner.IsCorrectlyFiled(
                 file, CategoryResolver.Effective(file, _settings), _settings);
-        CatalogStore.Save(_catalog, _catalogPath);
 
         if (deleteOriginal)
             PushMoveUndo(origins.Where(o => !string.Equals(o.File.FullPath, o.FullPath,
@@ -1839,9 +1970,11 @@ public class MainViewModel : ObservableObject
         // litter from an operation the user asked for.
         var emptied = EmptyFolderCleaner.EmptyAmong(sourceFolders);
 
-        var failed = Math.Max(0, report.Failed - skipped);
+        var failed = Math.Max(0, report.Failed - unfiled - run.Skipped);
         var parts = new List<string> { $"{report.Succeeded} moved" };
         if (folderMoves.Count > 0) parts.Add($"{folderMoves.Count} folder(s) put right in place");
+        if (episodes.KeptInLibrary > 0)
+            parts.Add($"{episodes.KeptInLibrary} already in the library as the same episode");
         if (skipped > 0) parts.Add($"{skipped} skipped");
         if (alreadyConsolidated.Count > 0) parts.Add($"{alreadyConsolidated.Count} already consolidated");
         if (report.AlreadyPresent.Count > 0) parts.Add($"{report.AlreadyPresent.Count} already in the library");
@@ -1852,11 +1985,220 @@ public class MainViewModel : ObservableObject
                   (run.Cancelled ? " (cancelled part-way)." : ".");
         if (folderMoves.Count > 0)
             msg += "\n\n" + string.Join("\n", folderMoves.Take(10).Select(m => "    " + m.Describe()));
+        if (episodes.Notes.Count > 0)
+            msg += "\n\n" + string.Join("\n", episodes.Notes.Take(10).Select(n => "    " + n));
+        msg += DescribeFailures(report.Reasons);
 
         StatusText = msg.Split('\n')[0];
+        PersistAndRefresh();
         return new ConsolidationOutcome(
             report.Succeeded, skipped, failed, report.AlreadyPresent, msg, alreadyConsolidated)
         { EmptiedFolders = emptied };
+    }
+
+    /// <summary>
+    /// The doomed list with the file that is being kept taken out of it. Two byte-identical
+    /// files are each other's copies, so "delete every copy of the loser" reaches the
+    /// winner unless it is explicitly spared.
+    /// </summary>
+    private static IEnumerable<string> Spare(IEnumerable<string> doomed, MediaFile keeper) =>
+        doomed.Where(p => !string.Equals(p, keeper.FullPath, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>What settling the same-episode conflicts came to.</summary>
+    /// <param name="Kept">
+    /// Library copies that won, so the caller can mark them filed — they are the copy the
+    /// run has decided the library should hold.
+    /// </param>
+    private record EpisodeOutcome(
+        int KeptInLibrary, int Skipped, int Removed, bool Cancelled,
+        List<MediaFile> Kept, List<string> Notes);
+
+    /// <summary>
+    /// Settle every case where the episode being consolidated is already in the library
+    /// under a different name, and take out of <paramref name="toFile"/> anything that
+    /// should no longer move.
+    ///
+    /// Two files claiming the same season and episode of the same programme are the same
+    /// episode whatever they are called, so filing the second one beside the first would
+    /// leave the library holding it twice. When they are byte-for-byte identical there is
+    /// nothing to decide: the library keeps the copy it already has and the arrival — with
+    /// every other copy of it — goes. When they are genuinely different files, a different
+    /// release or a different quality, only the user can say which is worth keeping, so
+    /// they are asked.
+    /// </summary>
+    private async Task<EpisodeOutcome> ResolveEpisodeConflictsAsync(List<MediaFile> toFile)
+    {
+        var kept = new List<MediaFile>();
+        var notes = new List<string>();
+        int keptInLibrary = 0, skipped = 0, removed = 0;
+        var cancelled = false;
+        CollisionResolution? standing = null;
+
+        // A whole season being consolidated shares one destination folder; reading it once
+        // is enough.
+        var adopted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var file in toFile.ToList())
+        {
+            if (cancelled) break;
+
+            var category = CategoryResolver.Effective(file, _settings);
+
+            // Anything sitting in the destination folder that the catalogue has never seen
+            // is still a file in the library, and still the episode it is. Take it on
+            // before asking whether the episode is already there.
+            if (ConsolidationPlanner.PlanDirectory(file, category, _settings) is { } destDir &&
+                adopted.Add(destDir))
+                AdoptLibraryFolder(destDir);
+
+            var twin = LibraryEpisodes.FindSameEpisode(
+                file, category, _catalog.Files, _settings, f => CategoryResolver.Effective(f, _settings));
+            if (twin == null) continue;
+
+            // "Are these the same file?" decides the whole question without troubling the
+            // user, so it is worth reading a hash for — but only when the sizes already
+            // agree, since two files of different lengths cannot be the same bytes and
+            // hashing a pair of them would cost minutes to learn nothing.
+            if (file.SizeBytes == twin.SizeBytes)
+            {
+                await EnsureHashedAsync(file);
+                await EnsureHashedAsync(twin);
+            }
+
+            var identical = file.HasHash && twin.HasHash &&
+                            string.Equals(file.Sha256, twin.Sha256, StringComparison.OrdinalIgnoreCase);
+            var episode = LibraryEpisodes.Describe(file);
+
+            var choice = identical
+                // Identical files decide it themselves: keeping either keeps the same
+                // content, and the library's copy is already where it belongs.
+                ? new CollisionResolution(CollisionChoice.KeepExisting, DeleteDuplicates: true)
+                : standing ?? (EpisodeConflictResolver == null
+                    // Nobody to ask, so take the answer that cannot lose anything.
+                    ? new CollisionResolution(CollisionChoice.Skip)
+                    : await EpisodeConflictResolver(new EpisodeConflict(
+                        file, twin, CopiesOf(file), CopiesOf(twin), identical, episode)));
+
+            if (!identical && choice.ApplyToRemaining) standing = choice;
+
+            switch (choice.Choice)
+            {
+                case CollisionChoice.Cancel:
+                    cancelled = true;
+                    break;
+
+                case CollisionChoice.KeepIncoming:
+                {
+                    // Clear the library's copy out of the way; the arrival then files
+                    // itself in the ordinary run below. The keeper is held back from the
+                    // clear-out: when the two are identical each counts as a copy of the
+                    // other, and deleting "every copy" would take both.
+                    var doomed = new List<string> { twin.FullPath };
+                    if (choice.DeleteDuplicates) doomed.AddRange(CopiesOf(twin).Select(c => c.FullPath));
+                    removed += await DeleteQuietlyAsync(
+                        Spare(doomed, file), toRecycleBin: true);
+                    notes.Add($"{episode}: kept the copy being consolidated; the library's went to " +
+                              "the Recycle Bin.");
+                    break;
+                }
+
+                case CollisionChoice.KeepExisting:
+                {
+                    // The library already holds this episode, so the arrival is redundant.
+                    // An identical file is gone for good — there is nothing to recover that
+                    // the library copy is not already holding; a different file the user
+                    // chose against goes to the Recycle Bin, where they can think again.
+                    var doomed = new List<string> { file.FullPath };
+                    if (choice.DeleteDuplicates) doomed.AddRange(CopiesOf(file).Select(c => c.FullPath));
+
+                    // The keeper never goes, however the copies are counted — and when the
+                    // two are byte-identical, each *is* a copy of the other.
+                    removed += await DeleteQuietlyAsync(Spare(doomed, twin), toRecycleBin: !identical);
+                    toFile.Remove(file);
+                    kept.Add(twin);
+                    keptInLibrary++;
+                    notes.Add(identical
+                        ? $"{episode}: already in the library, byte for byte — the other copy " +
+                          "was deleted."
+                        : $"{episode}: kept the library's copy; the other went to the Recycle Bin.");
+                    break;
+                }
+
+                default: // Skip, and KeepBoth — which is never offered, since two copies of
+                         // one episode in the library is the thing being prevented.
+                    toFile.Remove(file);
+                    skipped++;
+                    notes.Add($"{episode}: left alone — it is already in the library under " +
+                              $"'{twin.FileName}'.");
+                    break;
+            }
+        }
+
+        // The library copy that won may itself be sitting under the wrong name; filing it
+        // is the other half of "the library holds exactly one of this episode".
+        foreach (var winner in kept.Where(w => !ConsolidationPlanner.IsAtPlannedPath(
+                     w, CategoryResolver.Effective(w, _settings), _settings)))
+            if (!toFile.Contains(winner)) toFile.Add(winner);
+
+        return new EpisodeOutcome(keptInLibrary, skipped, removed, cancelled, kept, notes);
+    }
+
+    /// <summary>
+    /// Read a file's hash if it has not got one, so a question that turns on whether two
+    /// files are identical can actually be answered. Says so on the status bar: hashing a
+    /// large file is not instant, and a program that goes quiet looks like one that hung.
+    /// </summary>
+    private async Task EnsureHashedAsync(MediaFile file)
+    {
+        if (file.HasHash || !File.Exists(file.FullPath)) return;
+
+        var was = StatusText;
+        StatusText = ProgressLine("Reading", 0, 0, file.FileName) + " to compare it";
+        file.Sha256 = await FileHasher.ComputeSha256Async(file.FullPath);
+        file.HashFailed = !file.HasHash;
+        StatusText = was;
+    }
+
+    /// <summary>
+    /// Catalogue any media file sitting in a library folder that we have never seen. A file
+    /// the program does not know about is a file it cannot recognise as the episode it
+    /// already holds — which is exactly how a library ends up with two of them.
+    /// </summary>
+    private void AdoptLibraryFolder(string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return;
+
+        string[] paths;
+        try { paths = Directory.GetFiles(folder); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return; }
+
+        var added = false;
+        foreach (var path in paths)
+        {
+            if (_catalog.ByPath.ContainsKey(path)) continue;
+
+            var extension = Path.GetExtension(path);
+            if (!MediaExtensions.IsMedia(extension)) continue;
+            if (_settings.IsPathExcluded(path) || _settings.IsExtensionIgnored(extension)) continue;
+
+            FileInfo info;
+            try { info = new FileInfo(path); if (!info.Exists) continue; }
+            catch { continue; }
+
+            var entry = new MediaFile
+            {
+                FullPath = path, FileName = info.Name, Extension = info.Extension,
+                SizeBytes = info.Length, LastModifiedUtc = info.LastWriteTimeUtc,
+                IndexedUtc = DateTime.UtcNow, Integrity = IntegrityStatus.Ok,
+                FeatureVersion = CatalogRefresher.CurrentFeatureVersion
+            };
+            MediaClassifier.Classify(entry, _settings);
+            _catalog.Files.Add(entry);
+            _catalog.ByPath[path] = entry;
+            added = true;
+        }
+
+        if (added) ExtraLinker.Link(_catalog.Files);
     }
 
     /// <summary>
@@ -2017,8 +2359,11 @@ public class MainViewModel : ObservableObject
         if (report.Failed > 0) parts.Add($"{report.Failed} failed");
 
         var msg = "Consolidation: " + string.Join(", ", parts) +
-                  (run.Cancelled ? " (cancelled part-way)." : ".");
-        StatusText = msg;
+                  (run.Cancelled ? " (cancelled part-way)." : ".") +
+                  DescribeFailures(report.Reasons);
+
+        StatusText = msg.Split('\n')[0];
+        PersistAndRefresh();
         return new ConsolidationOutcome(report.Succeeded, 0, report.Failed, report.AlreadyPresent, msg);
     }
 
@@ -2247,8 +2592,11 @@ public class MainViewModel : ObservableObject
         if (report.Failed > 0) parts.Add($"{report.Failed} failed");
 
         var message = $"{(deleteOriginal ? "Move" : "Copy")} finished: " + string.Join(", ", parts) +
-                      (run.Cancelled ? " (cancelled part-way)." : ".");
-        StatusText = message;
+                      (run.Cancelled ? " (cancelled part-way)." : ".") +
+                      DescribeFailures(report.Reasons);
+
+        StatusText = message.Split('\n')[0];
+        PersistAndRefresh();
         return message;
     }
 
@@ -2433,7 +2781,13 @@ public class MainViewModel : ObservableObject
     /// dialog offers this mid-move, where taking over the progress bar and the
     /// cancellation token would pull the rug from under the operation that opened it.
     /// </summary>
-    public async Task<string> DeepCheckOneAsync(MediaFile file, CancellationToken ct = default)
+    /// <param name="progress">
+    /// How far through this one file the decode has got, 0 to 1. Decoding a film end to end
+    /// is minutes of work on a single item, so a caller showing "checking 2 of 5" and
+    /// nothing else is showing almost nothing.
+    /// </param>
+    public async Task<string> DeepCheckOneAsync(
+        MediaFile file, CancellationToken ct = default, IProgress<double>? progress = null)
     {
         if (!CanDoVideo)
             return "A deep check needs FFmpeg and ffprobe — set them up on the External tools tab first.";
@@ -2443,8 +2797,25 @@ public class MainViewModel : ObservableObject
         try
         {
             var engine = new ContentAnalysisEngine(_tools);
-            await engine.AnalyzeAsync(new[] { file }, fingerprint: false, deepCheck: true, null, ct);
-            return $"{file.FileName}: {file.Integrity}";
+
+            // Said on the status bar as well as handed to the caller: a deep check started
+            // from a dialog is still the program going quiet for minutes, and the main
+            // window is where the user looks to see whether anything is happening.
+            var relay = new Progress<AnalysisProgress>(p =>
+            {
+                progress?.Report(p.FileFraction);
+                StatusText = ProgressLine("Deep checking", 0, 0, file.FileName,
+                    p.FileFraction > 0 ? $"— {p.FileFraction:P0}" : "");
+            });
+
+            await engine.AnalyzeAsync(new[] { file }, fingerprint: false, deepCheck: true, relay, ct);
+            StatusText = $"{file.FileName}: {file.Integrity}";
+            return StatusText;
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = $"Deep check of {file.FileName} stopped.";
+            return StatusText;
         }
         catch (Exception ex)
         {
@@ -2476,7 +2847,28 @@ public class MainViewModel : ObservableObject
     }
 
     /// <summary>What a batch file operation did.</summary>
-    private record OperationReport(int Succeeded, int Failed, List<MediaFile> AlreadyPresent);
+    /// <param name="Failures">
+    /// Why each file that did not move failed, in full. A count on its own leaves the user
+    /// with a number and no idea whether the drive is unplugged, the folder is read-only or
+    /// the disk is full — and those want three different things done about them.
+    /// </param>
+    private record OperationReport(
+        int Succeeded, int Failed, List<MediaFile> AlreadyPresent, List<string>? Failures = null)
+    {
+        public IReadOnlyList<string> Reasons => Failures ?? new List<string>();
+    }
+
+    /// <summary>
+    /// The failure detail appended to an operation's summary. Capped, since a batch that
+    /// went wrong for two hundred files went wrong for the same reason two hundred times.
+    /// </summary>
+    private static string DescribeFailures(IReadOnlyList<string> reasons, int show = 8)
+    {
+        if (reasons.Count == 0) return "";
+        var listed = string.Join("\n\n", reasons.Take(show).Select(r => "    " + r));
+        if (reasons.Count > show) listed += $"\n\n    …and {reasons.Count - show} more.";
+        return "\n\nWhat went wrong:\n\n" + listed;
+    }
 
     /// <summary>
     /// Run a copy/move over many files with a byte-accurate progress bar and ETA. The
@@ -2496,6 +2888,7 @@ public class MainViewModel : ObservableObject
         ProgressMax = 1000;   // permille of the batch, so the bar moves within a big file
 
         var present = new List<MediaFile>();
+        var failures = new List<string>();
         int ok = 0, failed = 0;
         try
         {
@@ -2503,7 +2896,7 @@ public class MainViewModel : ObservableObject
             {
                 var file = files[i];
                 var fileStart = doneBytes;
-                StatusText = $"{verb} {i + 1}/{files.Count}: {file.FileName}";
+                StatusText = ProgressLine(verb, i + 1, files.Count, file.FileName);
 
                 var bytes = new Progress<long>(written =>
                 {
@@ -2520,7 +2913,16 @@ public class MainViewModel : ObservableObject
 
                 if (result.AlreadyPresent && !result.Success) present.Add(file);
                 else if (result.Success) { ok++; }
-                else failed++;
+                else
+                {
+                    failed++;
+                    // "Cancelled." and "Skipped." are answers, not failures — the user
+                    // already knows what happened to those.
+                    if (result.Message is { Length: > 0 } why &&
+                        !why.StartsWith("Cancelled", StringComparison.OrdinalIgnoreCase) &&
+                        !why.StartsWith("Skipped", StringComparison.OrdinalIgnoreCase))
+                        failures.Add(why);
+                }
             }
             CatalogStore.Save(_catalog, _catalogPath);
         }
@@ -2531,7 +2933,7 @@ public class MainViewModel : ObservableObject
             RebuildRows();
         }
 
-        return new OperationReport(ok, failed, present);
+        return new OperationReport(ok, failed, present, failures);
     }
 
     // --- Catalogue refresh ------------------------------------------------
@@ -2901,7 +3303,7 @@ public class MainViewModel : ObservableObject
         {
             ProgressMax = Math.Max(1, p.Total);
             ProgressValue = p.Done;
-            StatusText = $"Validating TV names {p.Done}/{p.Total} — {p.Current}";
+            StatusText = ProgressLine("Validating TV names", p.Done, p.Total, p.Current);
         });
 
         try
@@ -2963,6 +3365,7 @@ public class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ImdbStatus));
 
         OnPropertyChanged(nameof(Categories));
+        RefreshFilterValues();   // custom categories are one of the filter columns' values
         RebuildRows();
         StatusText = "Settings saved.";
     }
@@ -2977,20 +3380,34 @@ public class MainViewModel : ObservableObject
         StopWatching();
         if (!_settings.WatchForNewFiles) return;
 
-        // An explicit list of drives to watch wins; otherwise fall back to whatever was
-        // scanned, which is what earlier versions did.
-        if (_settings.WatchedDrives.Count > 0)
-            roots = _settings.WatchedDrives;
+        List<string> rootList;
 
-        var rootList = roots.Where(r => !string.IsNullOrWhiteSpace(r)).Distinct().ToList();
-        if (rootList.Count == 0)
-            rootList = _catalog.Files.Select(f => Path.GetPathRoot(f.FullPath) ?? "")
-                .Where(r => r.Length > 0).Distinct().ToList();
+        if (_settings.HasExplicitWatchTargets)
+        {
+            // Named somewhere in particular — whole drives, particular folders, or both.
+            // Taken literally and nothing added to it: watching E:\dump\ and watching all
+            // of E: are very different requests, and somebody who asked for the first did
+            // not ask for the second.
+            rootList = _settings.WatchedDrives
+                .Concat(_settings.WatchedFolders)
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        else
+        {
+            // Nothing named, so fall back on what was scanned — which is what earlier
+            // versions did — plus the folders added by hand, wherever they live.
+            rootList = roots.Where(r => !string.IsNullOrWhiteSpace(r)).Distinct().ToList();
+            if (rootList.Count == 0)
+                rootList = _catalog.Files.Select(f => Path.GetPathRoot(f.FullPath) ?? "")
+                    .Where(r => r.Length > 0).Distinct().ToList();
 
-        // Folders added by hand are watched too, wherever they live.
-        rootList = rootList.Concat(_settings.AdditionalScanFolders)
-            .Where(r => !string.IsNullOrWhiteSpace(r))
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            rootList = rootList.Concat(_settings.AdditionalScanFolders)
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
         if (rootList.Count == 0) return;
 
         _watcher = new NewFileWatcher(rootList, path =>
@@ -3141,7 +3558,7 @@ public class MainViewModel : ObservableObject
             foreach (var file in targets)
             {
                 _cts.Token.ThrowIfCancellationRequested();
-                StatusText = $"Re-hashing {done + 1}/{targets.Count}: {file.FileName}";
+                StatusText = ProgressLine("Re-hashing", done + 1, targets.Count, file.FileName);
                 ProgressValue = done;
                 UpdateEta(done, targets.Count);
                 done++;

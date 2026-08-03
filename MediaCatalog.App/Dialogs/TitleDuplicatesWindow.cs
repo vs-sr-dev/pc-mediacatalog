@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -54,6 +55,25 @@ public class TitleDuplicatesWindow : Window
         FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 4)
     };
 
+    // A deep check decodes each file end to end: minutes per film, and until now it said
+    // nothing at all while it did. Both halves of "how far along is this" are shown — which
+    // file of how many, and how far into that one.
+    private readonly ProgressBar _progressBar = new()
+    {
+        Height = 14, Minimum = 0, Maximum = 1000, Visibility = Visibility.Collapsed,
+        Margin = new Thickness(0, 4, 0, 0)
+    };
+    private readonly TextBlock _progressText = new()
+    {
+        Foreground = System.Windows.Media.Brushes.Gray, Visibility = Visibility.Collapsed,
+        TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 2, 0, 0)
+    };
+
+    /// <summary>Stops a deep check part-way; the files already done keep their verdicts.</summary>
+    private CancellationTokenSource? _checking;
+
+    private readonly Button _stop;
+
     public TitleDuplicatesWindow(MainViewModel vm)
     {
         _vm = vm;
@@ -78,12 +98,20 @@ public class TitleDuplicatesWindow : Window
         DockPanel.SetDock(hint, Dock.Top);
         dock.Children.Add(hint);
 
+        var footer = new StackPanel();
+        DockPanel.SetDock(footer, Dock.Bottom);
         var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
-        DockPanel.SetDock(buttons, Dock.Bottom);
+        footer.Children.Add(buttons);
+        footer.Children.Add(_progressBar);
+        footer.Children.Add(_progressText);
         buttons.Children.Add(Btn("Deep check this group", () => DeepCheckAsync(all: true),
             "Decode every copy in the selected group and report which are damaged."));
         buttons.Children.Add(Btn("Deep check selected", () => DeepCheckAsync(all: false),
             "Decode only the copies ticked on the right."));
+        _stop = Btn("Stop", StopCheckingAsync,
+            "Stop the deep check here. Files already decoded keep their verdicts.");
+        _stop.Visibility = Visibility.Collapsed;
+        buttons.Children.Add(_stop);
         buttons.Children.Add(Btn("Keep selected, delete the rest", KeepSelectedAsync,
             "Delete every other copy in this group. The delete confirmation lists them and lets " +
             "you choose the Recycle Bin or a permanent delete."));
@@ -95,7 +123,7 @@ public class TitleDuplicatesWindow : Window
         {
             Content = "Close", Width = 84, Margin = new Thickness(16, 0, 0, 0), IsCancel = true
         });
-        dock.Children.Add(buttons);
+        dock.Children.Add(footer);
 
         // The groups on the left, the copies within the selected group on the right: a
         // library can hold hundreds of these, and scrolling one flat list of everything is
@@ -188,6 +216,8 @@ public class TitleDuplicatesWindow : Window
 
     private async Task DeepCheckAsync(bool all)
     {
+        if (_checking != null) return;   // one at a time
+
         if (!_vm.CanDoVideo)
         {
             MessageBox.Show(this,
@@ -199,17 +229,73 @@ public class TitleDuplicatesWindow : Window
         var files = all ? _rows.Select(r => r.File).ToList() : Selected();
         if (files.Count == 0) { WarnNoSelection(); return; }
 
+        _checking = new CancellationTokenSource();
+        ShowProgress(true);
+
         var results = new List<string>();
-        foreach (var file in files)
+        var cancelled = false;
+        try
         {
-            results.Add(await _vm.DeepCheckOneAsync(file));
-            foreach (var row in _rows.Where(r => ReferenceEquals(r.File, file))) row.Refresh();
+            for (var i = 0; i < files.Count; i++)
+            {
+                if (_checking.IsCancellationRequested) { cancelled = true; break; }
+
+                var file = files[i];
+                var index = i;
+                Report(index, files.Count, file, 0);
+
+                // Decoding a film is minutes of work on one file, so how far into *this*
+                // file it has reached is as much of the answer as which file it is on.
+                var within = new Progress<double>(fraction =>
+                    Report(index, files.Count, file, fraction));
+
+                results.Add(await _vm.DeepCheckOneAsync(file, _checking.Token, within));
+                foreach (var row in _rows.Where(r => ReferenceEquals(r.File, file))) row.Refresh();
+            }
+        }
+        catch (OperationCanceledException) { cancelled = true; }
+        finally
+        {
+            _checking.Dispose();
+            _checking = null;
+            ShowProgress(false);
         }
 
         _vm.PersistAndRefresh();
-        MessageBox.Show(this, string.Join("\n", results), "Deep check",
-            MessageBoxButton.OK, MessageBoxImage.Information);
+        MessageBox.Show(this,
+            (cancelled ? $"Stopped after {results.Count} of {files.Count} file(s).\n\n" : "") +
+            (results.Count == 0 ? "Nothing was decoded." : string.Join("\n", results)),
+            "Deep check", MessageBoxButton.OK, MessageBoxImage.Information);
         Reload();
+    }
+
+    /// <summary>Say which file of how many, and how far into it, in one line and one bar.</summary>
+    private void Report(int index, int total, MediaFile file, double fraction)
+    {
+        // The bar covers the whole batch, so a file finishing does not send it back to zero.
+        _progressBar.Value = Math.Clamp((index + fraction) / total * 1000, 0, 1000);
+
+        var left = total - index - 1;
+        _progressText.Text =
+            $"Deep checking {index + 1} of {total} — {file.FileName}" +
+            (fraction > 0 ? $"  ({fraction:P0} of this file)" : "") +
+            (left > 0 ? $"  •  {left} to go after this one" : "  •  last one");
+    }
+
+    private void ShowProgress(bool running)
+    {
+        var visible = running ? Visibility.Visible : Visibility.Collapsed;
+        _progressBar.Visibility = visible;
+        _progressText.Visibility = visible;
+        _stop.Visibility = visible;
+        if (!running) _progressBar.Value = 0;
+    }
+
+    private Task StopCheckingAsync()
+    {
+        _checking?.Cancel();
+        _progressText.Text = "Stopping after this file…";
+        return Task.CompletedTask;
     }
 
     private async Task KeepSelectedAsync()

@@ -30,7 +30,15 @@ public class ScanWizardWindow : Window
         private bool _selected = true;
         public required string Path { get; init; }
         public bool IsSelected { get => _selected; set => SetProperty(ref _selected, value); }
-        public string Display => Directory.Exists(Path) ? Path : Path + "   (not found)";
+
+        /// <summary>
+        /// True when the folder is not there — usually a leftover from a scan of a drive
+        /// that is no longer plugged in, or of a folder since deleted. It stays on the list
+        /// and stays removable; it is simply not ticked.
+        /// </summary>
+        public bool IsMissing => !Directory.Exists(Path);
+
+        public string Display => IsMissing ? Path + "   (not found)" : Path;
     }
 
     private readonly AppSettings _settings;
@@ -86,7 +94,10 @@ public class ScanWizardWindow : Window
         _settings = settings;
         _catalogued = cataloguedFiles;
 
-        Title = "Scan"; Width = 700; Height = 560;
+        // Tall enough for the Locations page to show both lists *and* the buttons under
+        // them: a "Remove" button below the fold is a button nobody can press.
+        Title = "Scan"; Width = 700; Height = 720;
+        MinWidth = 620; MinHeight = 620;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         _addToExisting = new RadioButton
@@ -117,7 +128,14 @@ public class ScanWizardWindow : Window
 
         BuildDriveList(lastDrives);
         foreach (var folder in settings.AdditionalScanFolders)
-            _folders.Add(new FolderChoice { Path = folder });
+        {
+            var choice = new FolderChoice { Path = folder };
+            // A folder that is not there starts unticked, rather than being walked for and
+            // then reported as never having turned up — which reads like a failure and is
+            // not one. It stays on the list so it can be ticked again, or removed.
+            if (choice.IsMissing) choice.IsSelected = false;
+            _folders.Add(choice);
+        }
 
         _mediaFilter.ItemsSource = Enum.GetValues(typeof(ScanMediaFilter));
         _mediaFilter.SelectedItem = settings.ScanMediaFilter;
@@ -252,6 +270,7 @@ public class ScanWizardWindow : Window
         {
             Height = 110,
             ItemsSource = _folders,
+            SelectionMode = SelectionMode.Extended,
             HorizontalContentAlignment = HorizontalAlignment.Stretch
         };
         folderList.ItemTemplate = CheckTemplate(nameof(FolderChoice.IsSelected), nameof(FolderChoice.Display));
@@ -267,9 +286,16 @@ public class ScanWizardWindow : Window
         }, 110));
         folderButtons.Children.Add(Btn("Remove", () =>
         {
-            if (folderList.SelectedItem is FolderChoice f) _folders.Remove(f);
+            // Whatever is highlighted goes, whether or not the folder still exists — a
+            // folder that has been deleted is exactly the one you most want off the list.
+            foreach (var chosen in folderList.SelectedItems.OfType<FolderChoice>().ToList())
+                _folders.Remove(chosen);
         }));
         panel.Children.Add(folderButtons);
+        panel.Children.Add(Hint("Removing a folder here forgets it for good — including one marked " +
+                                "(not found), which is a folder that has since been deleted or lives " +
+                                "on a drive that is not connected. Tick a not-found folder to have the " +
+                                "scan look for it anyway."));
         return panel;
     }
 
@@ -378,6 +404,22 @@ public class ScanWizardWindow : Window
             return;
         }
 
+        // A ticked folder that is not there is worth mentioning once — it is not an error,
+        // and the scan will simply find nothing under it, but silently doing nothing about
+        // a folder somebody deliberately ticked is worse than saying so.
+        var absent = _folders.Where(f => f.IsSelected && f.IsMissing).Select(f => f.Path).ToList();
+        if (absent.Count > 0)
+        {
+            var carryOn = MessageBox.Show(this,
+                $"{(absent.Count == 1 ? "This folder is" : "These folders are")} not there:\n\n" +
+                string.Join("\n", absent.Select(p => "    " + p)) +
+                "\n\nThe scan will look and find nothing, and nothing already catalogued under " +
+                $"{(absent.Count == 1 ? "it" : "them")} is removed. Use Remove on the Where page to " +
+                "take a folder off the list for good.\n\nCarry on?",
+                "Folder not found", MessageBoxButton.OKCancel, MessageBoxImage.Information);
+            if (carryOn != MessageBoxResult.OK) { ShowPage(1); return; }
+        }
+
         var min = ParseSize(_minSize.Text);
         var max = ParseSize(_maxSize.Text);
         if (min == null || max == null)
@@ -415,6 +457,10 @@ public class ScanWizardWindow : Window
             _startFresh.IsChecked == true ? ScanStartMode.StartFresh : ScanStartMode.AddToExisting,
             _waitForDrives.IsChecked == true)
         {
+            // The whole list, ticked or not: it replaces what was remembered, so a folder
+            // taken off it here is genuinely gone rather than quietly kept because it
+            // happened not to be ticked.
+            AllFolders = _folders.Select(f => f.Path).ToList(),
             MinSizeBytes = min.Value,
             MaxSizeBytes = max.Value
         };

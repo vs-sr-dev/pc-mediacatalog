@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using MediaCatalog.Core.Consolidation;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Storage;
 using MediaCatalog.Core.Tools;
@@ -51,6 +52,7 @@ public class SettingsWindow : Window
     {
         public required ComboBox Category { get; init; }
         public required TextBox Folder { get; init; }
+        public required TextBox NameTemplate { get; init; }
         public required FrameworkElement Container { get; init; }
     }
 
@@ -149,6 +151,7 @@ public class SettingsWindow : Window
     private readonly ObservableCollection<ExclRow> _excluded = new();
     private readonly ObservableCollection<string> _categories = new();
     private readonly ObservableCollection<string> _scanFolders = new();
+    private readonly ObservableCollection<string> _watchFolders = new();
     private readonly List<CatFolderRow> _catFolders = new();
     private readonly List<CheckBox> _driveChecks = new();
     private readonly StackPanel _catFolderPanel = new();
@@ -284,6 +287,7 @@ public class SettingsWindow : Window
         foreach (var f in settings.ExcludedFolders) _excluded.Add(new ExclRow { Model = f });
         foreach (var c in settings.CustomCategories) _categories.Add(c);
         foreach (var f in settings.AdditionalScanFolders) _scanFolders.Add(f);
+        foreach (var f in settings.WatchedFolders) _watchFolders.Add(f);
     }
 
     // --- Tabs -------------------------------------------------------------
@@ -320,12 +324,13 @@ public class SettingsWindow : Window
                  "\"Title (Year).mkv\" for a film — so the next scan reads the corrected name back " +
                  "rather than the old one.")));
 
+        // Deliberately mild. Deleting a file for good already takes three deliberate acts —
+        // choosing a delete, ticking the confirmation in the dialog, and pressing the
+        // button — and this option is off unless somebody turns it on. A paragraph of
+        // alarm on top of all that is shouting at the wrong moment.
         panel.Children.Add(Group("Deleting files",
             _skipRecycleBin,
-            Warning("This is a bad idea, and it is here only because it was asked for. The Recycle " +
-                    "Bin is the one thing standing between a mis-click and a file that is simply " +
-                    "gone — and a recycled delete is the only kind Undo can put back. With this " +
-                    "ticked, every delete dialog opens armed."),
+            Warning("We don't recommend this."),
             _offerEmptyFolders));
 
         panel.Children.Add(Group("Behaviour",
@@ -335,9 +340,11 @@ public class SettingsWindow : Window
                  "application Windows associates with it, or open Edit details to correct what " +
                  "the catalogue says about it."),
             Labeled("Progress name:", _progressName, 120),
-            Hint("Where the current file name goes in the progress message. Thousands of small " +
-                 "files a second make a name on the right flicker the whole line; Left keeps " +
-                 "\"Hashing & classifying\" still, and Hidden leaves it out.")));
+            Hint("Where the current file name goes in the progress message — in every operation " +
+                 "that works through files one at a time, not only a scan: verifying length and " +
+                 "quality, re-hashing, moving, consolidating, analysing. Thousands of small files " +
+                 "a second make a name on the right flicker the whole line; Left keeps the counter " +
+                 "still, and Hidden leaves the name out.")));
 
         return panel;
     }
@@ -382,11 +389,20 @@ public class SettingsWindow : Window
             Hint("\nA folder is checked when you add it: a drive that is not there is almost always " +
                  "a typo or an unplugged disk and is refused, and a folder on a drive that is there " +
                  "is simply created."),
+            Hint("\nThe \"named\" box under each folder decides what the files in it are called — " +
+                 "leave it empty for the built-in naming. Hover it for the list of fields; the " +
+                 "example beside it shows what your pattern produces. The extension never changes, " +
+                 "since nothing here re-encodes anything."),
             Hint("\nA file counts as filed only when it is at the exact place its title, year and " +
                  "numbering put it. Correct a title and its file stops being filed — consolidating " +
                  "it again moves it under the new name rather than reporting it as already done. " +
                  "When a whole folder is misnamed it is renamed in place rather than having its " +
-                 "contents copied out one at a time.")));
+                 "contents copied out one at a time."),
+            Hint("\nConsolidating is always a move: a file already on the destination's drive is " +
+                 "moved without being copied, and anything genuinely copied is verified against " +
+                 "the original before the original is permanently deleted. One copy, in the " +
+                 "library — including for TV, where an episode already there is never filed a " +
+                 "second time under a different name.")));
 
         panel.Children.Add(Group("Sorting",
             _articleLast,
@@ -754,7 +770,7 @@ public class SettingsWindow : Window
         var wrap = new StackPanel { Margin = new Thickness(20, 4, 0, 0) };
         wrap.Children.Add(new TextBlock
         {
-            Text = "Drives to watch (none ticked = every drive that was scanned):",
+            Text = "Drives to watch (nothing ticked or listed below = every drive that was scanned):",
             Margin = new Thickness(0, 0, 0, 2)
         });
 
@@ -783,6 +799,43 @@ public class SettingsWindow : Window
         if (roots.Count == 0)
             panel.Children.Add(new TextBlock { Text = "(no drives available)", Foreground = System.Windows.Media.Brushes.Gray });
         wrap.Children.Add(panel);
+
+        wrap.Children.Add(new TextBlock
+        {
+            Text = "Particular folders to watch:",
+            Margin = new Thickness(0, 10, 0, 2)
+        });
+        wrap.Children.Add(WatchFolderEditor());
+        wrap.Children.Add(Hint("Watching E:\\dump\\ and watching the whole of E: are very different " +
+                               "requests on a disk holding a hundred thousand files, and it is " +
+                               "usually the first one that was meant. A folder listed here is " +
+                               "watched along with anything ticked above, and subfolders come with " +
+                               "it. Naming anything at all — a drive or a folder — means only what " +
+                               "is named is watched."));
+        return wrap;
+    }
+
+    private FrameworkElement WatchFolderEditor()
+    {
+        var wrap = new StackPanel();
+        var list = new ListBox { Height = 80, ItemsSource = _watchFolders };
+        wrap.Children.Add(list);
+
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        var add = new Button { Content = "Add folder…", Width = 100 };
+        add.Click += (_, _) =>
+        {
+            var dlg = new OpenFolderDialog { Title = "Choose a folder to watch for new files" };
+            if (dlg.ShowDialog(this) == true &&
+                !_watchFolders.Contains(dlg.FolderName, StringComparer.OrdinalIgnoreCase))
+                _watchFolders.Add(dlg.FolderName);
+        };
+        controls.Children.Add(add);
+
+        var remove = new Button { Content = "Remove", Width = 80, Margin = new Thickness(6, 0, 0, 0) };
+        remove.Click += (_, _) => { if (list.SelectedItem is string s) _watchFolders.Remove(s); };
+        controls.Children.Add(remove);
+        wrap.Children.Add(controls);
         return wrap;
     }
 
@@ -974,12 +1027,12 @@ public class SettingsWindow : Window
         wrap.Children.Add(_catFolderPanel);
 
         foreach (var cf in settings.CategoryFolders)
-            AddCategoryFolderRow(cf.Category, cf.Folder);
+            AddCategoryFolderRow(cf.Category, cf.Folder, cf.NameTemplate);
         if (_catFolders.Count == 0)
         {
             // A fresh install starts with the two categories everyone consolidates.
-            AddCategoryFolderRow("TvShow", settings.TvConsolidationDir);
-            AddCategoryFolderRow("Movie", settings.FilmConsolidationDir);
+            AddCategoryFolderRow("TvShow", settings.TvConsolidationDir, "");
+            AddCategoryFolderRow("Movie", settings.FilmConsolidationDir, "");
         }
 
         var add = new Button
@@ -987,13 +1040,14 @@ public class SettingsWindow : Window
             Content = "Add category folder", Width = 150,
             HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0)
         };
-        add.Click += (_, _) => AddCategoryFolderRow("", "");
+        add.Click += (_, _) => AddCategoryFolderRow("", "", "");
         wrap.Children.Add(add);
         return wrap;
     }
 
-    private void AddCategoryFolderRow(string category, string folder)
+    private void AddCategoryFolderRow(string category, string folder, string nameTemplate)
     {
+        var rows = new StackPanel { Margin = new Thickness(0, 4, 0, 6) };
         var dp = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
 
         var combo = new ComboBox
@@ -1026,15 +1080,90 @@ public class SettingsWindow : Window
         // wrong drive letter in it is caught while the user is still looking at it.
         box.LostFocus += (_, _) => CheckConsolidationFolder(box.Text);
 
-        var row = new CatFolderRow { Category = combo, Folder = box, Container = dp };
+        // What the files in that folder are called. Empty means the built-in naming, which
+        // is what every existing library has been filed under.
+        var namePanel = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
+        var nameLabel = new TextBlock
+        {
+            Text = "named", Width = 130, VerticalAlignment = VerticalAlignment.Center,
+            Foreground = System.Windows.Media.Brushes.Gray,
+            TextAlignment = TextAlignment.Right, Margin = new Thickness(0, 0, 6, 0)
+        };
+        DockPanel.SetDock(nameLabel, Dock.Left);
+        namePanel.Children.Add(nameLabel);
+
+        var nameBox = new TextBox
+        {
+            Text = nameTemplate, VerticalContentAlignment = VerticalAlignment.Center,
+            ToolTip = NameTemplateTip()
+        };
+        var preview = new TextBlock
+        {
+            Width = 250, VerticalAlignment = VerticalAlignment.Center,
+            Foreground = System.Windows.Media.Brushes.Gray,
+            TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(6, 0, 0, 0)
+        };
+        DockPanel.SetDock(preview, Dock.Right);
+        namePanel.Children.Add(preview);
+        namePanel.Children.Add(nameBox);
+
+        void ShowPreview() => preview.Text = PreviewName(combo.Text.Trim(), nameBox.Text);
+        nameBox.TextChanged += (_, _) => ShowPreview();
+        ShowPreview();
+
+        var row = new CatFolderRow
+        {
+            Category = combo, Folder = box, NameTemplate = nameBox, Container = rows
+        };
         remove.Click += (_, _) =>
         {
             _catFolders.Remove(row);
-            _catFolderPanel.Children.Remove(dp);
+            _catFolderPanel.Children.Remove(rows);
         };
 
+        rows.Children.Add(dp);
+        rows.Children.Add(namePanel);
         _catFolders.Add(row);
-        _catFolderPanel.Children.Add(dp);
+        _catFolderPanel.Children.Add(rows);
+    }
+
+    /// <summary>Every field a name pattern may use, for the box's tooltip.</summary>
+    private static string NameTemplateTip() =>
+        "How consolidated files of this category are named. Empty = the built-in naming " +
+        "(\"01 - original name.ext\" for an episode, the file's own name otherwise).\n\n" +
+        "Fields:\n" +
+        string.Join("\n", ConsolidationNaming.Fields.Select(f => $"    {f.Field} — {f.Means}")) +
+        "\n\nA number can be padded: {episode:00}. The extension never changes — nothing here " +
+        "re-encodes anything, so a name claiming otherwise would be lying.\n\n" +
+        "Examples:\n" +
+        "    {title} - {numbering}\n" +
+        "    {episode:00} - {title} - {numbering}\n" +
+        "    {title} ({year}) [{quality}]";
+
+    /// <summary>
+    /// What the pattern would call a file, shown beside the box. A pattern is far easier to
+    /// get right when you can see what it produces.
+    /// </summary>
+    private static string PreviewName(string category, string template)
+    {
+        if (string.IsNullOrWhiteSpace(template)) return "built-in naming";
+
+        var sample = string.Equals(category, "Movie", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(category, "MovieExtra", StringComparison.OrdinalIgnoreCase)
+            ? new MediaFile
+            {
+                TmdbName = "Blade Runner", Year = 1982, Extension = ".mkv",
+                FileName = "Blade.Runner.1982.1080p.BluRay.mkv", Kind = MediaKind.Video, Quality = 1080
+            }
+            : new MediaFile
+            {
+                TmdbName = "Burn Notice", Year = 2012, Season = 6, Episode = 11, EpisodeEnd = 12,
+                Extension = ".mp4", FileName = "Burn.Notice.S06E11E12.HDTV.x264.mp4",
+                Kind = MediaKind.Video, Quality = 720
+            };
+
+        var produced = ConsolidationNaming.Apply(sample, template);
+        return produced.Length == 0 ? "⚠ produces no name at all" : "e.g. " + produced;
     }
 
     /// <summary>
@@ -1125,7 +1254,10 @@ public class SettingsWindow : Window
 
             // Last row wins if a category is listed twice.
             folders.RemoveAll(f => string.Equals(f.Category, category, StringComparison.OrdinalIgnoreCase));
-            folders.Add(new CategoryConsolidation { Category = category, Folder = folder });
+            folders.Add(new CategoryConsolidation
+            {
+                Category = category, Folder = folder, NameTemplate = row.NameTemplate.Text.Trim()
+            });
         }
 
         var result = new AppSettings
@@ -1154,6 +1286,7 @@ public class SettingsWindow : Window
             RedundantExclusions = Policy,
             WatchedDrives = _driveChecks.Where(c => c.IsChecked == true)
                 .Select(c => (string)c.Tag).ToList(),
+            WatchedFolders = _watchFolders.ToList(),
             RememberFilters = _rememberFilters.IsChecked == true,
             ExcludeSystemDirectories = _excludeSystem.IsChecked == true,
             IgnoredExtensions = _exts.ToList(),

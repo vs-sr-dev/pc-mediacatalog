@@ -139,11 +139,12 @@ public class DuplicateManagerWindow : Window
 
         var move = MessageBox.Show(this,
             $"Consolidate {files.Count} selected file(s) into the library?\n\n" +
-            "Yes = move (copy, verify, delete original). No = copy only.",
-            "Consolidate", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-        if (move == MessageBoxResult.Cancel) return;
+            "Anything that has to be copied is verified against the original first, and the " +
+            "original is then permanently deleted — consolidating leaves one copy, in the library.",
+            "Consolidate", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (move != MessageBoxResult.OK) return;
 
-        var outcome = await _vm.ConsolidateModelsAsync(files, move == MessageBoxResult.Yes);
+        var outcome = await _vm.ConsolidateModelsAsync(files, deleteOriginal: true);
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
         Reload();
     }

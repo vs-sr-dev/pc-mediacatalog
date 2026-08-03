@@ -48,7 +48,8 @@
                 <Button x:Name="RelocateButton" Content="Relocate…"
                         Click="OnRelocateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
                 <CheckBox x:Name="DeleteOriginalCheck" Content="Delete after verify"
-                          VerticalAlignment="Center" Margin="6,0"/>
+                          VerticalAlignment="Center" Margin="6,0"
+                          ToolTip="Applies to Relocate: with this ticked the original is deleted once the copy has been verified, making it a move rather than a copy. Consolidating is always a move — it exists to leave one copy, in the library."/>
                 <Button x:Name="RenameButton" Content="Rename…"
                         Click="OnRenameClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
                 <Button x:Name="ConsolidateButton" Content="Consolidate…"
@@ -96,13 +97,21 @@
                     <CheckBox Content="not" IsChecked="{Binding FilterNegate}" VerticalAlignment="Center"
                               Margin="2,0" ToolBar.OverflowMode="Never"
                               ToolTip="Exclude rows that match (e.g. Category not Audio)."/>
-                    <TextBox Text="{Binding FilterPattern, UpdateSourceTrigger=PropertyChanged, Delay=200}"
-                             Width="280" VerticalAlignment="Center" Margin="4,0"
-                             ToolBar.OverflowMode="Never"
-                             ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains."/>
+                    <!-- Editable, so open-ended columns (Name, Path, Title) are typed into
+                         exactly as before, while the columns that hold a fixed few values
+                         (Dup, Kind, Filed, Category, Integrity, TMDb) offer them in the
+                         drop-down — including "(blank)", which is how you ask for the files
+                         a column says nothing about. -->
+                    <ComboBox x:Name="FilterValueBox" IsEditable="True" IsTextSearchEnabled="False"
+                              ItemsSource="{Binding FilterValues}"
+                              Text="{Binding FilterPattern, UpdateSourceTrigger=PropertyChanged, Delay=200}"
+                              PreviewKeyDown="OnFilterValueKeyDown"
+                              Width="280" VerticalAlignment="Center" Margin="4,0"
+                              ToolBar.OverflowMode="Never"
+                              ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains. Enter adds the filter; columns with a fixed set of values offer them in the list."/>
                     <Button Content="Add filter" Click="OnAddFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"
                             ToolBar.OverflowMode="AsNeeded"
-                            ToolTip="Stack this as an additional filter (multiple filters per column allowed)."/>
+                            ToolTip="Stack this as an additional filter (multiple filters per column allowed). Enter in the box does the same."/>
                     <Button Content="Clear all" Click="OnClearFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
                     <Separator/>
                     <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
