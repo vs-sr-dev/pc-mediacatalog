@@ -54,6 +54,11 @@ dotnet run --project MediaCatalog.App
    to happen costs about as much as the copy would, which is the whole wait the rename is
    there to avoid. The volume is identified by its GUID rather than by drive letter, so a
    volume mounted at two letters — or into a folder — is still recognised as one drive.
+5. **A move that fails says why.** An unplugged drive, a share that has gone, a folder you
+   have no permission to write to, a disk with no room left, a file held open — and by
+   which application — a path Windows will not take: each is named, with the path it is
+   about. The unreachable cases are caught *before* anything is copied, and a copy that
+   fails part-way is removed rather than left looking like the file it is not.
 
 All data is written to **the folder the app runs from** (portable-app style) — the
 catalogue (`catalog.xml`), tool paths (`tools.xml`), and scan state — not to
@@ -69,7 +74,10 @@ in a panel occupying a third of the window at all times:
    filter, since the old catalogue was built under the old rules. It discards typed titles,
    set categories and computed fingerprints, so it asks twice.
 2. **Where should it look?** — drives and extra folders. A folder already sitting on a
-   ticked drive is covered by it and skipped rather than walked twice.
+   ticked drive is covered by it and skipped rather than walked twice. **Remove** takes a
+   folder off the list for good — including one marked *(not found)*, which is a folder
+   since deleted or one on a drive that is not connected. Those start unticked rather than
+   being walked for and then reported as never having turned up.
 3. **What should it pick up?** — audio/video filter and the minimum/maximum file size.
 4. **Ready** — a summary of the lot, plus what to do about any drive that isn't connected.
 
@@ -103,6 +111,75 @@ application restart:
 
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
+
+## New in v2.2
+
+**Consolidating never leaves the library holding the same thing twice**
+- ✅ **An episode already in the library is never filed a second time.** Two releases of one
+  episode carry two different names, so the old name-collision check saw nothing to stop —
+  and the library quietly gained a duplicate. An episode is now identified by its show,
+  season and episode number, whatever the file is called. Byte-identical copies settle
+  themselves: the library keeps the one it has, and the arrival goes with every other copy
+  of it. Genuinely different files — a different release, a different quality — are put in
+  front of you side by side, with sizes, lengths, qualities and deep-check verdicts, and
+  one of them stays
+- ✅ **Consolidating is always a move.** A file already on the destination's drive is renamed
+  into place without being copied; a whole folder in the wrong place is renamed rather than
+  emptied out one file at a time; only a genuine cross-drive move copies, verifies against
+  the original and then permanently deletes it. One copy, in the library
+- ✅ **A misnamed folder with subfolders is renamed too** — a film folder with its `\Extras\`
+  beside it is moved as a unit now, instead of falling back to copying every file out
+
+**Naming**
+- ✅ **Double episodes.** `Burn.Notice.S06E11E12.mp4` is episodes 11 *and* 12 of season 6,
+  and `The.Librarians.US.S01E01-E02.avi` is episodes 1 and 2 of season 1. Shown as
+  `S06E11-E12`, filed as `11-12 - name.ext`, and — since a double is not either of the
+  episodes it holds — never mistaken for a duplicate of one of them
+- ✅ **Custom file names per category.** Write a pattern like `{episode:00} - {title} -
+  {numbering}` or `{title} ({year}) [{quality}]` against a consolidation folder and its
+  files are named that way, with an example shown beside the box as you type. Fields that
+  have nothing to say come out empty and the punctuation around them is tidied up. The
+  extension never changes — nothing here re-encodes anything
+
+**Possible duplicates**
+- ✅ **A programme is only a possible duplicate of another programme with the same show
+  title *and* the same season and episode number.** Two episodes of one series share a
+  title, a year and very nearly a name without being remotely the same thing. The year is
+  no longer part of it for TV either: two copies of one episode routinely disagree about
+  which year it is
+- ✅ **Deep checking says how far along it is** — which file of how many, how far into that
+  file the decode has reached, and how many are left, with a bar and a Stop button. It was
+  minutes of silence before
+
+**Editing**
+- ✅ **A season/episode you type in is never cleared.** A film has neither — so somebody
+  typing one in is saying the file was identified wrongly, not asking for the correction to
+  be thrown away. The numbering stays and changing the category to *TvShow* is offered
+- ✅ **A "to episode" box** for the double-episode case
+
+**Filtering**
+- ✅ **Enter in the filter box adds the filter**
+- ✅ **Columns with a fixed set of values offer them** — Dup, Kind, Filed, Category,
+  Integrity and TMDb are picked from a list rather than typed from memory, and **(blank)**
+  is one of the choices, so "every file that is *not* a duplicate" is finally a filter you
+  can write. Open-ended columns are typed into exactly as before
+
+**Elsewhere**
+- ✅ **A failed move says what went wrong** — an unplugged drive, no write permission, a
+  full disk, a file held open and by what — instead of a count of failures. The unreachable
+  cases are caught before a single byte is copied
+- ✅ **Watch a particular folder**, not the whole drive it is on
+- ✅ **The file-name position setting applies everywhere** a file goes past, not only during
+  a scan: verifying, re-hashing, moving, consolidating, analysing
+- ✅ **The scan wizard opens tall enough to show its buttons**, and a folder can always be
+  removed from its list — including one marked *(not found)*, which used to come back the
+  next time it was opened
+- ✅ **No notification when the window is closed to the notification area** — it was about
+  something you had just done on purpose
+- ✅ **The Recycle Bin warning is now one sentence.** Deleting for good already takes three
+  deliberate acts and the option is off unless you turn it on; a paragraph of alarm on top
+  of that was shouting at the wrong moment
+- ✅ **The results update as soon as anything changes them**, consolidation included
 
 ## New in v2.1
 - ✅ **Seasons written in words** — `Season Three` reads as season 03, `Series twenty one`
@@ -279,7 +356,8 @@ filed two different ways. A season/episode code beats the extension: anything th
 > instruction.) Folder rules are on their way out and may go entirely in a later release.
 
 **Edit details** — right-click → *Edit details…* opens every field of an entry at once:
-title, year, season, episode, category, file name, **modified date**, integrity and kind.
+title, year, season, episode, *to episode* (for a double episode), category, file name,
+**modified date**, integrity and kind.
 What the content *is* (title, year, numbering, category) is written to every byte-identical
 copy, because they are the same thing; what the *file* is (its name, its date, what a decode
 made of it) belongs to that one file. A corrected date is written to the file on disk as
@@ -310,6 +388,22 @@ or typed by you, are left exactly as they were spelled either way.
 that meant something else — the 13 in *Apollo 13*, a track numbered 104 — and keeping it
 would only file the thing wrongly. Nothing is lost that was ever right.
 
+**Numbering you type in is the exception, and is never cleared.** A film has no season and
+no episode — so somebody typing one into a file filed as a film is telling us the file was
+*identified* wrongly, not asking for their correction to be thrown away. The numbering
+stays, and the editor offers to change the category to *TvShow*, which is what the numbering
+almost certainly means. It survives rescans and catalogue refreshes too: it is not a guess
+to be made again.
+
+**Double episodes.** `Burn.Notice.S06E11E12.HDTV.x264-2HD.[VTV].mp4` holds episodes 11 *and*
+12 of season 6, and `The.Librarians.US.S01E01-E02.HDTV.XviD-FUM.avi` holds episodes 1 and 2
+of season 1. Both forms are read — as are `S03E07-08` and `2x05x06` — and shown in the
+**S/E** column as `S06E11-E12`. The second number has to follow the first and stay close to
+it, so a resolution or a year sitting next to an episode code is not mistaken for one. A
+double is filed as `11-12 - name.ext`, and is a different thing from either of the episodes
+it contains: it is never taken for a duplicate of episode 11, and episode 11 is never taken
+for a duplicate of it. Type a *to episode* in *Edit details…* to correct one by hand.
+
 > **Titles travel by hash, never by matching title.** Two files can both be called *xyz* and
 > still be two different things — and one of them may already be correct. Sharing a name is
 > no evidence of sharing an identity; sharing a content hash is. (The one title-based spread
@@ -330,18 +424,61 @@ categorised as **TvExtra** / **MovieExtra**. Each extra is *linked* to the film 
 it belongs to: it adopts that title and travels with it whenever the main file is
 consolidated.
 
-**Consolidate** — select TV/film files and click **Consolidate…** to move (or copy) them
-into a tidy library:
+**Consolidate** — select TV/film files and click **Consolidate…** to move them into a tidy
+library:
 - TV → `<TV dir>\<A–Z or #>\<Show>\Season NN\NN - name.ext`
 - Films → `<Film dir>\<A–Z or #>\<Title (Year)>\`
 - Extras → the same show/film folder, under `\Extras\`
 
 Seasons are left-padded to ≥2 digits, and episodes are **prefixed with their episode
-number** so a season folder sorts into broadcast order in any file manager. A file with
-**no title** has nowhere to be filed, so you are asked for one before the move rather than
-having it quietly skipped. Target folders are set per category in **Settings… → Library** —
-any number of categories, each with its own folder. Uses the same copy-and-verify as
-Relocate, with a progress bar and an ETA.
+number** so a season folder sorts into broadcast order in any file manager — `11-12 - …`
+for a double episode. A file with **no title** has nowhere to be filed, so you are asked
+for one before the move rather than having it quietly skipped. Target folders are set per
+category in **Settings… → Library** — any number of categories, each with its own folder.
+
+**Consolidating is always a move**, and takes the cheapest route that does the job:
+
+1. **Rename the folder** when a whole folder is simply in the wrong place — one operation,
+   whatever it holds, nothing left behind.
+2. **Rename the file into place** when it is already on the destination's drive. The data
+   never moves, so a terabyte lands as fast as a byte, and nothing is duplicated.
+3. **Copy, verify, delete** only when the file genuinely has to cross drives. The copy is
+   hash-checked against the original, and only then is the original permanently deleted.
+
+Consolidating exists to leave exactly one copy, in the library, which is why there is no
+"copy instead" option: the *Delete after verify* tick-box applies to **Relocate**, where
+copying somewhere is a reasonable thing to want.
+
+**Custom file names.** Each consolidation folder has a *named* box under it. Leave it empty
+for the built-in naming, or write a pattern:
+
+| Field | Means |
+| --- | --- |
+| `{title}` | the programme or film title |
+| `{year}` | year of release, blank when unknown |
+| `{season}` | season number — `{season:00}` pads it to two digits |
+| `{episode}` | episode number — `{episode:00}` pads it |
+| `{episodeend}` | last episode of a double, blank otherwise |
+| `{numbering}` | the whole code: `S01E02`, or `S06E11-E12` for a double |
+| `{quality}` | `1080p` for video, `320 kbps` for audio, blank when unmeasured |
+| `{name}` | the file's current name, without its extension |
+
+So `{episode:00} - {title} - {numbering}` files *Burn Notice* S06E11E12 as
+`11 - Burn Notice - S06E11-E12.mp4`, and `{title} ({year}) [{quality}]` gives
+`Blade Runner (1982) [1080p].mkv`. A field with nothing to say comes out empty and the
+punctuation stranded around it is tidied away, so one pattern copes with a film that has no
+year. An example of what your pattern produces is shown beside the box as you type. **The
+extension never changes** — nothing here re-encodes anything, so a name saying otherwise
+would simply be lying about the contents.
+
+**The library never holds the same episode twice.** Two releases of one episode carry two
+different names, so nothing about the names says they are the same thing — which is exactly
+how a consolidation location gains a duplicate. An episode is identified by its show, its
+season and its episode number instead. When the two files are byte-identical there is
+nothing to decide: the library keeps the copy it already has, and the arrival goes along
+with every other copy of it. When they are genuinely different — a different release, a
+different quality — both are put in front of you with their sizes, lengths, qualities and
+integrity, a deep check a click away, and one of them stays.
 
 **Filed means "in the right place", not "somewhere in the library".** A file counts as
 consolidated only when it sits at the exact path its category, title, year and numbering
@@ -375,11 +512,19 @@ copy at all are left alone: choosing between scattered copies is a decision, not
 
 **Possible duplicates** — the duplicates a hash cannot find. The same film downloaded twice
 from two different releases is identical in what it *is* and different in every byte, so it
-never groups by content. These are found by title, year and — for a programme — season and
-episode, and put side by side with their size, length, quality and integrity so the choice
-of which to keep is an informed one. A **deep check** decodes them first, so a damaged copy
-is not the one that survives. Files carrying a `title` flag in the **Dup** column are these;
-the **SameTitle** view lists them.
+never groups by content. Films are matched on title and year; **a programme is matched on
+its show title and its season and episode number, and nothing else** — two episodes of one
+series share a title, a year and very nearly a name without being remotely the same thing,
+and two copies of one episode routinely disagree about which year it is. A double episode
+is a third thing again, and is not a duplicate of either episode it holds. An episode whose
+numbering could not be worked out is left out rather than guessed at.
+
+The copies are put side by side with their size, length, quality and integrity, so the
+choice of which to keep is an informed one. A **deep check** decodes them first, so a
+damaged copy is not the one that survives — and it now reports which file of how many it is
+on, how far into that file it has got, and how many are left, with a **Stop** button.
+Files carrying a `title` flag in the **Dup** column are these; the **SameTitle** view lists
+them.
 
 **Suggest consolidation** — click **Suggest consolidation…** to scan the catalogue and get a
 reviewable list of proposed moves: current location → new location, with name-collision and
@@ -390,7 +535,14 @@ flagged as such rather than proposed for another copy. Tick the ones to apply.
 
 **Filtering** — the filter bar matches any column with wildcards (`*` = any run, `?` = one
 char; plain text = contains). Tick **not** to exclude matches (e.g. *Category not Audio*),
-and **Add filter** to stack several filters at once. The grid scrolls horizontally.
+and **Add filter** — or just press **Enter** in the box — to stack several filters at once.
+The grid scrolls horizontally.
+
+Columns that hold a fixed set of values — **Dup**, **Kind**, **Filed**, **Category**,
+**Integrity** and **TMDb** — offer them in the box's drop-down rather than asking you to
+remember how `~dup` is spelled, and **(blank)** is one of the choices. That is what makes
+"every file that is *not* a duplicate" a filter you can actually write: *Dup ~ (blank)*.
+Open-ended columns — Name, Path, Title — are typed into exactly as before.
 
 The **view, the filter box and every stacked filter are remembered**, written out as they
 change rather than only at exit, so they come back whatever happened to the app. Turn it
@@ -458,13 +610,17 @@ once, including anything the built-in system-folder list already covers.
 **Watching & startup** — in **Settings…**, enable *Watch for new files* to have new media
 auto-added to the catalogue with a taskbar notification, and *Start with Windows* to launch
 at sign-in. You can tick **exactly which drives to watch** — useful when only one or two of
-the scanned drives ever gain new files. Leaving them all unticked watches everything that
-was scanned.
+the scanned drives ever gain new files — and list **particular folders** underneath, which
+is usually what was meant: watching `E:\dump\` and watching the whole of `E:` are very
+different propositions on a disk holding a hundred thousand files. Subfolders come with a
+watched folder. Naming anything at all, a drive or a folder, means only what is named is
+watched; naming nothing falls back on everything that was scanned.
 
 Started at sign-in, the app comes up **in the notification area with no window**, ready to
 catch new files without getting in the way; double-click the tray icon (or *Open Media
 Catalog* on its menu) to bring it up, and *Exit* to quit properly. While watching is on,
-closing the window hides it back to the tray rather than quitting.
+closing the window hides it back to the tray rather than quitting — quietly, since closing
+the window is something you have just done on purpose.
 
 Two more window options in **Settings…**:
 - *Always start minimised to the notification area* — a quiet start however the app was
@@ -538,10 +694,12 @@ A refusal is not taken at face value:
 - anything still refusing is explained in full — file, reason, holders and path.
 
 *Skip the Recycle Bin (delete permanently)* can be **armed by default** with a setting on
-**Settings… → General**. It sits under a frank warning: the bin is the one thing standing
-between a mis-click and a file that is simply gone, and a recycled delete is the only kind
-Undo can put back. The destructive confirmation still starts clear every single time — the
-setting arms the dialog, never the confirmation.
+**Settings… → General**, under a one-line "we don't recommend this". Deleting a file for
+good already takes three deliberate acts — choosing a delete, ticking the confirmation in
+the dialog, and pressing the button — and the setting is off unless you turn it on, so a
+paragraph of alarm on top of that was shouting at the wrong moment. The destructive
+confirmation still starts clear every single time: the setting arms the dialog, never the
+confirmation.
 
 When a delete takes the **last file out of a folder**, you are asked whether the now-empty
 folder should go too, and any parent it empties in turn goes with it — a season folder that
@@ -699,8 +857,8 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.1` for
-v2.1 — with the product version kept as the number people talk about (`2.1`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.2` for
+v2.2 — with the product version kept as the number people talk about (`2.2`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and

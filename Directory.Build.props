@@ -9,10 +9,10 @@
     the third field move together.
   -->
   <PropertyGroup>
-    <VersionPrefix>2.1.0</VersionPrefix>
-    <FileVersion>0.0.2.1</FileVersion>
-    <AssemblyVersion>0.0.2.1</AssemblyVersion>
-    <InformationalVersion>2.1</InformationalVersion>
+    <VersionPrefix>2.2.0</VersionPrefix>
+    <FileVersion>0.0.2.2</FileVersion>
+    <AssemblyVersion>0.0.2.2</AssemblyVersion>
+    <InformationalVersion>2.2</InformationalVersion>
 
     <Product>Media Catalog</Product>
     <Company>Samuele, Phreak &amp; Claude</Company>
