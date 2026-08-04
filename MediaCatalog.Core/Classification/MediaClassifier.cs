@@ -39,6 +39,18 @@ public static class MediaClassifier
         @"(?<![a-zA-Z0-9])(?<s>\d{1,2})x(?<e>\d{1,3})(?:\s*[-._]?\s*x?(?<e2>\d{1,3}))?(?![a-zA-Z0-9])",
         RegexOptions.Compiled);
 
+    // "The Dead Zone - 04 01 - Broken Circle (2)": the season and the episode written as two
+    // plain numbers side by side, with no letter marking either of them.
+    //
+    // Two bare numbers are far too common to read as an episode code on their own — a year,
+    // a track number, a running time — so this only fires on the shape that means it: the
+    // pair fenced off by a dash on each side, in the slot between the programme's name and
+    // the episode's. Everything looser is left to the compact forms below, which know what
+    // they are looking at.
+    private static readonly Regex SpacedSeasonEpisode = new(
+        @"[-–—]\s*(?<s>\d{1,2})\s*[\s._]\s*(?<e>\d{1,3})(?:\s*[\s._]\s*(?<e2>\d{1,3}))?\s*[-–—]",
+        RegexOptions.Compiled);
+
     // An episode marker with no season beside it: "E07", "Ep 7", "Episode 12", "E07E08".
     // Only ever consulted when a "Season NN" folder has already supplied the season, which
     // is what keeps "Part 2" in a film title from being read as an episode number.
@@ -142,6 +154,7 @@ public static class MediaClassifier
         var se = SeasonEpisode.Match(name);
         if (!se.Success) se = SeasonEpisodeWords.Match(name);
         var xf = XFormat.Match(name);
+        var spaced = FirstOutsideNoise(SpacedSeasonEpisode, name, noise);
 
         if (file.Kind != MediaKind.Video)
         {
@@ -211,6 +224,15 @@ public static class MediaClassifier
             file.Episode = ParseNumber(xf.Groups["e"].Value);
             file.EpisodeEnd = ParseEpisodeEnd(xf, file.Episode);
             titleCut = xf.Index;
+        }
+        else if (spaced is { Success: true })
+        {
+            // "Show - 04 01 - Episode name".
+            file.VideoCategory = VideoCategory.TvShow;
+            file.Season = ParseNumber(spaced.Groups["s"].Value);
+            file.Episode = ParseNumber(spaced.Groups["e"].Value);
+            file.EpisodeEnd = ParseEpisodeEnd(spaced, file.Episode);
+            titleCut = spaced.Index;
         }
         else if (pathSeason is { } folderSeason && pathEpisode is { } folderEpisode)
         {
@@ -336,6 +358,19 @@ public static class MediaClassifier
             if (int.TryParse(m.Groups["y"].Value, out var value) && value <= latest) return m;
         }
         return first;
+    }
+
+    /// <summary>
+    /// The first match that is not sitting inside a codec or resolution token, or null when
+    /// every one of them is. The numbers in "1920x1080" describe the file rather than the
+    /// programme, and nothing here is allowed to read them as an episode code.
+    /// </summary>
+    private static Match? FirstOutsideNoise(
+        Regex pattern, string name, IReadOnlyList<(int Start, int End)> noise)
+    {
+        foreach (Match m in pattern.Matches(name))
+            if (!Overlaps(m, noise)) return m;
+        return null;
     }
 
     /// <summary>True when a match falls inside a codec/resolution token.</summary>

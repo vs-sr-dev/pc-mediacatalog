@@ -16,7 +16,14 @@ public class RenameProposal
         !string.Equals(CurrentName, ProposedName, StringComparison.Ordinal);
 }
 
-public record RenameResult(bool Success, string Message, string NewPath);
+/// <param name="Subtitles">
+/// Subtitle files renamed along with the video, oldest name first. They are matched to
+/// their film by name and by nothing else, so a rename that left them behind would break
+/// the only link there is.
+/// </param>
+public record RenameResult(
+    bool Success, string Message, string NewPath,
+    IReadOnlyList<(string From, string To)>? Subtitles = null);
 
 /// <summary>
 /// Builds and applies rename proposals. Renames happen in place (same folder); the
@@ -124,6 +131,10 @@ public static class RenameService
 
         var dir = Path.GetDirectoryName(file.FullPath) ?? string.Empty;
 
+        // Read before the move: once the video has gone there is nothing left to find its
+        // subtitles by, since the only thing tying them together is the name.
+        var companions = Relocation.SubtitleCompanion.For(file.FullPath);
+
         try
         {
             var target = proposal.ProposedPath;
@@ -140,7 +151,9 @@ public static class RenameService
 
             file.FullPath = target;
             file.FileName = Path.GetFileName(target);
-            return new RenameResult(true, "Renamed.", target);
+
+            var subtitles = Relocation.SubtitleCompanion.MoveBeside(companions, target);
+            return new RenameResult(true, "Renamed.", target, subtitles);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

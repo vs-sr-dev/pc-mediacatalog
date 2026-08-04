@@ -71,6 +71,22 @@ public class MediaFile
     public bool TitleManuallySet { get; set; }
 
     /// <summary>
+    /// True when the year was filled in from a title that has been used more than once — a
+    /// remake, a reboot, a series and the film it came from. The most recent was taken, but
+    /// nothing about the file said which one it is, so the figure is a guess and says so.
+    ///
+    /// Cleared the moment somebody sets the year by hand: a year the user typed is not a
+    /// guess, whatever the catalogue thought before.
+    /// </summary>
+    public bool YearAmbiguous { get; set; }
+
+    /// <summary>
+    /// The other year the title could have meant, when <see cref="YearAmbiguous"/> is set —
+    /// so the user can see the span rather than only being told there was one.
+    /// </summary>
+    public int? AlternativeYear { get; set; }
+
+    /// <summary>
     /// For extras (specials/featurettes): the <see cref="Id"/> of the film or episode
     /// they belong to, so they travel with it. Empty when unlinked.
     /// </summary>

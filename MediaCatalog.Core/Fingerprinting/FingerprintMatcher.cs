@@ -22,6 +22,10 @@ public static class FingerprintMatcher
     public const double AudioThreshold = 0.90;
     public const double VideoThreshold = 0.88;
 
+    /// <summary>Shift budget used while clustering the whole catalogue — about two seconds.</summary>
+    private const int ClusterAudioShift = 16;
+    private const int ClusterVideoShift = 3;
+
     /// <summary>Chromaprint similarity: 1 − bit-error-rate over the aligned prefix.</summary>
     public static double AudioSimilarity(uint[] a, uint[] b)
     {
@@ -43,6 +47,122 @@ public static class FingerprintMatcher
             diffBits += BitOperations.PopCount(a[i] ^ b[i]);
         return 1.0 - diffBits / (double)(n * 64);
     }
+
+    // --- Comparing copies that do not start in the same place ----------------
+    //
+    // Two rips of one film rarely begin on the same frame. A second of distributor logo, a
+    // black frame trimmed, an extra beat before the audio comes in — and from then on the
+    // whole fingerprint is offset, so comparing them position by position says they are
+    // nothing like each other when in fact they are the same thing a moment apart.
+    //
+    // So the comparison slides one against the other and keeps the best alignment it finds.
+    // The straight comparison is tried first and, when it already agrees, nothing is slid at
+    // all: the cost is only paid where there is a disagreement worth explaining.
+
+    /// <summary>Chromaprint frames to slide by. Each is about an eighth of a second.</summary>
+    public const int AudioShiftFrames = 40;
+
+    /// <summary>Keyframe hashes to slide by, for video.</summary>
+    public const int VideoShiftFrames = 8;
+
+    /// <summary>The best chromaprint similarity over every alignment within the shift budget.</summary>
+    public static double BestAudioSimilarity(uint[] a, uint[] b, int maxShift = AudioShiftFrames) =>
+        BestOverShifts(a.Length, b.Length, maxShift, AudioThreshold,
+            (i, j, n) => AudioSimilarity(a.AsSpan(i, n), b.AsSpan(j, n)));
+
+    /// <summary>The same for perceptual video signatures.</summary>
+    public static double BestVideoSimilarity(ulong[] a, ulong[] b, int maxShift = VideoShiftFrames) =>
+        BestOverShifts(a.Length, b.Length, maxShift, VideoThreshold,
+            (i, j, n) => VideoSimilarity(a.AsSpan(i, n), b.AsSpan(j, n)));
+
+    private static double AudioSimilarity(ReadOnlySpan<uint> a, ReadOnlySpan<uint> b)
+    {
+        var n = Math.Min(a.Length, b.Length);
+        if (n < 10) return 0;
+        long diffBits = 0;
+        for (var i = 0; i < n; i++) diffBits += BitOperations.PopCount(a[i] ^ b[i]);
+        return 1.0 - diffBits / (double)(n * 32);
+    }
+
+    private static double VideoSimilarity(ReadOnlySpan<ulong> a, ReadOnlySpan<ulong> b)
+    {
+        var n = Math.Min(a.Length, b.Length);
+        if (n == 0) return 0;
+        long diffBits = 0;
+        for (var i = 0; i < n; i++) diffBits += BitOperations.PopCount(a[i] ^ b[i]);
+        return 1.0 - diffBits / (double)(n * 64);
+    }
+
+    /// <summary>
+    /// Slide the two sequences past each other and keep the best score. Stops as soon as the
+    /// alignment is good enough to have answered the question — which, for the two files that
+    /// really did start at the same moment, is on the very first try.
+    /// </summary>
+    private static double BestOverShifts(
+        int lengthA, int lengthB, int maxShift, double goodEnough,
+        Func<int, int, int, double> score)
+    {
+        if (lengthA == 0 || lengthB == 0) return 0;
+
+        var best = score(0, 0, Math.Min(lengthA, lengthB));
+        if (best >= goodEnough) return best;
+
+        var limit = Math.Min(maxShift, Math.Max(0, Math.Min(lengthA, lengthB) - 1));
+        for (var shift = 1; shift <= limit; shift++)
+        {
+            // b starts later than a, then a starts later than b.
+            var overlap = Math.Min(lengthA - shift, lengthB);
+            if (overlap > 0) best = Math.Max(best, score(shift, 0, overlap));
+
+            overlap = Math.Min(lengthA, lengthB - shift);
+            if (overlap > 0) best = Math.Max(best, score(0, shift, overlap));
+
+            if (best >= goodEnough) break;
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// How alike two catalogued files' fingerprints are, allowing for one starting a moment
+    /// before the other. 0 when they cannot be compared at all — different kinds, or one of
+    /// them has never been fingerprinted.
+    /// </summary>
+    public static double Similarity(MediaFile a, MediaFile b)
+    {
+        if (a.Kind != b.Kind) return 0;
+
+        if (a.Kind == MediaKind.Audio)
+        {
+            if (string.IsNullOrEmpty(a.AudioFingerprint) || string.IsNullOrEmpty(b.AudioFingerprint))
+                return 0;
+            return BestAudioSimilarity(
+                AudioFingerprinter.Parse(a.AudioFingerprint),
+                AudioFingerprinter.Parse(b.AudioFingerprint));
+        }
+
+        if (a.Kind == MediaKind.Video)
+        {
+            if (string.IsNullOrEmpty(a.VideoFingerprint) || string.IsNullOrEmpty(b.VideoFingerprint))
+                return 0;
+            return BestVideoSimilarity(
+                VideoFingerprinter.Parse(a.VideoFingerprint),
+                VideoFingerprinter.Parse(b.VideoFingerprint));
+        }
+
+        return 0;
+    }
+
+    /// <summary>The threshold above which two files of this kind count as the same content.</summary>
+    public static double ThresholdFor(MediaKind kind) =>
+        kind == MediaKind.Audio ? AudioThreshold : VideoThreshold;
+
+    /// <summary>
+    /// True when the fingerprints say these two are the same content. False also covers
+    /// "cannot tell" — a file with no fingerprint is not evidence of anything, and the
+    /// caller is expected to treat that as a question for the user rather than an answer.
+    /// </summary>
+    public static bool LooksLikeSameContent(MediaFile a, MediaFile b) =>
+        Similarity(a, b) >= ThresholdFor(a.Kind);
 
     /// <summary>
     /// Cluster files whose fingerprints match above the per-kind threshold. Only files
@@ -84,9 +204,13 @@ public static class FingerprintMatcher
             // Skip comparing files with wildly different durations (cheap prefilter).
             if (!DurationsComparable(items[i], items[j])) continue;
 
+            // A modest shift budget here, and the full one only where the answer is being
+            // acted on: this loop is every pair against every other pair, and a copy that
+            // starts more than a couple of seconds out is rare enough to be worth finding
+            // deliberately rather than paying for on every comparison in the library.
             var sim = kind == MediaKind.Audio
-                ? AudioSimilarity(audio[i], audio[j])
-                : VideoSimilarity(video[i], video[j]);
+                ? BestAudioSimilarity(audio[i], audio[j], ClusterAudioShift)
+                : BestVideoSimilarity(video[i], video[j], ClusterVideoShift);
 
             if (sim >= threshold)
             {

@@ -5,8 +5,20 @@ namespace MediaCatalog.Core.Imdb;
 
 /// <summary>What the IMDb extract knows about one title.</summary>
 /// <param name="Title">The primary title as IMDb spells it.</param>
-/// <param name="Year">The earliest year recorded for that name, or null if it has none.</param>
-public record ImdbMatch(string Title, int? Year);
+/// <param name="Year">
+/// The year to file it under: the most recent one recorded against that name, or null if
+/// the extract records none.
+/// </param>
+/// <param name="Ambiguous">
+/// True when the name has been used more than once. A remake, a reboot and the film they
+/// were made from all answer to one title, and nothing about a file name says which of them
+/// it is — so the newest is taken and this says plainly that it is a guess.
+/// </param>
+/// <param name="EarliestYear">
+/// The other end of the range, so the user can see what the alternatives were rather than
+/// only being told there were some.
+/// </param>
+public record ImdbMatch(string Title, int? Year, bool Ambiguous = false, int? EarliestYear = null);
 
 /// <summary>
 /// Looks titles up in <c>IMDBData.tsv</c>. Two modes, chosen by the user: held in memory
@@ -115,7 +127,16 @@ public sealed class ImdbTitleIndex
         return result.TryGetValue(title, out var match) ? match : null;
     }
 
-    /// <summary>Keep the earliest year for a name: the original, not the remake.</summary>
+    /// <summary>
+    /// Fold another row into what is known about a name.
+    ///
+    /// One title can belong to several things — the 1969 <i>Italian Job</i> and the 2003 one,
+    /// a series and the film it was based on — and a file name almost never says which. The
+    /// most recent is taken, because the copy somebody has is far more often the current
+    /// release than the fifty-year-old one, and the entry is marked ambiguous so the guess is
+    /// visible rather than silent. The earliest is kept alongside it, so the user can see the
+    /// span they are choosing between.
+    /// </summary>
     private static void Merge(Dictionary<string, ImdbMatch> map, string title, int? year)
     {
         var key = Normalize(title);
@@ -123,13 +144,27 @@ public sealed class ImdbTitleIndex
 
         if (!map.TryGetValue(key, out var existing))
         {
-            map[key] = new ImdbMatch(title, year);
+            map[key] = new ImdbMatch(title, year, Ambiguous: false, EarliestYear: year);
             return;
         }
 
-        // A row that supplies a year beats one that has none; otherwise the older wins.
-        if (year is { } y && (existing.Year is null || y < existing.Year))
-            map[key] = existing with { Year = y };
+        if (year is not { } y) return;                       // a row with no year adds nothing
+
+        // A row that supplies a year beats one that has none, without that counting as a
+        // disagreement: one date and no date are not two dates.
+        if (existing.Year is not { } known)
+        {
+            map[key] = existing with { Year = y, EarliestYear = y };
+            return;
+        }
+
+        var ambiguous = existing.Ambiguous || y != known;
+        map[key] = existing with
+        {
+            Year = Math.Max(known, y),
+            EarliestYear = Math.Min(existing.EarliestYear ?? known, y),
+            Ambiguous = ambiguous
+        };
     }
 
     private static bool TryParse(string line, out string title, out int? year)

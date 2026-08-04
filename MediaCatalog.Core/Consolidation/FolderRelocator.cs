@@ -7,7 +7,12 @@ namespace MediaCatalog.Core.Consolidation;
 /// <param name="From">Where the folder was.</param>
 /// <param name="To">Where it is now.</param>
 /// <param name="Renamed">True when it stayed put and only its name changed.</param>
-public record FolderMove(string From, string To, bool Renamed)
+/// <param name="Files">
+/// The catalogue entries the move carried with it. A folder rename files every file in it
+/// at once without any of them passing through the per-file path, so this is the only record
+/// that they were filed at all — and the duplicate sweep afterwards needs to know.
+/// </param>
+public record FolderMove(string From, string To, bool Renamed, IReadOnlyList<MediaFile> Files)
 {
     public string Describe() => Renamed
         ? $"renamed '{Path.GetFileName(From)}' to '{Path.GetFileName(To)}'"
@@ -135,16 +140,18 @@ public static class FolderRelocator
         // Everything that was under the old folder is now under the new one, at the same
         // place within it — a rename changes the prefix and nothing else.
         var prefix = source + Path.DirectorySeparatorChar;
+        var travelled = new List<MediaFile>();
         foreach (var file in catalogue)
         {
             if (!file.FullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
             file.FullPath = Path.Combine(destination, file.FullPath[prefix.Length..]);
             file.FileName = Path.GetFileName(file.FullPath);
+            travelled.Add(file);
         }
 
         var sameParent = string.Equals(Path.GetDirectoryName(source), parent,
             StringComparison.OrdinalIgnoreCase);
-        return new FolderMove(source, destination, sameParent);
+        return new FolderMove(source, destination, sameParent, travelled);
     }
 
     /// <summary>

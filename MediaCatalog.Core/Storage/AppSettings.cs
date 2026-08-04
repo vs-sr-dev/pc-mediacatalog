@@ -41,6 +41,22 @@ public class CategoryConsolidation
     public string NameTemplate { get; set; } = string.Empty;
 }
 
+/// <summary>
+/// How little a folder may be left holding before it counts as scraps rather than content,
+/// for one category.
+///
+/// The figure has to be per category because the same three megabytes mean opposite things:
+/// left behind after a film has been filed it is a sample, a thumbnail or a readme, while in
+/// a music folder it is very probably a track somebody wants.
+/// </summary>
+public class LeftoverThreshold
+{
+    public string Category { get; set; } = string.Empty;
+
+    /// <summary>Bytes. 0 means only a genuinely empty folder is ever offered for removal.</summary>
+    public long Bytes { get; set; }
+}
+
 /// <summary>Remembered width/visibility of a results-grid column.</summary>
 public class ColumnLayout
 {
@@ -228,6 +244,89 @@ public class AppSettings
     public bool OfferRemoveEmptyFolders { get; set; } = true;
 
     /// <summary>
+    /// Delete an emptied folder outright rather than sending it to the Recycle Bin. On by
+    /// default, and safe in a way that deleting a *file* permanently is not: the folder is
+    /// empty, or holds only what the size threshold below has already called scraps, so
+    /// there is nothing in it to recover.
+    /// </summary>
+    public bool DeleteEmptyFoldersPermanently { get; set; } = true;
+
+    /// <summary>
+    /// Per-category size below which whatever a consolidation left behind counts as scraps,
+    /// so the folder can go rather than being kept for the sake of a sample clip.
+    /// </summary>
+    [XmlArray("LeftoverThresholds"), XmlArrayItem("Threshold")]
+    public List<LeftoverThreshold> LeftoverThresholds { get; set; } = new();
+
+    /// <summary>Set once the defaults below have been seeded, so a cleared list stays cleared.</summary>
+    public bool LeftoverThresholdsInitialised { get; set; }
+
+    /// <summary>
+    /// Bring subtitles along when their video is consolidated or moved. Off, they are
+    /// removed instead: a subtitle is matched to its film by name alone, so one left behind
+    /// after the film has gone can never be matched to anything again.
+    /// </summary>
+    public bool ConsolidateSubtitles { get; set; } = true;
+
+    /// <summary>
+    /// How long to wait after spotting a new file before saying anything, in seconds.
+    /// Five files arriving together are one thing that happened, not five, and five
+    /// notifications about it is four too many.
+    /// </summary>
+    public int NewFileNotifyDelaySeconds { get; set; } = 20;
+
+    /// <summary>
+    /// The order categories appear in wherever one is chosen. Names not listed here follow
+    /// in their built-in order, so a new category never disappears for want of being listed.
+    /// </summary>
+    [XmlArray("CategoryOrder"), XmlArrayItem("Category")]
+    public List<string> CategoryOrder { get; set; } = new();
+
+    /// <summary>
+    /// The leftover size limit for a category, in bytes. Extras follow the show or film they
+    /// belong to, as their folder does; anything unlisted is 0 — only an empty folder goes.
+    /// </summary>
+    public long LeftoverThresholdFor(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return 0;
+
+        var match = LeftoverThresholds.FirstOrDefault(t =>
+            string.Equals(t.Category, category, StringComparison.OrdinalIgnoreCase));
+        if (match != null) return Math.Max(0, match.Bytes);
+
+        if (string.Equals(category, "TvExtra", StringComparison.OrdinalIgnoreCase))
+            return LeftoverThresholdFor("TvShow");
+        if (string.Equals(category, "MovieExtra", StringComparison.OrdinalIgnoreCase))
+            return LeftoverThresholdFor("Movie");
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The figures a new install starts with: video categories get 25 MB, on the grounds
+    /// that nothing left beside a filed film at that size is the film. Audio gets nothing,
+    /// because a three-megabyte file in a music folder is very likely a track.
+    /// </summary>
+    private static readonly (string Category, long Bytes)[] DefaultLeftoverThresholds =
+    {
+        ("TvShow", 25L * 1024 * 1024),
+        ("Movie", 25L * 1024 * 1024),
+        ("Audio", 0)
+    };
+
+    /// <summary>Seed the defaults once, so an emptied list is not helpfully refilled.</summary>
+    public void NormaliseLeftoverThresholds()
+    {
+        if (LeftoverThresholdsInitialised) return;
+        LeftoverThresholdsInitialised = true;
+
+        foreach (var (category, bytes) in DefaultLeftoverThresholds)
+            if (!LeftoverThresholds.Any(t =>
+                    string.Equals(t.Category, category, StringComparison.OrdinalIgnoreCase)))
+                LeftoverThresholds.Add(new LeftoverThreshold { Category = category, Bytes = bytes });
+    }
+
+    /// <summary>
     /// Give every word of a parsed title its initial capital, so a title read out of
     /// "the.matrix.1999.mkv" reads *The Matrix*. On by default; confirmed titles are left
     /// exactly as their source spelled them either way.
@@ -306,8 +405,34 @@ public class AppSettings
 
     // --- Helpers -----------------------------------------------------------
 
-    public bool IsExtensionIgnored(string extension) =>
-        IgnoredExtensions.Any(e => string.Equals(e, extension, StringComparison.OrdinalIgnoreCase));
+    /// <summary>
+    /// True when the extension is on the ignore list, by name or by pattern.
+    ///
+    /// A rule may be a plain extension (<c>.nfo</c>) or a wildcard one: <c>?</c> stands for
+    /// exactly one character and <c>*</c> for any run of them, so <c>.mp?</c> covers .mp3 and
+    /// .mp4 while <c>.m*</c> covers every extension beginning with m. The whole extension has
+    /// to match — a pattern is not a "contains" search, or <c>.mp3</c> would ignore
+    /// <c>.mp3x</c> as well.
+    /// </summary>
+    public bool IsExtensionIgnored(string extension)
+    {
+        if (string.IsNullOrEmpty(extension)) return false;
+
+        foreach (var rule in IgnoredExtensions)
+        {
+            if (string.IsNullOrWhiteSpace(rule)) continue;
+            var pattern = rule.Trim();
+
+            if (HasWildcard(pattern))
+            {
+                // Anchored, unlike the results filter: ".mp3" must not ignore ".mp3x".
+                if (Filtering.WildcardMatcher.IsMatchWhole(extension, pattern)) return true;
+            }
+            else if (string.Equals(pattern, extension, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
 
     public void IgnoreExtension(string extension)
     {
@@ -656,15 +781,24 @@ public class AppSettings
 
     public static AppSettings Load(string path)
     {
-        if (!File.Exists(path)) return new AppSettings();
+        if (!File.Exists(path)) return Fresh();
         try
         {
             using var reader = new StreamReader(path);
             var settings = (AppSettings?)Serializer.Deserialize(reader) ?? new AppSettings();
             settings.NormaliseCategoryFolders();
+            settings.NormaliseLeftoverThresholds();
             return settings;
         }
-        catch { return new AppSettings(); }
+        catch { return Fresh(); }
+    }
+
+    /// <summary>A first-run settings object, with the defaults that are lists seeded.</summary>
+    private static AppSettings Fresh()
+    {
+        var settings = new AppSettings();
+        settings.NormaliseLeftoverThresholds();
+        return settings;
     }
 
     public void Save(string path)

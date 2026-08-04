@@ -71,7 +71,15 @@ public static class CategoryResolver
         };
     }
 
-    /// <summary>Built-in categories plus the user's custom ones, de-duplicated.</summary>
+    /// <summary>
+    /// Built-in categories plus the user's custom ones, de-duplicated and in the order the
+    /// user has put them in.
+    ///
+    /// The order is the user's because the menu is theirs: somebody whose library is nine
+    /// tenths television should not have to walk past Movie every time. Anything not
+    /// mentioned in the ordering follows in its built-in position, so a category added later
+    /// turns up at the bottom rather than vanishing.
+    /// </summary>
     public static IReadOnlyList<string> All(AppSettings settings)
     {
         var list = new List<string>(BuiltIn);
@@ -79,6 +87,44 @@ public static class CategoryResolver
             if (!string.IsNullOrWhiteSpace(c) &&
                 !list.Contains(c, StringComparer.OrdinalIgnoreCase))
                 list.Add(c);
-        return list;
+
+        return Ordered(list, settings.CategoryOrder);
     }
+
+    /// <summary>
+    /// <paramref name="categories"/> rearranged to follow <paramref name="order"/>. Names in
+    /// the order that no longer exist are ignored; names missing from it keep their relative
+    /// positions at the end.
+    /// </summary>
+    public static IReadOnlyList<string> Ordered(
+        IReadOnlyList<string> categories, IReadOnlyList<string> order)
+    {
+        if (order.Count == 0) return categories;
+
+        var remaining = new List<string>(categories);
+        var result = new List<string>(categories.Count);
+
+        foreach (var wanted in order)
+        {
+            var index = remaining.FindIndex(c =>
+                string.Equals(c, wanted, StringComparison.OrdinalIgnoreCase));
+            if (index < 0) continue;
+            result.Add(remaining[index]);
+            remaining.RemoveAt(index);
+        }
+
+        result.AddRange(remaining);
+        return result;
+    }
+
+    /// <summary>
+    /// The categories worth giving a consolidation folder of their own.
+    ///
+    /// Extras are not among them, and never were: a special belongs beside the film or the
+    /// episode it is a special of, in an Extras subfolder of that, so a separate destination
+    /// for them would be a setting that could only ever be ignored. Unknown and Other have
+    /// nothing in common with each other and are left to the user to configure or not.
+    /// </summary>
+    public static IReadOnlyList<string> Consolidatable(AppSettings settings) =>
+        All(settings).Where(c => !IsExtra(c)).ToList();
 }

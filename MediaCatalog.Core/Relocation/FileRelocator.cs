@@ -12,6 +12,21 @@ public enum DuplicatePolicy
     Skip
 }
 
+/// <summary>What becomes of the subtitles sitting beside a file that is being moved.</summary>
+public enum SubtitlePolicy
+{
+    /// <summary>Leave them alone — the behaviour of every version before they were noticed.</summary>
+    Leave = 0,
+    /// <summary>Bring them along, renamed to match wherever the video ends up.</summary>
+    Follow,
+    /// <summary>
+    /// Remove them once the video has gone. A subtitle is tied to its film by name and by
+    /// nothing else, so one left behind after the film has moved can never be matched to
+    /// anything again — it is litter, not a spare copy.
+    /// </summary>
+    Discard
+}
+
 /// <param name="AlreadyPresent">
 /// The identical file is already at the destination, so nothing was copied — the caller
 /// can offer to delete the redundant source copy.
@@ -35,6 +50,7 @@ public static class FileRelocator
     /// <param name="newFileName">Rename on arrival (e.g. an episode-numbered name); null keeps the current name.</param>
     /// <param name="onDuplicate">What to do when something already occupies the destination name.</param>
     /// <param name="copiedBytes">Reports bytes as they are copied, for progress and ETA.</param>
+    /// <param name="subtitles">What to do with any subtitle files sitting beside this one.</param>
     public static async Task<RelocationResult> RelocateAsync(
         MediaFile file,
         string destinationDir,
@@ -42,10 +58,35 @@ public static class FileRelocator
         string? newFileName = null,
         DuplicatePolicy onDuplicate = DuplicatePolicy.Rename,
         IProgress<long>? copiedBytes = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        SubtitlePolicy subtitles = SubtitlePolicy.Leave)
     {
         if (!File.Exists(file.FullPath))
             return new RelocationResult(false, "Source file no longer exists.", file.FullPath);
+
+        // Read while the video is still where the subtitles are named after it: afterwards
+        // there is nothing left to find them by.
+        var companions = subtitles == SubtitlePolicy.Leave
+            ? new List<SubtitleFile>()
+            : SubtitleCompanion.For(file.FullPath);
+
+        // Called at each point the video has successfully arrived somewhere new.
+        void SettleSubtitles(string arrivedAt)
+        {
+            if (companions.Count == 0) return;
+            switch (subtitles)
+            {
+                case SubtitlePolicy.Follow when deleteOriginal:
+                    SubtitleCompanion.MoveBeside(companions, arrivedAt);
+                    break;
+                case SubtitlePolicy.Follow:
+                    SubtitleCompanion.CopyBeside(companions, arrivedAt);
+                    break;
+                case SubtitlePolicy.Discard when deleteOriginal:
+                    SubtitleCompanion.Delete(companions);
+                    break;
+            }
+        }
 
         // Worth saying before a single byte is copied: an unplugged drive or a share that
         // has gone is not a failure to report at the end of a long operation, it is a
@@ -81,6 +122,7 @@ public static class FileRelocator
                 {
                     copiedBytes?.Report(file.SizeBytes);
                     UpdateFile(file, desired, file.Sha256);
+                    SettleSubtitles(desired);
                     return new RelocationResult(true, "Moved on the same drive (no copy needed).", desired);
                 }
             }
@@ -123,6 +165,7 @@ public static class FileRelocator
             {
                 copiedBytes?.Report(file.SizeBytes);
                 UpdateFile(file, destPath, sourceHash);
+                SettleSubtitles(destPath);
                 return new RelocationResult(true, "Moved on the same drive (no copy needed).", destPath);
             }
 
@@ -164,7 +207,8 @@ public static class FileRelocator
                 var failure = FileDeleter.DeleteOne(file.FullPath, toRecycleBin: false);
                 if (failure != null)
                 {
-                    // Copy is verified and safe; we just couldn't remove the original.
+                    // Copy is verified and safe; we just couldn't remove the original. The
+                    // subtitles stay with the original, since that is where the video is.
                     UpdateFile(file, destPath, sourceHash);
                     return new RelocationResult(true,
                         $"Copied and verified, but the original could not be deleted: {failure.Reason}",
@@ -173,6 +217,7 @@ public static class FileRelocator
             }
 
             UpdateFile(file, destPath, sourceHash);
+            SettleSubtitles(destPath);
             return new RelocationResult(true,
                 deleteOriginal ? "Moved and verified." : "Copied and verified.", destPath);
         }

@@ -9,11 +9,22 @@ public record VerifyProgress(int Done, int Total, string Current, string Phase);
 /// <param name="TmdbVerified">Titles the extract didn't know, confirmed online instead.</param>
 /// <param name="YearsFilled">Films and shows given the year they were missing.</param>
 /// <param name="Unresolved">Files neither source could identify.</param>
-public record VerifyReport(int ImdbVerified, int TmdbVerified, int YearsFilled, int Unresolved)
+/// <param name="YearsUncertain">
+/// Of those years, how many came from a title that has been used more than once. The most
+/// recent was taken; these are the ones worth a second look, and they are flagged on the
+/// files themselves so they can be found again later.
+/// </param>
+public record VerifyReport(
+    int ImdbVerified, int TmdbVerified, int YearsFilled, int Unresolved, int YearsUncertain = 0)
 {
     public string Describe() =>
         $"{ImdbVerified} title(s) confirmed from IMDb, {TmdbVerified} from TMDb, " +
-        $"{YearsFilled} year(s) filled in, {Unresolved} still unidentified.";
+        $"{YearsFilled} year(s) filled in, {Unresolved} still unidentified." +
+        (YearsUncertain > 0
+            ? $"\n{YearsUncertain} of those year(s) came from a title that has been used more " +
+              "than once — the most recent was taken, and they are marked with a ? in the Year " +
+              "column. The \"Uncertain year\" view lists them."
+            : "");
 }
 
 /// <summary>
@@ -146,6 +157,7 @@ public class TitleVerifier
         // --- Years ---
         // Done last, so a title just confirmed above is the one we look the year up under.
         var yearsFilled = 0;
+        var yearsUncertain = 0;
         foreach (var file in toYear)
         {
             ct.ThrowIfCancellationRequested();
@@ -155,11 +167,20 @@ public class TitleVerifier
             if (match?.Year is not { } year) continue;
 
             file.Year = year;
+
+            // One title, several things released under it. The newest is the better bet —
+            // the copy somebody has is far more often the current release than the
+            // fifty-year-old one — but it is still a bet, and the file says so.
+            file.YearAmbiguous = match.Ambiguous;
+            file.AlternativeYear = match.Ambiguous ? match.EarliestYear : null;
+            if (match.Ambiguous) yearsUncertain++;
+
             yearsFilled++;
         }
 
         progress?.Report(new VerifyProgress(toVerify.Count, toVerify.Count, string.Empty, "Done"));
-        return new VerifyReport(imdbVerified, tmdbVerified, yearsFilled, unresolved.Count);
+        return new VerifyReport(
+            imdbVerified, tmdbVerified, yearsFilled, unresolved.Count, yearsUncertain);
     }
 
     /// <summary>
