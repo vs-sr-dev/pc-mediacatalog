@@ -112,6 +112,112 @@ application restart:
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
 
+## New in v2.3
+
+**Consolidating without being asked anything**
+- ✅ **Auto-consolidate.** One button files everything the program can decide about on its
+  own, and hands you a list of what it could not. The rules are the ones a careful person
+  would follow, in that order: a file that does not yet say what it is (no title, no year on
+  a film, no episode number on an episode, no consolidation folder for its category) is set
+  aside untouched with the reason spelled out; a file with no other copy is simply filed;
+  copies that are byte-for-byte identical decide themselves, keeping the one already in the
+  library because that means moving nothing and deleting the rest; and genuinely different
+  files claiming to be the same thing are **fingerprinted and compared**, then ranked by
+  quality — best picture first, and among equals the smallest, since at one resolution the
+  extra bytes are padding — then **decoded end to end**, and only a copy that survives that
+  is kept. A copy that fails the decode is removed along with its byte-identical twins,
+  which are damaged by definition, and the next best is tried until one survives or none is
+  left. If the fingerprints disagree, nothing is touched: one of the two is mislabelled, and
+  only you can say which
+- ✅ **Nothing is deleted until the copy replacing it has arrived.** A run that fails or is
+  stopped part-way leaves everything it had not yet reached exactly where it was
+- ✅ **Fingerprints allow for copies that don't start together.** An extra second of
+  distributor logo used to make two rips of one film look like nothing alike, because every
+  frame after it was compared against the wrong one. The comparison now slides one against
+  the other and keeps the best alignment — and pays for that only where there is a
+  disagreement to explain, so nothing gets slower for the copies that already agreed
+
+**A file that has been filed is never left with copies lying about**
+- ✅ **Every consolidation ends with a duplicate sweep**, whatever route got there. This was
+  easiest to miss in the case where nothing moved: a whole season put right by renaming its
+  folder is filed just as surely as a file copied one at a time, and used to leave every
+  stray copy of those episodes where it was, unmentioned
+- ✅ **Consolidating a file that has a same-title twin asks first.** Both copies claim to be
+  the same thing without being the same bytes, and only one belongs in the library — so
+  every copy is put in front of you with the facts that decide it, you choose, and the rest
+  are deleted before anything is filed
+
+**Subtitles**
+- ✅ **Subtitles travel with their video.** `The Film.mkv` and `The Film.eng.srt` are tied
+  together by name and by nothing else, so a rename that left the subtitles behind broke
+  them on the spot. A rename now takes them along and renames them to match; consolidating
+  either brings them or — if you would rather the library held only the media — deletes
+  them, so nothing dead is left in the source folder. The language tag is kept exactly as it
+  was, and a subtitle that merely *starts* with the same name (`The Film 2.srt`) is never
+  claimed
+
+**Folders left behind**
+- ✅ **A folder holding only scraps can go with the file that was in it.** After a film is
+  filed its old folder often still holds a sample clip, a screenshot and a readme — litter,
+  not content. Below a size you set the folder goes too. The size is **per category**,
+  because the same three megabytes mean opposite things: left where a film used to be it is
+  a sample, and in a music folder it is very probably a track. Video categories start at
+  25 MB and audio at nothing
+- ✅ **Two things override the size, always.** A catalogued file that has not been filed yet
+  protects its whole folder however small it is — that is work you have not finished. And a
+  folder you have named in the settings (one you scan, one you watch, a consolidation
+  folder) is never removed however empty it ends up: a download folder is empty most of the
+  time, and that is what it is for
+- ✅ **Emptied folders are deleted outright** rather than sent to the Recycle Bin. Safe in a
+  way that deleting a *file* permanently is not — what goes has already been judged to be
+  nothing
+
+**Reading names**
+- ✅ **`The Dead Zone - 04 01 - Broken Circle (2).mkv` is S04E01.** A season and an episode
+  written as two plain numbers with no letter marking either of them. Only the shape that
+  means it is read — the pair fenced off by a dash on each side, in the slot between the
+  programme's name and the episode's — so a lone year or a resolution between dashes is
+  still left alone
+- ✅ **A title that has been used more than once is flagged.** A remake, a reboot, a series
+  and the film it came from all answer to one name, and nothing in a file name says which.
+  The most recent is taken, because the copy somebody has is far more often the current
+  release — and the year is shown as `2017 ?` to say plainly that it is a guess. The
+  **UncertainYear** view lists them; setting the year yourself clears the mark
+
+**Editing**
+- ✅ **Set folder details.** Title, year and category for a whole folder at once, replacing
+  the two separate folder dialogs. The year is the reason it exists: a series whose file
+  names carry the year of the season rather than of the show ends up with twelve episodes
+  filed under a year that is nobody's idea of right, and correcting that an episode at a
+  time is not a reasonable thing to ask. A field you leave alone is not written, so
+  correcting the year does not re-stamp the title
+- ✅ **Set the title for many files at once**, across folders. A show whose episodes ended up
+  in three different places is named once rather than three times
+
+**Smaller things**
+- ✅ **The version is in the title bar.** Asking somebody which build they are running should
+  not mean sending them to a dialog
+- ✅ **Possible duplicates opens on the file you clicked**, with that copy already picked
+  out, and has a **name filter** — a library of any size produces hundreds of these sets
+- ✅ **Ignored file types take wildcards.** `?` is one character and `*` is any run of them,
+  so `.mp?` covers .mp3 and .mp4 and `.m*` covers every extension beginning with m. The
+  whole extension has to match, so `.mp3` does not also ignore `.mp3x`. They are written
+  **tab-separated** in one box now rather than down a scrolling column
+- ✅ **The order of the "Set category" menu is yours**, from the Categories tab. Somebody
+  whose library is nine tenths television should not walk past Movie every time
+- ✅ **The naming pattern is filled in for you** on a fresh install, with a **Suggest** button
+  beside every box — a pattern language is far easier to learn from a working example than
+  from a list of fields. Existing libraries are left alone, since filling the box in for one
+  already filed under the built-in naming would quietly rename all of it
+- ✅ **TvExtra and MovieExtra no longer offer a consolidation folder.** A special belongs
+  beside the film or episode it is a special of, in an `\Extras\` subfolder of that, so a
+  destination of its own was a setting that could only ever be ignored
+- ✅ **New files are announced once, not five times.** A folder copied in writes forty files
+  within a second of each other; the first starts a short wait and everything landing during
+  it joins the same message
+- ✅ **Nothing is said when the window goes to the notification area.** Minimising is
+  something you just did on purpose, to a window you configured to behave that way
+
 ## New in v2.2
 
 **Consolidating never leaves the library holding the same thing twice**
@@ -342,11 +448,15 @@ on demand with **Verify** on the right-click menu.
 ## Library management
 
 **Categories** — right-click files in the grid → *Set category* (built-in or your own),
-*Set category for this folder…* (applies to a whole folder, optionally its subfolders),
-or *Add new category…*. Overrides win over the auto-detected category, and setting one on a
-file sets it on **every exact duplicate of that file** too, so the same content is never
-filed two different ways. A season/episode code beats the extension: anything that says
-`S02E05` — whatever it is called or however it is packaged — is categorised as **TvShow**.
+*Set folder details…* (applies to a whole folder, optionally its subfolders), or *Add new
+category…*. Overrides win over the auto-detected category, and setting one on a file sets it
+on **every exact duplicate of that file** too, so the same content is never filed two
+different ways. A season/episode code beats the extension: anything that says `S02E05` —
+whatever it is called or however it is packaged — is categorised as **TvShow**.
+
+The order the categories appear in is yours, from **Settings… → Categories**: somebody whose
+library is nine tenths television should not have to walk past *Movie* every time. A category
+added later joins the bottom of the list rather than disappearing from it.
 
 > **Everything a file knows lives in the catalogue.** Setting a category or title on a
 > folder writes it onto each of that folder's files rather than leaving a rule behind in
@@ -372,9 +482,27 @@ straight back and treat the file as changed.
 **Titles** — correct a title in *Edit details…*; the box starts from the current title, or
 from the file name without its extension when there isn't one. The correction is applied to
 the selected file and **to its byte-identical copies** — so a copy that never had a title
-gets one too — and to nothing else. *Set title for this folder…* names a whole folder (or a
-parent) at once, again reaching the copies of those files wherever they live. A hand-typed
-title counts as validated (shown as ✎ in the TMDb column; ✓ means confirmed by IMDb or TMDb).
+gets one too — and to nothing else. *Set title for the selected files…* names everything you
+have selected at once, **wherever those files live**: a show whose episodes ended up in three
+different folders is named once rather than three times. *Set folder details…* names a whole
+folder (or a parent) at once, again reaching the copies of those files wherever they live. A
+hand-typed title counts as validated (shown as ✎ in the TMDb column; ✓ means confirmed by
+IMDb or TMDb).
+
+**Set folder details** — one dialog for everything a folder can be told: the title, the year
+and the category. The year is the reason it exists. A series whose file names carry the year
+of each season rather than of the show ends up with twelve episodes filed under a year that
+is nobody's idea of right, and correcting that one episode at a time is not a reasonable
+thing to ask. A field you leave alone is not written at all, so correcting the year does not
+quietly re-stamp the title as hand-typed; the year has its own tick-box, because *leave it
+alone* and *it has no year* are different instructions and an empty box cannot say both.
+
+**A year that could be the wrong one is marked.** One title can belong to several things — a
+remake, a reboot, a series and the film it came from — and nothing in a file name says which.
+The most recent is taken, because the copy somebody has is far more often the current release
+than the fifty-year-old one, and the Year column shows `2017 ?` to say plainly that it is a
+guess rather than a fact. The **UncertainYear** view lists every one of them; setting the
+year yourself clears the mark, since a year you typed is not a guess.
 
 Titles worked out from a file name get **an initial capital on every word**, so
 `the.matrix.1999.mkv` reads *The Matrix*. Only the first letter is touched: a word that
@@ -449,6 +577,95 @@ Consolidating exists to leave exactly one copy, in the library, which is why the
 "copy instead" option: the *Delete after verify* tick-box applies to **Relocate**, where
 copying somewhere is a reasonable thing to want.
 
+**Every consolidation ends with a duplicate sweep.** A file that has just been filed must not
+be left with copies of it lying about — that is the one thing consolidating is for. This was
+easiest to miss in the case where nothing moved: a whole season put right by renaming its
+folder is filed just as surely as a file copied one at a time, and used to leave every stray
+copy of those episodes exactly where it was, unmentioned. Now the copies are gathered up
+whichever route filed them, and you are asked once how firmly they should go.
+
+**A same-title twin is settled first.** If something you are consolidating has another copy
+claiming to be the same thing without being the same bytes, only one of them belongs in the
+library — and a content hash cannot choose between them. Every copy is put in front of you
+with the facts that decide it (size, length, quality, and whether it still decodes), you
+choose, the rest are deleted, and the survivor goes on to be filed with the rest of the
+selection.
+
+### Auto-consolidate
+
+**Auto-consolidate…** files everything the program can decide about on its own and hands you
+a list of what it could not, with the reason for each. Before it starts you are shown the
+shape of the job — how many files need no decision, how many need their copies comparing, and
+how many are missing something only you can supply — because those three numbers are what the
+run is really about.
+
+The rules are the ones a careful person would follow, in that order:
+
+1. **Not enough is known** — no title, no year on a film, no episode number on an episode, no
+   consolidation folder for its category, or the file is still downloading. Each of these
+   decides *where the file goes*, so filing without it means filing it in the wrong place and
+   having to do it again. Set aside untouched, with the reason spelled out.
+2. **No other copy** — nothing to decide. Filed by the ordinary rules above.
+3. **Only byte-identical copies** — which one survives changes nothing about what the library
+   ends up holding, so the one already in the library wins (that means moving nothing), or
+   failing that one on the library's own drive (that means a rename rather than a copy).
+   Every other copy is deleted once the survivor is safely in place.
+4. **Genuinely different copies of one thing** — a real question, settled by looking. One file
+   stands for each distinct set of bytes; each is **fingerprinted and compared**, allowing for
+   one starting a second or two after another. If they really are the same content, they are
+   ranked **best picture first, and among equals the smallest** — at one resolution the extra
+   bytes are padding rather than detail, and the smaller one is the cheaper thing to be wrong
+   about. The best is then **decoded end to end**; if it is damaged it and its byte-identical
+   twins are removed — the same bytes cannot be sound in one place and broken in another — and
+   the next best is tried, until one survives or none is left. If the fingerprints *disagree*,
+   nothing is touched: one of the two is mislabelled, and only you can say which.
+
+**Nothing is deleted until the copy replacing it has actually arrived in the library.** A run
+that fails or is stopped part-way leaves everything it had not yet reached exactly where it
+was, and the whole thing is on the Undo stack.
+
+Without FFmpeg and ffprobe, step 4 cannot compare or decode anything, so those items are
+listed for you rather than guessed at. Everything else still runs.
+
+### Subtitles
+
+`The Film.mkv` and `The Film.eng.srt` are tied together by name and by nothing else, so a
+rename that left the subtitles behind broke them on the spot. **A rename always takes them
+along** and renames them to match, keeping the language tag exactly as it was.
+
+Consolidating either brings them or removes them, as you choose on **Settings… → Library**.
+Leaving them is not one of the choices: a subtitle whose film has moved away is matched to
+nothing and will never be matched to anything again.
+
+A subtitle that merely *starts* with the same name is never claimed. `The Film 2.srt` belongs
+to `The Film 2.mkv`, and renaming or deleting it along with `The Film.mkv` would be destroying
+somebody's file on the strength of a shared prefix. What follows the video's name has to look
+like a language tag — a separator and then something beginning with a letter — so `.eng`,
+`.en.forced` and ` - fr` are taken and ` 2` is not.
+
+### Folders left behind
+
+After a film is filed, its old folder often still holds a sample clip, a screenshot and a
+readme. That is litter, not content, and **below a size you set the folder goes with the file
+that was in it.**
+
+The size is **per category**, because the same three megabytes mean opposite things: left
+where a film used to be it is a sample, and in a music folder it is very probably a track.
+Video categories start at 25 MB and audio at nothing, which is the old behaviour of only ever
+removing a folder that is truly empty. Set them on **Settings… → Library**.
+
+Two things override the size entirely:
+
+- **A catalogued file that has not been filed yet** protects its whole folder, however small
+  it is. That is work you have not finished, not a scrap.
+- **A folder you have named in the settings** — one you scan, one you watch, a consolidation
+  folder — is never removed however empty it ends up. A download folder is empty most of the
+  time; that is what it is for.
+
+Folders that do go are **deleted outright** rather than sent to the Recycle Bin, which is safe
+in a way that deleting a *file* permanently is not: what goes has already been judged to be
+nothing. Turn that off on **Settings… → General** if you would rather they were recoverable.
+
 **Custom file names.** Each consolidation folder has a *named* box under it. Leave it empty
 for the built-in naming, or write a pattern:
 
@@ -521,10 +738,16 @@ numbering could not be worked out is left out rather than guessed at.
 
 The copies are put side by side with their size, length, quality and integrity, so the
 choice of which to keep is an informed one. A **deep check** decodes them first, so a
-damaged copy is not the one that survives — and it now reports which file of how many it is
-on, how far into that file it has got, and how many are left, with a **Stop** button.
+damaged copy is not the one that survives — and it reports which file of how many it is on,
+how far into that file it has got, and how many are left, with a **Stop** button.
 Files carrying a `title` flag in the **Dup** column are these; the **SameTitle** view lists
 them.
+
+Opened from a row's *Show duplicates of this file…*, the dialog **starts on that file's set
+with that copy already picked out** — you clicked a file, and being made to find it again in
+a list of its own duplicates is no answer. A **name filter** narrows the list on the left
+(wildcards work, and it searches the file names as well as the set's title), because a
+library of any size produces hundreds of these sets.
 
 **Suggest consolidation** — click **Suggest consolidation…** to scan the catalogue and get a
 reviewable list of proposed moves: current location → new location, with name-collision and
@@ -535,8 +758,12 @@ flagged as such rather than proposed for another copy. Tick the ones to apply.
 
 **Filtering** — the filter bar matches any column with wildcards (`*` = any run, `?` = one
 char; plain text = contains). Tick **not** to exclude matches (e.g. *Category not Audio*),
-and **Add filter** — or just press **Enter** in the box — to stack several filters at once.
-The grid scrolls horizontally.
+and **Add filter** — or just press **Enter** in the box — to stack several at once.
+
+**Filters stack across columns as well as within one.** Filter by year and then by name, or
+by path and then by Season/Episode: every clause has to match for a row to be shown, whatever
+column each is on, and each can be negated on its own. They are listed under the bar as
+*All of: …*, and clicking one takes it off. The grid scrolls horizontally.
 
 Columns that hold a fixed set of values — **Dup**, **Kind**, **Filed**, **Category**,
 **Integrity** and **TMDb** — offer them in the box's drop-down rather than asking you to
@@ -616,6 +843,13 @@ different propositions on a disk holding a hundred thousand files. Subfolders co
 watched folder. Naming anything at all, a drive or a folder, means only what is named is
 watched; naming nothing falls back on everything that was scanned.
 
+**New arrivals are announced once, not once each.** Files come in handfuls — a folder copied
+in writes forty of them within a second of each other, and forty notifications about that is
+thirty-nine too many, because it is one thing that happened rather than forty. The first
+arrival starts a short wait (twenty seconds by default, on the same tab) and everything
+landing during it joins the same message. Later arrivals do not push the wait back, so news
+of a long copy is not held until it finally finishes.
+
 Started at sign-in, the app comes up **in the notification area with no window**, ready to
 catch new files without getting in the way; double-click the tray icon (or *Open Media
 Catalog* on its menu) to bring it up, and *Exit* to quit properly. While watching is on,
@@ -626,8 +860,9 @@ Two more window options in **Settings…**:
 - *Always start minimised to the notification area* — a quiet start however the app was
   launched, not only when Windows started it;
 - *Minimising sends the window to the notification area instead of the taskbar* — the
-  minimise button puts it in the tray, with a one-off notification the first time so it
-  doesn't just vanish.
+  minimise button puts it in the tray, without a word about it. Minimising is something you
+  just did on purpose, to a window you configured to behave that way; a notification
+  confirming it is the program telling you what you already know.
 
 **Scanning scope** — the scan wizard (and *Settings… → Scanning*) chooses between *All*,
 *VideoOnly* and *AudioOnly*. A filtered scan **never prunes the kind it wasn't looking
@@ -677,6 +912,13 @@ all of them. A pattern also prunes the scan, so excluded trees are never walked.
 path that doesn't exist (and has no wildcard) is confirmed before it is added, since that
 is usually a typo. **Exclude system directories** — on by default — covers Windows,
 Program Files, ProgramData, `$Recycle.Bin`, System Volume Information and friends.
+
+**Ignored file types take the same wildcards**: `?` stands for exactly one character and `*`
+for any run of them, so `.mp?` covers `.mp3` and `.mp4` while `.m*` covers every extension
+beginning with m. The whole extension has to match — `.mp3` means `.mp3` and not `.mp3x` as
+well. They are written **tab-separated** in a single box, so twenty of them read across two
+lines rather than down a scrolling column; spaces, commas and new lines are accepted too,
+since nobody should have to think about which separator a list of file extensions wants.
 
 **Deleting files** — right-click → *Delete file(s) from disk…*. Files go to the **Recycle
 Bin** by default. Bypassing the bin is offered as a tick, and it arms a second confirmation
@@ -857,13 +1099,14 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.2` for
-v2.2 — with the product version kept as the number people talk about (`2.2`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.3` for
+v2.3 — with the product version kept as the number people talk about (`2.3`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
-every project in the solution picks them up — bump them there once per release. **About**
-in the toolbar shows both, next to the program icon.
+every project in the solution picks them up — bump them there once per release. The
+**title bar** carries the product version, and **About** in the toolbar shows both, next
+to the program icon.
 
 ## Roadmap / possible extensions
 - Acting on near-duplicate groups directly (keep-best / bulk delete) from the UI — the
@@ -871,7 +1114,10 @@ in the toolbar shows both, next to the program icon.
   do not yet.
 - Removing TMDb entirely, now that the local IMDb extract supersedes it.
 - Retiring folder rules altogether, once existing catalogues have migrated off them.
-- Using a folder's year as well as its name when a film is identified from the folder.
+- Letting auto-consolidate settle the fingerprint disagreements it currently hands back —
+  at the moment two copies whose fingerprints do not match are always a question for you.
+- A unit-test project. The engine has no UI dependency precisely so that it can be tested
+  in isolation, and there is now a good deal in it worth pinning down.
 
 ## Project layout
 - `MediaCatalog.Core` — engine (scanning, hashing, classification, duplicates,
