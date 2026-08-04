@@ -40,6 +40,10 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = _vm;
 
+        // The version where a version belongs. Asking somebody which build they are running
+        // should not mean sending them to a dialog to find out.
+        Title = $"Media Catalog {AppVersion.Product}";
+
         _tray = new TrayIcon(ShowFromTray, ExitApplication);
         _vm.Notify = _tray.Notify;
         _vm.Undo.Changed += UpdateUndoButton;
@@ -86,11 +90,14 @@ public partial class MainWindow : Window
     public bool ShouldStartHidden => _startHidden;
 
     private readonly bool _startHidden;
-    private bool _toldAboutTray;
 
     /// <summary>
     /// Send the window to the notification area instead of the taskbar when it is
     /// minimised, if that is what the user has asked for.
+    ///
+    /// Nothing is said about it. Minimising is something the user just did on purpose, to a
+    /// window they configured to behave this way, and a notification confirming it is the
+    /// program telling them what they already know.
     /// </summary>
     private void OnWindowStateChanged(object? sender, EventArgs e)
     {
@@ -98,13 +105,6 @@ public partial class MainWindow : Window
 
         Hide();
         ShowInTaskbar = false;
-
-        // Said once per run, the first time it happens, so the window does not simply
-        // vanish with nothing to say where it went.
-        if (_toldAboutTray) return;
-        _toldAboutTray = true;
-        _tray.Notify("Media Catalog",
-            "Minimised to the notification area. Double-click the icon to bring it back.");
     }
 
     private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -563,9 +563,7 @@ public partial class MainWindow : Window
         if (confirm != MessageBoxResult.OK) return;
         var outcome = await _vm.ApplyConsolidationAsync(chosen, deleteOriginal: true);
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
-        await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
-        await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
-        await OfferEmptiedFoldersAsync(outcome.EmptiedFolders);
+        await AfterConsolidationAsync(outcome);
     }
 
     /// <summary>
@@ -620,28 +618,84 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Folders a consolidation run has emptied on its way out. A move that files everything
-    /// correctly and leaves a trail of empty folders behind it has only done half the job.
+    /// Folders a consolidation run has left behind. A move that files everything correctly
+    /// and leaves a trail of folders holding a sample clip and a readme has only done half
+    /// the job.
+    ///
+    /// Folders holding something are listed with what is in them and what it comes to, since
+    /// removing those is a rather bigger thing than removing an empty one and the user should
+    /// be able to see which they are agreeing to.
     /// </summary>
-    private async Task OfferEmptiedFoldersAsync(IReadOnlyList<string> emptied)
+    private async Task OfferEmptiedFoldersAsync(IReadOnlyList<LeftoverFolder> leftovers)
     {
-        if (emptied.Count == 0 || !_vm.Settings.OfferRemoveEmptyFolders) return;
+        if (leftovers.Count == 0 || !_vm.Settings.OfferRemoveEmptyFolders) return;
 
-        var listed = string.Join("\n", emptied.Take(15).Select(f => "    " + f));
-        if (emptied.Count > 15) listed += $"\n    …and {emptied.Count - 15} more";
+        var listed = string.Join("\n", leftovers.Take(15).Select(f => "    " + f.Describe()));
+        if (leftovers.Count > 15) listed += $"\n    …and {leftovers.Count - 15} more";
 
+        var withContents = leftovers.Count(f => !f.IsEmpty);
+        var caveat = withContents > 0
+            ? $"\n\n{withContents} of them still hold something, but less than the size limit set " +
+              "for their category — so what is in them is scraps rather than content. None of " +
+              "them holds a catalogued file waiting to be filed; those are never touched."
+            : "";
+
+        var permanent = _vm.Settings.DeleteEmptyFoldersPermanently;
         var ask = MessageBox.Show(this,
-            $"{emptied.Count} folder(s) the files came out of now hold nothing:\n\n{listed}\n\n" +
-            "Remove them? Any parent folder they leave empty goes too.",
-            "Empty folders", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            $"{leftovers.Count} folder(s) the files came out of are finished with:\n\n{listed}{caveat}\n\n" +
+            $"Remove them{(permanent ? " (deleted outright, not sent to the Recycle Bin)" : "")}? " +
+            "Any parent folder they leave empty goes too.",
+            "Folders left behind", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (ask != MessageBoxResult.Yes) return;
 
-        var removed = await _vm.RemoveEmptyFoldersAsync(emptied, toRecycleBin: true);
+        var removed = await _vm.RemoveFoldersAsync(leftovers.Select(f => f.Path).ToList());
         MessageBox.Show(this,
             removed == 0
                 ? "The folders could not be removed — something else may be using them."
-                : $"{removed} empty folder(s) removed.",
-            "Empty folders", MessageBoxButton.OK, MessageBoxImage.Information);
+                : $"{removed} folder(s) removed.",
+            "Folders left behind", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// The sweep that runs at the end of every consolidation, whatever route got there.
+    ///
+    /// A file that has just been filed must not be left with copies of it lying about — that
+    /// is the one thing consolidating is for. It is easy to lose sight of when the filing did
+    /// not involve moving anything: a whole season put right by renaming its folder is filed
+    /// just as surely as a file copied one at a time, and used to leave every stray copy of
+    /// those episodes exactly where it was, unmentioned.
+    /// </summary>
+    private async Task SweepDuplicatesAsync(IReadOnlyList<MediaFile> touched)
+    {
+        if (touched.Count == 0) return;
+
+        var redundant = _vm.RedundantCopiesOf(touched);
+        if (redundant.Count == 0) return;
+
+        var bytes = redundant.Sum(f => f.SizeBytes);
+        var ask = MessageBox.Show(this,
+            $"{redundant.Count} copy(ies) — {Format.Bytes(bytes)} — of the file(s) just filed are " +
+            "still sitting elsewhere.\n\n" +
+            "The library copy of each is the one being kept, so these are redundant by " +
+            "definition. Review them for deletion now?",
+            "Duplicates of what was just filed", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (ask != MessageBoxResult.Yes) return;
+
+        await FileDeletion.RunAsync(this, _vm, redundant, "Delete duplicates");
+        UpdateUndoButton();
+    }
+
+    /// <summary>
+    /// Everything that happens after a consolidation run, in the one place, so every route
+    /// into consolidating ends the same way: redundant sources, files that turned out to
+    /// need no moving, folders left behind, and the duplicate sweep.
+    /// </summary>
+    private async Task AfterConsolidationAsync(ConsolidationOutcome outcome)
+    {
+        await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
+        await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
+        await SweepDuplicatesAsync(outcome.Touched);
+        await OfferEmptiedFoldersAsync(outcome.LeftoverFolders);
     }
 
     /// <summary>
@@ -752,6 +806,20 @@ public partial class MainWindow : Window
         }
         if (!await EnsureTitlesAsync(rows.Select(r => r.Model).ToList())) return;
 
+        // Two files claiming to be the same film, only one of which should end up in the
+        // library. Settled before anything moves, since filing one of them and leaving the
+        // other where it is has answered the question the wrong way round.
+        if (!await ResolveTitleDuplicatesAsync(rows.Select(r => r.Model).ToList())) return;
+
+        // The dialog may well have deleted some of what was selected.
+        rows = rows.Where(r => File.Exists(r.Model.FullPath)).ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Nothing is left of the selection to consolidate.",
+                "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         var extras = _vm.LinkedExtras(rows.Select(r => r.Model)).Count;
         var confirm = MessageBox.Show(this,
             $"MOVE {rows.Count} file(s) into the structured library folders?\n\n" +
@@ -770,10 +838,98 @@ public partial class MainWindow : Window
 
         var outcome = await _vm.ConsolidateAsync(rows, deleteOriginal: true);
         MessageBox.Show(this, outcome.Message, "Consolidate", MessageBoxButton.OK, MessageBoxImage.Information);
-        await OfferToDeleteRedundantAsync(outcome.AlreadyPresent);
-        await HandleAlreadyConsolidatedAsync(outcome.Consolidated);
-        await OfferEmptiedFoldersAsync(outcome.EmptiedFolders);
+        await AfterConsolidationAsync(outcome);
     }
+
+    /// <summary>
+    /// Files being consolidated that have a twin claiming to be the same thing without being
+    /// the same bytes. Only one of them belongs in the library, and a content hash cannot
+    /// choose between them, so the user is shown every copy with the facts that decide it —
+    /// size, length, quality, and whether it still decodes — and picks the one to keep. The
+    /// rest are deleted, and the survivor goes on to be consolidated with the selection.
+    /// </summary>
+    /// <returns>False when the user backed out of consolidating altogether.</returns>
+    private Task<bool> ResolveTitleDuplicatesAsync(IReadOnlyList<MediaFile> files)
+    {
+        var groups = new List<Core.Duplicates.TitleDuplicateGroup>();
+        foreach (var file in files)
+            if (_vm.TitleDuplicateGroupFor(file) is { } group && !groups.Contains(group))
+                groups.Add(group);
+        if (groups.Count == 0) return Task.FromResult(true);
+
+        var ask = MessageBox.Show(this,
+            (groups.Count == 1
+                ? $"\"{groups[0].Key}\" has more than one copy claiming to be it, and they are not " +
+                  "the same bytes — the same thing from two different releases.\n\n"
+                : $"{groups.Count} of the file(s) selected have another copy claiming to be the " +
+                  "same thing without being the same bytes.\n\n") +
+            "Only one of each should end up in the library, and nothing but a look at them can " +
+            "say which.\n\n" +
+            "Yes — show every copy now, so you can choose which to keep and delete the rest.\n" +
+            "No — consolidate anyway, leaving the other copies where they are.\n" +
+            "Cancel — do nothing.",
+            "Possible duplicates", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+        if (ask == MessageBoxResult.Cancel) return Task.FromResult(false);
+        if (ask == MessageBoxResult.No) return Task.FromResult(true);
+
+        // Opened on the first affected set; the list on the left holds the others, so one
+        // dialog covers the lot however many were selected.
+        new TitleDuplicatesWindow(_vm, groups[0].Files.FirstOrDefault()) { Owner = this }.ShowDialog();
+        UpdateUndoButton();
+        return Task.FromResult(true);
+    }
+
+    // --- Consolidating everything that can be done without asking ------------
+
+    /// <summary>
+    /// File everything the program can decide about on its own, and report what it could not.
+    ///
+    /// The user is shown the shape of the job before it starts — how many files need no
+    /// decision, how many need copies comparing, and how many are missing something that
+    /// only they can supply — because those three numbers are what the run is really about.
+    /// </summary>
+    private async void OnAutoConsolidateClick(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        var scope = rows.Count > 0 ? rows.Select(r => r.Model).ToList() : null;
+
+        var (jobs, review) = _vm.PlanAutoConsolidation(scope);
+        if (jobs.Count == 0)
+        {
+            MessageBox.Show(this,
+                review.Count == 0
+                    ? "There is nothing here that can be filed automatically."
+                    : $"Nothing can be filed without you: all {review.Count} file(s) are missing " +
+                      "something that decides where they go. Run it again after filling those in — " +
+                      "the list is on the next screen.",
+                "Automatic consolidation", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (review.Count > 0) ShowAutoReview(review);
+            return;
+        }
+
+        var dialog = new AutoConsolidateWindow(jobs, review, _vm.CanAnalyze, _vm.CanDoVideo)
+        { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+
+        var report = await _vm.AutoConsolidateAsync(scope);
+        UpdateUndoButton();
+
+        MessageBox.Show(this, report.Describe(), "Automatic consolidation",
+            MessageBoxButton.OK, MessageBoxImage.Information);
+
+        await SweepDuplicatesAsync(report.Touched);
+        await OfferEmptiedFoldersAsync(report.LeftoverFolders);
+
+        if (report.Review.Count > 0) ShowAutoReview(report.Review);
+    }
+
+    private void ShowAutoReview(IReadOnlyList<AutoReview> review) =>
+        new ListWindow("Left for you to look at",
+            "These were not filed, because something that decides where they go is missing or " +
+            "cannot be worked out without you. Fix what each line names and run it again.",
+            review.Select(r => $"{r.Reason}  —  {r.File.FullPath}"))
+        { Owner = this }.ShowDialog();
 
     // --- TMDb -------------------------------------------------------------
 
@@ -806,18 +962,6 @@ public partial class MainWindow : Window
         var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
         if (rows.Count == 0 || sender is not MenuItem { Tag: string category }) return;
         _vm.SetCategoryForFiles(rows, category);
-    }
-
-    private void OnSetCategoryFolder(object sender, RoutedEventArgs e)
-    {
-        var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
-        if (row == null) return;
-        var folder = Path.GetDirectoryName(row.Model.FullPath);
-        if (string.IsNullOrEmpty(folder)) return;
-
-        var dlg = new CategoryFolderWindow(folder, _vm.Categories) { Owner = this };
-        if (dlg.ShowDialog() == true)
-            _vm.SetCategoryForFolder(dlg.SelectedFolder, dlg.SelectedCategory, dlg.IncludeSubdirectories);
     }
 
     private void OnAddCategory(object sender, RoutedEventArgs e)
@@ -898,30 +1042,76 @@ public partial class MainWindow : Window
             ? file.EffectiveTitle
             : Path.GetFileNameWithoutExtension(file.FileName);
 
-    private void OnSetTitleFolder(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// One title for everything selected, wherever the files are. Selecting across folders is
+    /// the whole point: a show whose episodes ended up in three different places is named once
+    /// here rather than three times.
+    /// </summary>
+    private void OnSetTitleForSelection(object sender, RoutedEventArgs e)
+    {
+        var rows = FilesGrid.SelectedItems.OfType<FileRow>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Select the files to name first.",
+                "Set title", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var files = rows.Select(r => r.Model).ToList();
+        var folders = files.Select(f => Path.GetDirectoryName(f.FullPath) ?? "")
+            .Distinct(StringComparer.OrdinalIgnoreCase).Count();
+
+        // What they already agree on, if they agree on anything — otherwise the first one's
+        // title, which is at least a starting point rather than an empty box.
+        var titles = files.Select(f => f.EffectiveTitle).Distinct(StringComparer.Ordinal).ToList();
+        var seed = titles.Count == 1 ? titles[0] : TitleSeed(files[0]);
+
+        var typed = PromptWindow.Ask(this, "Set title",
+            $"Title for {rows.Count} selected file(s)" +
+            (folders > 1 ? $", across {folders} folders" : "") + ":" +
+            (titles.Count > 1 ? $"\n\nThey currently carry {titles.Count} different titles." : ""),
+            seed);
+        if (string.IsNullOrWhiteSpace(typed)) return;
+
+        var result = _vm.SetTitleForModels(files, typed.Trim());
+        UpdateUndoButton();
+        MessageBox.Show(this, result, "Set title", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// Everything a folder can be told at once: the title, the year and the category.
+    ///
+    /// The year is here because it is got wrong often enough to matter — a series whose file
+    /// names carry the year of the season rather than of the show ends up filed under a year
+    /// that is nobody's idea of right, and correcting that an episode at a time is not a
+    /// reasonable thing to ask of anyone.
+    /// </summary>
+    private void OnSetFolderDetails(object sender, RoutedEventArgs e)
     {
         var row = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
         if (row == null)
         {
-            MessageBox.Show(this, "Select a file in the folder you want to title first.",
-                "Set title for folder", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, "Select a file in the folder you want to correct first.",
+                "Set folder details", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
         var folder = Path.GetDirectoryName(row.Model.FullPath);
         if (string.IsNullOrEmpty(folder)) return;
 
-        // The folder's own name is usually the show name, so offer it as the starting point.
-        var suggestion = !string.IsNullOrWhiteSpace(row.Model.EffectiveTitle)
-            ? row.Model.EffectiveTitle
-            : Path.GetFileName(folder);
-
-        var dlg = new TitleFolderWindow(folder, suggestion) { Owner = this };
+        var dlg = new FolderDetailsWindow(
+            folder, _vm.Categories,
+            f => _vm.DetailsOf(f, includeSubdirs: true),
+            // The folder's own name is usually the show's, so it is the fallback suggestion.
+            Path.GetFileName(folder.TrimEnd('\\', '/')))
+        { Owner = this };
         if (dlg.ShowDialog() != true) return;
 
-        var result = _vm.SetTitleForFolder(dlg.SelectedFolder, dlg.Title_, dlg.IncludeSubdirectories);
+        var result = _vm.SetFolderDetails(
+            dlg.SelectedFolder, dlg.Details, dlg.IncludeSubdirectories);
         UpdateUndoButton();
-        MessageBox.Show(this, result, "Set title for folder", MessageBoxButton.OK, MessageBoxImage.Information);
+        MessageBox.Show(this, result, "Set folder details",
+            MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     // --- Moving, scanning and checking folders -----------------------------
@@ -1210,7 +1400,9 @@ public partial class MainWindow : Window
                     "title and year — the same thing downloaded twice from different releases.\n\n" +
                     "Open the possible-duplicates list?",
                     "Duplicates", MessageBoxButton.YesNo, MessageBoxImage.Information);
-                if (open == MessageBoxResult.Yes) OpenTitleDuplicates();
+                // Opened on this file's set, with this file picked out: they clicked a row,
+                // and hunting for it again in a list of hundreds is not an answer.
+                if (open == MessageBoxResult.Yes) OpenTitleDuplicates(row.Model);
                 return;
             }
 
@@ -1223,9 +1415,22 @@ public partial class MainWindow : Window
 
     // --- Possible duplicates (same title, different bytes) -----------------
 
-    private void OnShowTitleDuplicates(object sender, RoutedEventArgs e) => OpenTitleDuplicates();
+    /// <summary>
+    /// The toolbar button opens the whole list; a row's context menu opens it on that row's
+    /// set. Which is why <paramref name="focus"/> is optional rather than two dialogs.
+    /// </summary>
+    private void OnShowTitleDuplicates(object sender, RoutedEventArgs e)
+    {
+        // Whatever is selected in the grid is very likely what the user is thinking about,
+        // so it decides where the dialog opens — when it has a set at all.
+        var selected = FilesGrid.SelectedItems.OfType<FileRow>().FirstOrDefault();
+        OpenTitleDuplicates(
+            selected != null && _vm.TitleDuplicateGroupFor(selected.Model) != null
+                ? selected.Model
+                : null);
+    }
 
-    private void OpenTitleDuplicates()
+    private void OpenTitleDuplicates(MediaFile? focus = null)
     {
         if (!_vm.HasTitleDuplicates)
         {
@@ -1238,7 +1443,7 @@ public partial class MainWindow : Window
                 "Possible duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        new TitleDuplicatesWindow(_vm) { Owner = this }.ShowDialog();
+        new TitleDuplicatesWindow(_vm, focus) { Owner = this }.ShowDialog();
         UpdateUndoButton();
     }
 

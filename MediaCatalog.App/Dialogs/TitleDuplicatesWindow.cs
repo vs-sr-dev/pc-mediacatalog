@@ -9,6 +9,7 @@ using System.Windows.Controls;
 using MediaCatalog.App.Infrastructure;
 using MediaCatalog.App.ViewModels;
 using MediaCatalog.Core.Duplicates;
+using MediaCatalog.Core.Filtering;
 using MediaCatalog.Core.Models;
 
 namespace MediaCatalog.App;
@@ -74,9 +75,26 @@ public class TitleDuplicatesWindow : Window
 
     private readonly Button _stop;
 
-    public TitleDuplicatesWindow(MainViewModel vm)
+    // Narrows the list on the left. A library of any size produces hundreds of these sets,
+    // and scrolling for the one film you came here about is not a way to find it.
+    private readonly TextBox _filter = new()
+    {
+        VerticalContentAlignment = VerticalAlignment.Center,
+        ToolTip = "Type part of a title to narrow the list. Wildcards work: * for any run of " +
+                  "characters, ? for one."
+    };
+
+    /// <summary>
+    /// The file the user came here about, so the dialog opens on its set with that copy
+    /// already picked out. Arriving at a list of hundreds and being left to find your own
+    /// file in it is not an answer to "show me the duplicates of this".
+    /// </summary>
+    private readonly MediaFile? _focus;
+
+    public TitleDuplicatesWindow(MainViewModel vm, MediaFile? focus = null)
     {
         _vm = vm;
+        _focus = focus;
 
         Title = "Possible duplicates"; Width = 1060; Height = 600;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
@@ -140,8 +158,33 @@ public class TitleDuplicatesWindow : Window
             HorizontalContentAlignment = HorizontalAlignment.Stretch
         };
         _groupList.SelectionChanged += (_, _) => ShowSelectedGroup();
-        Grid.SetColumn(_groupList, 0);
-        split.Children.Add(_groupList);
+
+        // The filter sits above the list it filters, where it belongs.
+        var left = new DockPanel();
+        var filterRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+        var filterLabel = new TextBlock
+        {
+            Text = "Name:", VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0)
+        };
+        DockPanel.SetDock(filterLabel, Dock.Left);
+        filterRow.Children.Add(filterLabel);
+        var clear = new Button
+        {
+            Content = "✕", Width = 24, Margin = new Thickness(4, 0, 0, 0),
+            ToolTip = "Clear the filter."
+        };
+        clear.Click += (_, _) => _filter.Clear();
+        DockPanel.SetDock(clear, Dock.Right);
+        filterRow.Children.Add(clear);
+        filterRow.Children.Add(_filter);
+        _filter.TextChanged += (_, _) => Reload();
+        DockPanel.SetDock(filterRow, Dock.Top);
+        left.Children.Add(filterRow);
+        left.Children.Add(_groupList);
+
+        Grid.SetColumn(left, 0);
+        split.Children.Add(left);
 
         _fileList = new ListBox
         {
@@ -181,37 +224,74 @@ public class TitleDuplicatesWindow : Window
     {
         var wasSelected = SelectedGroup?.Key;
 
-        _groups.Clear();
-        foreach (var group in _vm.TitleDuplicateGroups()) _groups.Add(group);
+        var all = _vm.TitleDuplicateGroups();
+        var pattern = _filter.Text.Trim();
+        var shown = pattern.Length == 0 ? all : all.Where(g => Matches(g, pattern)).ToList();
 
-        if (_groups.Count == 0)
+        _groups.Clear();
+        foreach (var group in shown) _groups.Add(group);
+
+        if (all.Count == 0)
         {
             _summary.Text = "No files share a title and year without also sharing their contents.";
             _rows.Clear();
             return;
         }
 
+        if (_groups.Count == 0)
+        {
+            _summary.Text = $"Nothing matches \"{pattern}\" — {all.Count} set(s) in all.";
+            _rows.Clear();
+            return;
+        }
+
         var reclaimable = _groups.Sum(g => g.ReclaimableBytes);
-        _summary.Text = $"{_groups.Count} possible duplicate set(s) • " +
+        _summary.Text = $"{_groups.Count} possible duplicate set(s)" +
+                        (_groups.Count < all.Count ? $" of {all.Count}" : "") + " • " +
                         $"{_groups.Sum(g => g.Files.Count)} file(s) • " +
                         $"{Format.Bytes(reclaimable)} reclaimable by keeping one of each";
 
-        var restored = _groups.FirstOrDefault(g =>
-            string.Equals(g.Key, wasSelected, StringComparison.Ordinal));
-        _groupList.SelectedItem = restored ?? _groups[0];
+        // What to open on, in order of how much the user asked for it: the file they came
+        // here about, then whatever was selected before the reload, then the first set.
+        var wanted =
+            (_focus != null
+                ? _groups.FirstOrDefault(g => g.Files.Any(f => ReferenceEquals(f, _focus)))
+                : null)
+            ?? _groups.FirstOrDefault(g => string.Equals(g.Key, wasSelected, StringComparison.Ordinal))
+            ?? _groups[0];
+
+        _groupList.SelectedItem = wanted;
+        _groupList.ScrollIntoView(wanted);
         ShowSelectedGroup();
     }
+
+    /// <summary>
+    /// True when a set is worth showing for what was typed. The set's own name is checked
+    /// first, and then the file names in it — somebody who remembers the file rather than
+    /// the title should still find it.
+    /// </summary>
+    private static bool Matches(TitleDuplicateGroup group, string pattern) =>
+        WildcardMatcher.IsMatch(group.Key, pattern) ||
+        group.Files.Any(f => WildcardMatcher.IsMatch(f.FileName, pattern));
 
     private void ShowSelectedGroup()
     {
         _rows.Clear();
         if (SelectedGroup is not { } group) return;
         foreach (var file in group.Files) _rows.Add(new Row { File = file });
+        if (_rows.Count == 0) return;
 
-        // The biggest copy is the usual keeper, so it starts selected — a starting point,
-        // not a recommendation: bigger is not always better, which is what the length and
+        // The copy the user came here about, if it is in this set — they clicked a file, and
+        // being made to find it again in a list of its own duplicates is no answer. Failing
+        // that the biggest, which is the usual keeper: a starting point rather than a
+        // recommendation, since bigger is not always better, which is what the length and
         // quality columns are there to show.
-        if (_rows.Count > 0) _fileList.SelectedIndex = 0;
+        var focused = _focus == null
+            ? -1
+            : _rows.ToList().FindIndex(r => ReferenceEquals(r.File, _focus));
+
+        _fileList.SelectedIndex = focused >= 0 ? focused : 0;
+        _fileList.ScrollIntoView(_fileList.SelectedItem);
     }
 
     private async Task DeepCheckAsync(bool all)

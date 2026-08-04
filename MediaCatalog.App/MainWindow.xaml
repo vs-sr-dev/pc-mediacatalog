@@ -54,7 +54,14 @@
                         Click="OnRenameClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
                 <Button x:Name="ConsolidateButton" Content="Consolidate…"
                         Click="OnConsolidateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolBar.OverflowMode="Never"
                         ToolTip="Move selected TV/films into the structured library folders."/>
+                <!-- Pinned beside its manual twin: a headline feature that hides in the
+                     overflow chevron is a feature nobody finds. -->
+                <Button x:Name="AutoConsolidateButton" Content="Auto-consolidate…"
+                        Click="OnAutoConsolidateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
+                        ToolBar.OverflowMode="Never"
+                        ToolTip="File everything that can be decided without you, and list what cannot. Files with no other copy are simply filed; identical copies keep one and delete the rest; genuinely different copies of one thing are fingerprinted, ranked by quality and deep-checked, and the sound one is kept."/>
                 <Separator/>
                 <Button x:Name="AnalyzeButton" Content="Fingerprint"
                         Click="OnAnalyzeClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
@@ -109,9 +116,11 @@
                               Width="280" VerticalAlignment="Center" Margin="4,0"
                               ToolBar.OverflowMode="Never"
                               ToolTip="Wildcards: * = any characters, ? = one character. Plain text = contains. Enter adds the filter; columns with a fixed set of values offer them in the list."/>
+                    <!-- Pinned: this is how a second filter is added at all, and a button that
+                         hides in the chevron is a feature nobody finds. -->
                     <Button Content="Add filter" Click="OnAddFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"
-                            ToolBar.OverflowMode="AsNeeded"
-                            ToolTip="Stack this as an additional filter (multiple filters per column allowed). Enter in the box does the same."/>
+                            ToolBar.OverflowMode="Never"
+                            ToolTip="Stack this as an additional filter. Filters on different columns all apply at once — year and then name, path and then Season/Episode — and several on one column narrow it further. Enter in the box does the same."/>
                     <Button Content="Clear all" Click="OnClearFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
                     <Separator/>
                     <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
@@ -137,17 +146,26 @@
                             ToolTip="Files the scan could not read to hash. Without a hash they are invisible to duplicate detection."/>
                 </ToolBar>
             </ToolBarTray>
-            <ItemsControl ItemsSource="{Binding ActiveFilters}" Margin="40,4,0,0">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Button Content="{Binding Display}" Click="OnRemoveFilter" Margin="0,0,6,0" Padding="6,1"
-                                ToolTip="Click to remove this filter."/>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <!-- The filters in force, all at once. Several columns can be stacked — year and
+                 then name, path and then Season/Episode — and every one of them has to match
+                 for a row to be shown. Clicking a chip takes that one off. -->
+            <StackPanel Orientation="Horizontal" Margin="6,4,0,0"
+                        Visibility="{Binding HasActiveFilters, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="All of:" VerticalAlignment="Center" Foreground="DimGray"
+                           Margin="0,0,6,0"
+                           ToolTip="Every filter listed has to match. Click one to remove it."/>
+                <ItemsControl ItemsSource="{Binding ActiveFilters}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Button Content="{Binding Display}" Click="OnRemoveFilter" Margin="0,0,6,0" Padding="6,1"
+                                    ToolTip="Click to remove this filter."/>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
         </StackPanel>
 
         <!-- Body: the results grid has the window to itself. Choosing what to scan lives
@@ -177,10 +195,11 @@
                              and Rename file dialogs said less and are gone. -->
                         <MenuItem Header="Edit details…" Click="OnEditDetails"
                                   ToolTip="Every field at once — title, year, season, episode, category, name, date, integrity and kind. Correcting the title renames the file to match."/>
-                        <MenuItem Header="Set title for this folder…" Click="OnSetTitleFolder"
-                                  ToolTip="Name a whole show in one go: every file under the chosen folder gets the same title."/>
+                        <MenuItem Header="Set title for the selected files…" Click="OnSetTitleForSelection"
+                                  ToolTip="One title for everything selected, wherever the files live. Select across folders and name them all at once."/>
+                        <MenuItem Header="Set folder details…" Click="OnSetFolderDetails"
+                                  ToolTip="Title, year and category for a whole folder in one go — the quickest way to correct a show whose year was read wrongly off its file names."/>
                         <MenuItem Header="Set category" x:Name="CategoryMenu"/>
-                        <MenuItem Header="Set category for this folder…" Click="OnSetCategoryFolder"/>
                         <MenuItem Header="Add new category…" Click="OnAddCategory"/>
                         <Separator/>
                         <MenuItem Header="Verify (read length and quality)" Click="OnVerifyFilesClick"
@@ -206,8 +225,8 @@
                                         ToolTipService.ToolTip="What the content is: Movie, TvShow, TvExtra or MovieExtra (specials and featurettes), Audio, Other or Unknown. Worked out automatically unless you have set it yourself, which always wins."/>
                     <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="200"
                                         ToolTipService.ToolTip="The programme or film name. A confirmed or hand-typed title if there is one, otherwise the best guess parsed from the file name and its folders. This is what decides where the file is consolidated to."/>
-                    <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="46"
-                                        ToolTipService.ToolTip="Year of release, taken from the file name or looked up in the IMDb data. Part of a film's library folder name, e.g. 'Blade Runner (1982)'."/>
+                    <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="56"
+                                        ToolTipService.ToolTip="Year of release, taken from the file name or looked up in the IMDb data. Part of a film's library folder name, e.g. 'Blade Runner (1982)'. A trailing ? means the title has been used more than once — a remake, a reboot, a series and the film it came from — so the most recent was taken and it could be the wrong one. The 'UncertainYear' view lists them; setting the year yourself clears the mark."/>
                     <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"
                                         ToolTipService.ToolTip="Season and episode, as S01E02. Read from the file name (S01E02, 1x02, 123 = S01E23, 1102 = S11E02); a 'Season NN' folder supplies the season only when the name does not state one, so the file name always wins. Blank means it could not be worked out — a catalogue refresh will try again with the current rules."/>
                     <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"

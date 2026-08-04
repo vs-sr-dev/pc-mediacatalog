@@ -28,7 +28,15 @@ public class FileRow : ObservableObject
     /// <summary>The validated/edited title when there is one, else the parsed one.</summary>
     public string Title => Model.EffectiveTitle;
 
-    public string Year => Model.Year?.ToString() ?? "";
+    /// <summary>
+    /// The year, with a "?" after it when it came from a title that has been used more than
+    /// once. The most recent was taken, which is the better bet without being a certainty —
+    /// and a figure that might be wrong is worth marking rather than presenting as fact.
+    /// </summary>
+    public string Year =>
+        Model.Year is not { } year ? ""
+        : Model.YearAmbiguous ? $"{year} ?"
+        : year.ToString();
 
     /// <summary>"S01E02", or "S06E11-E12" when the file holds a double episode.</summary>
     public string SeasonEpisode => Model.NumberingDisplay;

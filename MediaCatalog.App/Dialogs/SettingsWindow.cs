@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using MediaCatalog.Core.Classification;
 using MediaCatalog.Core.Consolidation;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Storage;
@@ -125,6 +126,28 @@ public class SettingsWindow : Window
     {
         Content = "After deleting the last file in a folder, offer to remove the folder too"
     };
+    private readonly CheckBox _deleteFoldersPermanently = new()
+    {
+        Content = "Delete those folders outright rather than sending them to the Recycle Bin"
+    };
+
+    // --- Subtitles ---
+    private readonly CheckBox _consolidateSubtitles = new()
+    {
+        Content = "Bring subtitles along when their video is consolidated or moved"
+    };
+
+    // --- Watching ---
+    private readonly TextBox _notifyDelay = new() { Width = 60 };
+
+    // --- Ignored file types ---
+    // One box rather than a list: twenty extensions down the side of the dialog is a column
+    // of scrolling for something that fits on two lines written across.
+    private readonly TextBox _extsBox = new()
+    {
+        AcceptsTab = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+        Height = 90, VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+    };
 
     // --- Titles and sorting ---
     private readonly CheckBox _capitaliseTitles = new()
@@ -147,14 +170,17 @@ public class SettingsWindow : Window
     private readonly TextBox _fpcalc = new() { VerticalContentAlignment = VerticalAlignment.Center };
     private readonly TextBlock _toolStatus = new() { FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap };
 
-    private readonly ObservableCollection<string> _exts = new();
     private readonly ObservableCollection<ExclRow> _excluded = new();
     private readonly ObservableCollection<string> _categories = new();
     private readonly ObservableCollection<string> _scanFolders = new();
     private readonly ObservableCollection<string> _watchFolders = new();
+    private readonly ObservableCollection<string> _categoryOrder = new();
     private readonly List<CatFolderRow> _catFolders = new();
     private readonly List<CheckBox> _driveChecks = new();
     private readonly StackPanel _catFolderPanel = new();
+
+    /// <summary>The per-category "what may be left behind" boxes, in the order they are shown.</summary>
+    private readonly List<(string Category, TextBox Bytes)> _leftoverRows = new();
 
     /// <summary>Raised when the user saves; carries the new settings.</summary>
     public event Action<AppSettings>? Saved;
@@ -260,6 +286,9 @@ public class SettingsWindow : Window
         _imdbInMemory.IsChecked = settings.ImdbInMemory;
         _skipRecycleBin.IsChecked = settings.SkipRecycleBinByDefault;
         _offerEmptyFolders.IsChecked = settings.OfferRemoveEmptyFolders;
+        _deleteFoldersPermanently.IsChecked = settings.DeleteEmptyFoldersPermanently;
+        _consolidateSubtitles.IsChecked = settings.ConsolidateSubtitles;
+        _notifyDelay.Text = Math.Clamp(settings.NewFileNotifyDelaySeconds, 1, 600).ToString();
         _capitaliseTitles.IsChecked = settings.CapitaliseTitles;
         _articleLast.IsChecked = settings.SortLeadingArticleLast;
         _probeDuringScan.IsChecked = settings.ProbeDuringScan;
@@ -283,11 +312,22 @@ public class SettingsWindow : Window
         _ffprobe.Text = tools.FfprobePath;
         _fpcalc.Text = tools.FpcalcPath;
 
-        foreach (var e in settings.IgnoredExtensions) _exts.Add(e);
+        // Tab-separated: they fit across the box rather than down a scrolling column.
+        _extsBox.Text = string.Join("\t", settings.IgnoredExtensions);
+
         foreach (var f in settings.ExcludedFolders) _excluded.Add(new ExclRow { Model = f });
         foreach (var c in settings.CustomCategories) _categories.Add(c);
         foreach (var f in settings.AdditionalScanFolders) _scanFolders.Add(f);
         foreach (var f in settings.WatchedFolders) _watchFolders.Add(f);
+
+        // The menu order, seeded from the categories that exist now so nothing is missing
+        // from the list even if the saved order predates them.
+        foreach (var c in CategoryResolver.Ordered(
+                     _knownCategories.Concat(settings.CustomCategories)
+                         .Where(c => !string.IsNullOrWhiteSpace(c))
+                         .Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                     settings.CategoryOrder))
+            _categoryOrder.Add(c);
     }
 
     // --- Tabs -------------------------------------------------------------
@@ -311,7 +351,14 @@ public class SettingsWindow : Window
             _startup, _startInTray, _alwaysMinimised, _minimiseToTray));
 
         panel.Children.Add(Group("Watching for new files",
-            _watch, DriveWatchEditor(_incoming)));
+            _watch,
+            Labeled("Wait before saying:", _notifyDelay, 150),
+            Hint("Seconds. Files arrive in handfuls — a folder copied in writes forty of them " +
+                 "within a second of each other, and forty notifications about that is thirty-nine " +
+                 "too many. The first arrival starts the wait and everything landing during it " +
+                 "joins the same message. Later arrivals do not push the wait back, so news of a " +
+                 "long copy is not held until it finishes."),
+            DriveWatchEditor(_incoming)));
 
         panel.Children.Add(Group("Titles and names",
             _capitaliseTitles,
@@ -331,7 +378,13 @@ public class SettingsWindow : Window
         panel.Children.Add(Group("Deleting files",
             _skipRecycleBin,
             Warning("We don't recommend this."),
-            _offerEmptyFolders));
+            _offerEmptyFolders,
+            _deleteFoldersPermanently,
+            Hint("Safe in a way that deleting a file permanently is not: what goes has already " +
+                 "been judged to be nothing — an empty folder, or one holding less than the size " +
+                 "limit set for its category on the Library tab, with no catalogued file waiting " +
+                 "to be filed anywhere in it. There is nothing in the Recycle Bin's job " +
+                 "description for that.")));
 
         panel.Children.Add(Group("Behaviour",
             _rememberFilters,
@@ -404,6 +457,32 @@ public class SettingsWindow : Window
                  "library — including for TV, where an episode already there is never filed a " +
                  "second time under a different name.")));
 
+        panel.Children.Add(Group("Subtitles",
+            _consolidateSubtitles,
+            Hint("A subtitle is tied to its film by name and by nothing else — \"The Film.mkv\" " +
+                 "and \"The Film.eng.srt\" — so one left behind after the film has moved can never " +
+                 "be matched to anything again. With this on they travel with the video and are " +
+                 "renamed to match it; with it off they are deleted when the video is filed, so " +
+                 "the source folder is left with nothing dead in it."),
+            Hint("\nA rename always takes them along, whatever this says: renaming a film and " +
+                 "leaving its subtitles under the old name would break them on the spot.")));
+
+        panel.Children.Add(Group("What may be left behind",
+            LeftoverThresholdEditor(_incoming),
+            Hint("After a file is filed, its old folder often still holds something — a sample " +
+                 "clip, a screenshot, a readme. Below this size that is scraps and the folder can " +
+                 "go with it; above it, it is content and the folder stays."),
+            Hint("\nThe figure is per category because the same three megabytes mean opposite " +
+                 "things: left where a film used to be it is a sample, and in a music folder it is " +
+                 "very probably a track. Leave a box empty for \"only when the folder is truly " +
+                 "empty\", which is what every earlier version did."),
+            Hint("\nOne thing overrides the size entirely: a catalogued file that has not been " +
+                 "filed yet. However small it is, that is work you have not finished, and a folder " +
+                 "holding one is never offered however far under the limit it falls."),
+            Hint("\nA folder you have named anywhere in these settings — one you scan, one you " +
+                 "watch, a consolidation folder — is never removed either, however empty it ends " +
+                 "up. A download folder is empty most of the time; that is what it is for.")));
+
         panel.Children.Add(Group("Sorting",
             _articleLast,
             Hint("A library catalogue files \"The Simpsons\" under S, not T. With this on the show " +
@@ -432,7 +511,14 @@ public class SettingsWindow : Window
                  "or some; Remove automatically drops the lot without stopping.")));
 
         panel.Children.Add(Group("Ignored file types (removed from results and skipped in future scans)",
-            ListEditor(_exts, addPrompt: "Extension e.g. .nfo", onAdd: AddExtension)));
+            _extsBox,
+            Hint("Separated by tabs — press Tab in the box — so twenty of them read across two " +
+                 "lines rather than down a scrolling column. Spaces, commas and new lines are " +
+                 "accepted too."),
+            Hint("\nWildcards work: ? stands for exactly one character and * for any run of them. " +
+                 "So \".mp?\" covers .mp3 and .mp4, and \".m*\" covers every extension beginning " +
+                 "with m. The whole extension has to match, so \".mp3\" means .mp3 and not .mp3x " +
+                 "as well.")));
 
         return panel;
     }
@@ -450,7 +536,110 @@ public class SettingsWindow : Window
                  "as anything else and its numbering is cleared: it was read out of a number in the " +
                  "name that meant something else — the 13 in \"Apollo 13\", a track numbered 104.")));
 
+        panel.Children.Add(Group("Order in the \"Set category\" menu",
+            CategoryOrderEditor(),
+            Hint("The order they appear in wherever a category is chosen. Somebody whose library is " +
+                 "nine tenths television should not have to walk past Movie every time, so the " +
+                 "order is yours. A category added later joins the bottom of the list rather than " +
+                 "disappearing.")));
+
         return panel;
+    }
+
+    /// <summary>The menu order, with the two buttons that are the whole of the interaction.</summary>
+    private FrameworkElement CategoryOrderEditor()
+    {
+        var wrap = new StackPanel();
+        var list = new ListBox { Height = 160, ItemsSource = _categoryOrder };
+        wrap.Children.Add(list);
+
+        void Move(int delta)
+        {
+            var index = list.SelectedIndex;
+            var target = index + delta;
+            if (index < 0 || target < 0 || target >= _categoryOrder.Count) return;
+            _categoryOrder.Move(index, target);
+            list.SelectedIndex = target;
+            list.ScrollIntoView(list.SelectedItem);
+        }
+
+        var controls = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0)
+        };
+        var up = new Button { Content = "Move up", Width = 90 };
+        up.Click += (_, _) => Move(-1);
+        controls.Children.Add(up);
+        var down = new Button { Content = "Move down", Width = 90, Margin = new Thickness(6, 0, 0, 0) };
+        down.Click += (_, _) => Move(+1);
+        controls.Children.Add(down);
+
+        var reset = new Button
+        {
+            Content = "Built-in order", Width = 110, Margin = new Thickness(6, 0, 0, 0),
+            ToolTip = "Put them back the way they come out of the box."
+        };
+        reset.Click += (_, _) =>
+        {
+            var rebuilt = CategoryResolver.BuiltIn.Concat(_categories)
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            _categoryOrder.Clear();
+            foreach (var c in rebuilt) _categoryOrder.Add(c);
+        };
+        controls.Children.Add(reset);
+
+        wrap.Children.Add(controls);
+        return wrap;
+    }
+
+    /// <summary>
+    /// One box per category saying how little may be left in a folder before the folder
+    /// itself is worth taking away. Extras are not listed: they follow the show or film they
+    /// belong to, as their consolidation folder does.
+    /// </summary>
+    private FrameworkElement LeftoverThresholdEditor(AppSettings settings)
+    {
+        var wrap = new StackPanel();
+
+        var categories = _knownCategories
+            .Concat(settings.LeftoverThresholds.Select(t => t.Category))
+            .Where(c => !string.IsNullOrWhiteSpace(c) && !CategoryResolver.IsExtra(c) &&
+                        !string.Equals(c, CategoryResolver.Unknown, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var category in categories)
+        {
+            var box = new TextBox
+            {
+                Width = 90, VerticalContentAlignment = VerticalAlignment.Center,
+                Text = FormatSize(settings.LeftoverThresholdFor(category))
+            };
+            _leftoverRows.Add((category, box));
+
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 2)
+            };
+            row.Children.Add(new TextBlock
+            {
+                Text = category, Width = 130, VerticalAlignment = VerticalAlignment.Center
+            });
+            row.Children.Add(box);
+            row.Children.Add(new TextBlock
+            {
+                Text = "left behind is scraps", VerticalAlignment = VerticalAlignment.Center,
+                Foreground = System.Windows.Media.Brushes.Gray, Margin = new Thickness(8, 0, 0, 0)
+            });
+            wrap.Children.Add(row);
+        }
+
+        if (_leftoverRows.Count == 0)
+            wrap.Children.Add(Hint("(no categories yet)"));
+
+        return wrap;
     }
 
     private StackPanel ToolsTab()
@@ -1030,9 +1219,14 @@ public class SettingsWindow : Window
             AddCategoryFolderRow(cf.Category, cf.Folder, cf.NameTemplate);
         if (_catFolders.Count == 0)
         {
-            // A fresh install starts with the two categories everyone consolidates.
-            AddCategoryFolderRow("TvShow", settings.TvConsolidationDir, "");
-            AddCategoryFolderRow("Movie", settings.FilmConsolidationDir, "");
+            // A fresh install starts with the two categories everyone consolidates — and
+            // with their name patterns filled in, because a pattern language is far easier
+            // to learn from a working example than from a list of fields. Only on a fresh
+            // install: filling the box in for a library that has already been filed under
+            // the built-in naming would quietly rename everything the next time it was
+            // consolidated, which is not a thing to do to somebody on their behalf.
+            AddCategoryFolderRow("TvShow", settings.TvConsolidationDir, SuggestedTemplate("TvShow"));
+            AddCategoryFolderRow("Movie", settings.FilmConsolidationDir, SuggestedTemplate("Movie"));
         }
 
         var add = new Button
@@ -1099,12 +1293,26 @@ public class SettingsWindow : Window
         };
         var preview = new TextBlock
         {
-            Width = 250, VerticalAlignment = VerticalAlignment.Center,
+            Width = 220, VerticalAlignment = VerticalAlignment.Center,
             Foreground = System.Windows.Media.Brushes.Gray,
             TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(6, 0, 0, 0)
         };
         DockPanel.SetDock(preview, Dock.Right);
         namePanel.Children.Add(preview);
+
+        // A worked example for this category, one click away. The pattern language is far
+        // easier to learn by seeing a correct one than by reading the list of fields.
+        var suggest = new Button
+        {
+            Content = "Suggest", Padding = new Thickness(8, 2, 8, 2),
+            Margin = new Thickness(6, 0, 0, 0),
+            ToolTip = "Fill the box in with a sensible pattern for this category, which you can " +
+                      "then edit. Empty means the built-in naming."
+        };
+        suggest.Click += (_, _) => nameBox.Text = SuggestedTemplate(combo.Text.Trim());
+        DockPanel.SetDock(suggest, Dock.Right);
+        namePanel.Children.Add(suggest);
+
         namePanel.Children.Add(nameBox);
 
         void ShowPreview() => preview.Text = PreviewName(combo.Text.Trim(), nameBox.Text);
@@ -1126,6 +1334,21 @@ public class SettingsWindow : Window
         _catFolders.Add(row);
         _catFolderPanel.Children.Add(rows);
     }
+
+    /// <summary>
+    /// A working pattern for a category — what the "named" box is seeded with on a fresh
+    /// install and what the Suggest button fills in.
+    ///
+    /// An episode leads with its number so a season folder sorts into broadcast order, and
+    /// then says what it is; a film is its title and its year, which is how everybody writes
+    /// a film. Extras follow whatever they are extras of.
+    /// </summary>
+    private static string SuggestedTemplate(string category) => category switch
+    {
+        CategoryResolver.TvShow or CategoryResolver.TvExtra => "{episode:00} - {title} - {numbering}",
+        CategoryResolver.Movie or CategoryResolver.MovieExtra => "{title} ({year})",
+        _ => "{title}"
+    };
 
     /// <summary>Every field a name pattern may use, for the box's tooltip.</summary>
     private static string NameTemplateTip() =>
@@ -1190,22 +1413,43 @@ public class SettingsWindow : Window
             "Consolidation folder", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
     }
 
-    /// <summary>Categories offered in the row combos: the known ones plus any just added.</summary>
+    /// <summary>
+    /// Categories offered in the row combos: the known ones plus any just added, minus the
+    /// extras.
+    ///
+    /// TvExtra and MovieExtra are deliberately absent. A special belongs beside the film or
+    /// the episode it is a special of, in an Extras subfolder of that — so a destination of
+    /// its own is a setting that could only ever be ignored, and offering one is an invitation
+    /// to configure something that does not exist.
+    /// </summary>
     private List<string> CategoryChoices() =>
         _knownCategories.Concat(_categories)
-            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Where(c => !string.IsNullOrWhiteSpace(c) && !CategoryResolver.IsExtra(c))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-    private void AddExtension(string ext)
-    {
-        var normalized = ext.StartsWith('.') ? ext.ToLowerInvariant() : "." + ext.ToLowerInvariant();
-        if (!_exts.Contains(normalized)) _exts.Add(normalized);
-    }
+    /// <summary>
+    /// Read the ignored types out of the box. Tabs are what the box is written in, but
+    /// spaces, commas and new lines are accepted too: nobody should have to think about
+    /// which separator a list of file extensions wants.
+    /// </summary>
+    private List<string> ParseIgnoredExtensions() =>
+        _extsBox.Text
+            .Split(new[] { '\t', '\n', '\r', ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(e => e.Trim())
+            .Where(e => e.Length > 0)
+            .Select(e => (e.StartsWith('.') ? e : "." + e).ToLowerInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     private void AddCategory(string name)
     {
-        if (!_categories.Contains(name)) _categories.Add(name);
+        if (_categories.Contains(name)) return;
+        _categories.Add(name);
+
+        // New categories join the bottom of the menu order rather than not appearing in it.
+        if (!_categoryOrder.Contains(name, StringComparer.OrdinalIgnoreCase))
+            _categoryOrder.Add(name);
     }
 
     private void OnSave(object sender, RoutedEventArgs e)
@@ -1235,6 +1479,30 @@ public class SettingsWindow : Window
             Complain($"'{url}' is not an http:// or https:// address. Clear the box to fall back " +
                      "on the default, or press \"Use the default address\".", SettingsTab.DataSources);
             return;
+        }
+
+        if (!int.TryParse(_notifyDelay.Text.Trim(), out var notifyDelay) ||
+            notifyDelay is < 1 or > 600)
+        {
+            Complain("The wait before saying anything about new files must be between 1 and 600 " +
+                     "seconds.", SettingsTab.General);
+            return;
+        }
+
+        // Each leftover limit read the same way as a scan size limit, so "25MB" means the
+        // same thing wherever a size is typed in this dialog.
+        var leftovers = new List<LeftoverThreshold>();
+        foreach (var (category, box) in _leftoverRows)
+        {
+            var bytes = ParseSize(box.Text);
+            if (bytes == null)
+            {
+                Complain($"The leftover size for '{category}' could not be read. Write a plain " +
+                         "number of bytes, or a size like 25MB. Leave the box empty for \"only " +
+                         "when the folder is truly empty\".", SettingsTab.Library);
+                return;
+            }
+            leftovers.Add(new LeftoverThreshold { Category = category, Bytes = bytes.Value });
         }
 
         var folders = new List<CategoryConsolidation>();
@@ -1279,6 +1547,12 @@ public class SettingsWindow : Window
             RenameOnTitleChange = _renameOnTitle.IsChecked == true,
             SkipRecycleBinByDefault = _skipRecycleBin.IsChecked == true,
             OfferRemoveEmptyFolders = _offerEmptyFolders.IsChecked == true,
+            DeleteEmptyFoldersPermanently = _deleteFoldersPermanently.IsChecked == true,
+            ConsolidateSubtitles = _consolidateSubtitles.IsChecked == true,
+            NewFileNotifyDelaySeconds = notifyDelay,
+            LeftoverThresholds = leftovers,
+            LeftoverThresholdsInitialised = true,   // the user has now seen and set them
+            CategoryOrder = _categoryOrder.ToList(),
             CapitaliseTitles = _capitaliseTitles.IsChecked == true,
             SortLeadingArticleLast = _articleLast.IsChecked == true,
             ProbeDuringScan = _probeDuringScan.IsChecked == true,
@@ -1289,7 +1563,7 @@ public class SettingsWindow : Window
             WatchedFolders = _watchFolders.ToList(),
             RememberFilters = _rememberFilters.IsChecked == true,
             ExcludeSystemDirectories = _excludeSystem.IsChecked == true,
-            IgnoredExtensions = _exts.ToList(),
+            IgnoredExtensions = ParseIgnoredExtensions(),
             ExcludedFolders = _excluded.Select(r => r.Model).ToList(),
             CustomCategories = _categories.ToList(),
             CategoryFolders = folders,

@@ -30,6 +30,12 @@ public enum FilterMode
     Duplicates, NearDuplicates,
     /// <summary>Files claiming the same title and year without being the same bytes.</summary>
     SameTitle,
+    /// <summary>
+    /// Files whose year came from a title that has been used more than once — a remake, a
+    /// reboot, a series and the film it came from. The most recent was taken; these are the
+    /// ones where that could be the wrong one.
+    /// </summary>
+    UncertainYear,
     Problems
 }
 
@@ -51,11 +57,20 @@ public record ConsolidationOutcome(
     public IReadOnlyList<MediaFile> Consolidated => AlreadyConsolidated ?? new List<MediaFile>();
 
     /// <summary>
-    /// Folders the run left holding nothing, so the caller can offer to remove them: a
-    /// move that files everything correctly and leaves a trail of empty folders behind it
-    /// has only done half the job.
+    /// Folders the run left holding nothing — or nothing worth keeping, by the size limit
+    /// set for the category. A move that files everything correctly and leaves a trail of
+    /// folders holding a sample clip and a readme behind it has only done half the job.
     /// </summary>
-    public IReadOnlyList<string> EmptiedFolders { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<LeftoverFolder> LeftoverFolders { get; init; } =
+        Array.Empty<LeftoverFolder>();
+
+    /// <summary>
+    /// Every file the run dealt with, wherever it ended up — including the ones a folder
+    /// rename moved without touching individually. This is what the duplicate sweep at the
+    /// end works from: a file that has just been filed must not be left with copies of it
+    /// lying about, and a folder rename files just as many files as a copy does.
+    /// </summary>
+    public IReadOnlyList<MediaFile> Touched { get; init; } = Array.Empty<MediaFile>();
 }
 
 /// <summary>
@@ -404,17 +419,36 @@ public class MainViewModel : ObservableObject
         set { if (SetProperty(ref _filterNegate, value)) ApplyFilter(); }
     }
 
-    /// <summary>Committed filter clauses (all must match; each may be negated).</summary>
+    /// <summary>
+    /// Committed filter clauses. Every one of them has to match, whichever column it is on,
+    /// so they stack across columns as well as within one: year and then name, or path and
+    /// then Season/Episode. Each may be negated on its own.
+    /// </summary>
     public ObservableCollection<FilterClause> ActiveFilters { get; } = new();
+
+    /// <summary>True when anything is stacked, so the bar of chips is worth showing at all.</summary>
+    public bool HasActiveFilters => ActiveFilters.Count > 0;
 
     /// <summary>Commit the current column/pattern/negate as a stacked filter clause.</summary>
     public void AddCurrentFilter()
     {
         if (string.IsNullOrEmpty(_filterPattern)) return;
-        ActiveFilters.Add(new FilterClause
+
+        var clause = new FilterClause
         {
             Column = _filterColumn, Pattern = _filterPattern, Negate = _filterNegate
-        });
+        };
+
+        // The same clause twice narrows nothing and only clutters the bar.
+        if (ActiveFilters.Any(f => f.Column == clause.Column && f.Pattern == clause.Pattern &&
+                                   f.Negate == clause.Negate))
+        {
+            FilterPattern = "";
+            return;
+        }
+
+        ActiveFilters.Add(clause);
+        OnPropertyChanged(nameof(HasActiveFilters));
         FilterPattern = ""; // clears and re-applies
         SaveFilters();
     }
@@ -422,6 +456,7 @@ public class MainViewModel : ObservableObject
     public void RemoveFilter(FilterClause clause)
     {
         ActiveFilters.Remove(clause);
+        OnPropertyChanged(nameof(HasActiveFilters));
         ApplyFilter();
         SaveFilters();
     }
@@ -429,7 +464,9 @@ public class MainViewModel : ObservableObject
     public void ClearFilters()
     {
         ActiveFilters.Clear();
+        OnPropertyChanged(nameof(HasActiveFilters));
         FilterPattern = "";
+        ApplyFilter();
         SaveFilters();
     }
 
@@ -962,6 +999,7 @@ public class MainViewModel : ObservableObject
             FilterMode.Duplicates => rows.Where(r => r.IsDuplicate),
             FilterMode.NearDuplicates => rows.Where(r => r.IsNearDuplicate),
             FilterMode.SameTitle => rows.Where(r => r.IsTitleDuplicate),
+            FilterMode.UncertainYear => rows.Where(r => r.Model.YearAmbiguous),
             FilterMode.Problems => rows.Where(r =>
                 r.Model.Integrity is IntegrityStatus.Corrupt or IntegrityStatus.IncompleteDownload),
             _ => rows
@@ -1449,7 +1487,7 @@ public class MainViewModel : ObservableObject
 
         var before = copies.Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified,
             f.TitleManuallySet, f.Year, f.Season, f.Episode, f.EpisodeEnd,
-            f.NumberingManuallySet, f.CategoryOverride)).ToList();
+            f.NumberingManuallySet, f.CategoryOverride, f.YearAmbiguous, f.AlternativeYear)).ToList();
         var previousModified = file.LastModifiedUtc;
         var previousIntegrity = file.Integrity;
         var previousKind = file.Kind;
@@ -1468,6 +1506,10 @@ public class MainViewModel : ObservableObject
         var numberingTyped = edits.Season != file.Season || edits.Episode != file.Episode ||
                              edits.EpisodeEnd != file.EpisodeEnd;
 
+        // A year the user typed is not a guess, whatever the catalogue thought of it before:
+        // the "could be the remake" warning is about a year we picked, not one they did.
+        var yearTyped = edits.Year != file.Year;
+
         foreach (var copy in copies)
         {
             // Exactly what the old Edit title dialog did to a title, so the two agree now
@@ -1477,6 +1519,7 @@ public class MainViewModel : ObservableObject
             if (titleChanged) TitleUpdater.Set(new[] { copy }, title, manual: true);
 
             copy.Year = edits.Year;
+            if (yearTyped) { copy.YearAmbiguous = false; copy.AlternativeYear = null; }
             copy.Season = edits.Season;
             copy.Episode = edits.Episode;
             copy.EpisodeEnd = edits.EpisodeEnd;
@@ -1559,6 +1602,8 @@ public class MainViewModel : ObservableObject
                 b.File.EpisodeEnd = b.EpisodeEnd;
                 b.File.NumberingManuallySet = b.NumberingManuallySet;
                 b.File.CategoryOverride = b.CategoryOverride;
+                b.File.YearAmbiguous = b.YearAmbiguous;
+                b.File.AlternativeYear = b.AlternativeYear;
             }
             file.Integrity = previousIntegrity;
             file.Kind = previousKind;
@@ -1589,16 +1634,34 @@ public class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Give everything under a folder the same title — a whole show in one go. Written
-    /// onto each file rather than kept as a folder rule, so the catalogue alone says
-    /// everything there is to know about a file.
+    /// Everything a folder can be told about the programme or film in it. A field left null
+    /// is not being changed; <see cref="ChangeYear"/> is what distinguishes "leave the year
+    /// alone" from "the year is unknown, take it off".
     /// </summary>
-    public string SetTitleForFolder(string folder, string title, bool includeSubdirs)
-    {
-        if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(title))
-            return "Choose a folder and a title first.";
+    public record FolderDetails(string? Title, int? Year, bool ChangeYear, string? Category);
 
-        var clean = title.Trim();
+    /// <summary>
+    /// Set title, year and category for everything under a folder in one go.
+    ///
+    /// The year is here because it is got wrong often enough to matter: a series whose file
+    /// names carry the year of the season rather than of the show ends up filed under a year
+    /// that is nobody's idea of right, and correcting that one episode at a time for a
+    /// twelve-episode season is not a reasonable thing to ask.
+    ///
+    /// Written onto the files themselves rather than kept as a folder rule, like the title
+    /// and category dialogs it replaces: everything known about a file belongs in the
+    /// catalogue, where it travels with the file and survives a settings reset.
+    /// </summary>
+    public string SetFolderDetails(string folder, FolderDetails details, bool includeSubdirs)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return "Choose a folder first.";
+
+        var title = details.Title?.Trim();
+        var category = details.Category?.Trim();
+        var changingSomething = !string.IsNullOrWhiteSpace(title) || details.ChangeYear ||
+                                !string.IsNullOrWhiteSpace(category);
+        if (!changingSomething) return "Nothing was changed.";
+
         var affected = FilesUnder(folder, includeSubdirs);
         if (affected.Count == 0)
         {
@@ -1606,39 +1669,68 @@ public class MainViewModel : ObservableObject
             return StatusText;
         }
 
-        // The folder's files and their identical copies wherever those live — but not
-        // files elsewhere that merely share the old title, which may be something else.
-        var withDuplicates = affected.Concat(DuplicatesOf(affected)).Distinct().ToList();
+        // The folder's files and their identical copies wherever those live — but not files
+        // elsewhere that merely share the old title, which may well be something else.
+        var targets = affected.Concat(DuplicatesOf(affected)).Distinct().ToList();
 
-        var snapshot = withDuplicates
-            .Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified, f.TitleManuallySet))
-            .ToList();
+        var snapshot = targets.Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified,
+            f.TitleManuallySet, f.Year, f.YearAmbiguous, f.AlternativeYear, f.CategoryOverride,
+            f.Season, f.Episode, f.EpisodeEnd)).ToList();
+        var wasCalled = targets.ToDictionary(f => f, f => f.EffectiveTitle);
 
-        var wasCalled = withDuplicates.ToDictionary(f => f, f => f.EffectiveTitle);
+        var changes = new List<string>();
 
-        var changed = TitleUpdater.Set(withDuplicates, clean, manual: true);
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            var changed = TitleUpdater.Set(targets, title, manual: true);
+            changes.Add($"title '{title}' on {changed} file(s)");
+
+            // A rule for this folder left over from an earlier version is now redundant: the
+            // files themselves say what they are called.
+            if (_settings.FolderTitleRules.RemoveAll(r =>
+                    string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase)) > 0)
+                _settings.Save(_settingsPath);
+        }
+
+        if (details.ChangeYear)
+        {
+            foreach (var file in targets)
+            {
+                file.Year = details.Year;
+                // A year the user typed is not a guess, so the "could be the remake" mark
+                // that a lookup left on it no longer applies.
+                file.YearAmbiguous = false;
+                file.AlternativeYear = null;
+            }
+            changes.Add(details.Year is { } y ? $"year {y}" : "year cleared");
+        }
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            foreach (var file in targets) file.CategoryOverride = category;
+            var unnumbered = MetadataNormaliser.StripNonTvNumbering(targets, _ => category);
+            changes.Add($"category '{category}'" +
+                        (unnumbered > 0 ? $" (season/episode cleared on {unnumbered})" : ""));
+
+            // A rule for this folder left over from an earlier version is now redundant.
+            if (_settings.FolderCategoryRules.RemoveAll(r =>
+                    string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase)) > 0)
+                _settings.Save(_settingsPath);
+        }
+
         DuplicateMetadata.Propagate(_catalog.Files);
         ExtraLinker.Link(_catalog.Files);
 
-        // Names on disk follow the title here too, so a whole show renamed in one go comes
-        // out consistent rather than half-corrected.
-        var renamed = RenameToMatchTitles(withDuplicates,
-            f => wasCalled.TryGetValue(f, out var was) ? was : null);
+        // Names on disk follow the title, as they do everywhere else a title is corrected.
+        var renamed = string.IsNullOrWhiteSpace(title)
+            ? new List<(MediaFile, string, string)>()
+            : RenameToMatchTitles(targets, f => wasCalled.TryGetValue(f, out var was) ? was : null);
 
-        // Any leftover rule for this folder has just been made redundant.
-        var previous = _settings.FolderTitleRules
-            .Where(r => string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (previous.Count > 0)
-        {
-            _settings.FolderTitleRules.RemoveAll(r =>
-                string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
-            _settings.Save(_settingsPath);
-        }
-
+        _catalog.RebuildIndex();
         CatalogStore.Save(_catalog, _catalogPath);
         RebuildRows();
 
-        Undo.Push($"folder title '{clean}'", () =>
+        Undo.Push($"folder details for '{Path.GetFileName(folder.TrimEnd('\\', '/'))}'", () =>
         {
             UndoRenames(renamed);
             foreach (var s in snapshot)
@@ -1647,74 +1739,50 @@ public class MainViewModel : ObservableObject
                 s.File.TmdbVerified = s.TmdbVerified;
                 s.File.ImdbVerified = s.ImdbVerified;
                 s.File.TitleManuallySet = s.TitleManuallySet;
-            }
-            if (previous.Count > 0)
-            {
-                _settings.FolderTitleRules.AddRange(previous);
-                _settings.Save(_settingsPath);
+                s.File.Year = s.Year;
+                s.File.YearAmbiguous = s.YearAmbiguous;
+                s.File.AlternativeYear = s.AlternativeYear;
+                s.File.CategoryOverride = s.CategoryOverride;
+                s.File.Season = s.Season;
+                s.File.Episode = s.Episode;
+                s.File.EpisodeEnd = s.EpisodeEnd;
             }
             ExtraLinker.Link(_catalog.Files);
             _catalog.RebuildIndex();
             PersistAndRefresh();
-            return Task.FromResult($"Reverted the folder title '{clean}'.");
+            return Task.FromResult("Reverted the folder details.");
         });
 
-        StatusText = $"Title '{clean}' set for {folder}{(includeSubdirs ? " and its subfolders" : "")} " +
-                     $"— {changed} file(s) updated" +
-                     (renamed.Count > 0 ? $", {renamed.Count} renamed to match." : ".");
+        StatusText = $"{folder}{(includeSubdirs ? " and its subfolders" : "")}: " +
+                     string.Join(", ", changes) +
+                     (renamed.Count > 0 ? $"; {renamed.Count} file(s) renamed to match." : ".");
         return StatusText;
     }
 
     /// <summary>
-    /// Give every catalogued file under a folder the same category. Written onto the files
-    /// themselves rather than kept as a folder rule: everything known about a file belongs
-    /// in the catalogue, where it travels with the file and survives a settings reset.
+    /// What a folder already says about itself, for seeding the folder-details dialog: the
+    /// title, year and category its files agree on, or null where they do not.
     /// </summary>
-    public string SetCategoryForFolder(string folder, string category, bool includeSubdirs)
+    public FolderDetails DetailsOf(string folder, bool includeSubdirs)
     {
-        if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(category))
-            return "Choose a folder and a category first.";
+        var files = FilesUnder(folder, includeSubdirs);
+        if (files.Count == 0) return new FolderDetails(null, null, false, null);
 
-        var affected = FilesUnder(folder, includeSubdirs);
-        if (affected.Count == 0)
+        string? Agreed<T>(Func<MediaFile, T> of, Func<T, string?> show)
         {
-            StatusText = $"No catalogued files under {folder}.";
-            return StatusText;
+            var values = files.Select(of).Distinct().ToList();
+            return values.Count == 1 ? show(values[0]) : null;
         }
 
-        // Duplicates elsewhere are the same content, so they are filed the same way.
-        var withDuplicates = affected.Concat(DuplicatesOf(affected)).Distinct().ToList();
+        var title = Agreed(f => f.EffectiveTitle, v => string.IsNullOrWhiteSpace(v) ? null : v);
+        var year = Agreed(f => f.Year, v => v?.ToString());
+        var category = Agreed(f => CategoryResolver.Effective(f, _settings), v => v);
 
-        var before = withDuplicates
-            .Select(f => (File: f, f.CategoryOverride, f.Season, f.Episode, f.EpisodeEnd)).ToList();
-        Undo.Push($"category '{category}' on {withDuplicates.Count} file(s)", () =>
-        {
-            foreach (var b in before)
-            {
-                b.File.CategoryOverride = b.CategoryOverride;
-                b.File.Season = b.Season;
-                b.File.Episode = b.Episode;
-                b.File.EpisodeEnd = b.EpisodeEnd;
-            }
-            PersistAndRefresh();
-            return Task.FromResult($"Reverted the category '{category}'.");
-        });
-
-        foreach (var f in withDuplicates) f.CategoryOverride = category;
-        MetadataNormaliser.StripNonTvNumbering(withDuplicates, _ => category);
-
-        // A rule for this folder, if one is left over from an earlier version, has just
-        // been made redundant by the files themselves saying so.
-        var retired = _settings.FolderCategoryRules.RemoveAll(r =>
-            string.Equals(r.Path, folder, StringComparison.OrdinalIgnoreCase));
-        if (retired > 0) _settings.Save(_settingsPath);
-
-        CatalogStore.Save(_catalog, _catalogPath);
-        RebuildRows();
-
-        StatusText = $"Category '{category}' set on {withDuplicates.Count} file(s) under " +
-                     $"{folder}{(includeSubdirs ? " and its subfolders" : "")}.";
-        return StatusText;
+        return new FolderDetails(
+            title,
+            int.TryParse(year, out var parsed) ? parsed : null,
+            ChangeYear: false,
+            category);
     }
 
     /// <summary>Catalogued files inside a folder (and optionally everything below it).</summary>
@@ -1916,14 +1984,6 @@ public class MainViewModel : ObservableObject
         // prevent. So it is settled before anything moves.
         var episodes = await ResolveEpisodeConflictsAsync(toFile);
 
-        // Where the files were before anything moved, so folders the move empties can be
-        // offered for removal afterwards.
-        var sourceFolders = toFile
-            .Select(f => Path.GetDirectoryName(f.FullPath) ?? string.Empty)
-            .Where(d => d.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
         // Files the run declined to move, which are failures as far as the loop counting
         // them is concerned but are not failures to report as such.
         var unfiled = 0;
@@ -1966,9 +2026,9 @@ public class MainViewModel : ObservableObject
             PushMoveUndo(origins.Where(o => !string.Equals(o.File.FullPath, o.FullPath,
                 StringComparison.OrdinalIgnoreCase)).ToList());
 
-        // Folders the move has emptied — inside the library and out. Left standing they are
+        // Folders the move has emptied — or left holding only scraps. Left standing they are
         // litter from an operation the user asked for.
-        var emptied = EmptyFolderCleaner.EmptyAmong(sourceFolders);
+        var emptied = FindLeftovers(origins);
 
         var failed = Math.Max(0, report.Failed - unfiled - run.Skipped);
         var parts = new List<string> { $"{report.Succeeded} moved" };
@@ -1991,10 +2051,90 @@ public class MainViewModel : ObservableObject
 
         StatusText = msg.Split('\n')[0];
         PersistAndRefresh();
+
+        // Everything the run put in its place, however it got there. A folder rename files a
+        // whole season without any of those files passing through the loop above, and they
+        // need the same duplicate sweep as the ones that did.
+        var touched = files
+            .Concat(episodes.Kept)
+            .Concat(folderMoves.SelectMany(m => m.Files))
+            .Distinct()
+            .ToList();
+
         return new ConsolidationOutcome(
             report.Succeeded, skipped, failed, report.AlreadyPresent, msg, alreadyConsolidated)
-        { EmptiedFolders = emptied };
+        { LeftoverFolders = emptied, Touched = touched };
     }
+
+    /// <summary>
+    /// The folders the moved files came out of that are now empty, or hold so little that
+    /// what is left is scraps rather than content.
+    ///
+    /// How little counts as scraps is the user's, per category, and for good reason: three
+    /// megabytes left where a film used to be is a sample clip or a readme, while three
+    /// megabytes in a music folder is very probably a track. Where files of two categories
+    /// shared a folder the stricter limit applies — being cautious costs an empty folder, and
+    /// being casual costs somebody's music.
+    /// </summary>
+    private List<LeftoverFolder> FindLeftovers(
+        IReadOnlyList<(MediaFile File, string FullPath, string FileName)> origins)
+    {
+        var limits = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (var origin in origins)
+        {
+            var dir = Path.GetDirectoryName(origin.FullPath) ?? string.Empty;
+            if (dir.Length == 0) continue;
+
+            var limit = _settings.LeftoverThresholdFor(
+                CategoryResolver.Effective(origin.File, _settings));
+            limits[dir] = limits.TryGetValue(dir, out var already) ? Math.Min(already, limit) : limit;
+        }
+
+        var found = new List<LeftoverFolder>();
+        foreach (var (dir, limit) in limits)
+            found.AddRange(FolderLeftovers.Find(
+                new[] { dir }, limit, IsWaitingToBeFiled, IsConfiguredFolder));
+        return found.OrderByDescending(f => f.Path.Length).ToList();
+    }
+
+    /// <summary>
+    /// True for a folder the user has named somewhere in the settings — a folder they scan,
+    /// a folder they watch, a consolidation root, or a drive root.
+    ///
+    /// These are never taken away, however empty they end up. A download folder is empty most
+    /// of the time; that is what it is for, and deleting it the moment the last thing in it
+    /// was filed would be a poor reward for tidying up — and would quietly break the watching
+    /// or scanning that pointed at it.
+    /// </summary>
+    private bool IsConfiguredFolder(string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return true;
+
+        var path = folder.TrimEnd('\\', '/');
+        if (path.Length == 0) return true;
+
+        bool Same(string other) =>
+            !string.IsNullOrWhiteSpace(other) &&
+            string.Equals(other.TrimEnd('\\', '/'), path, StringComparison.OrdinalIgnoreCase);
+
+        return _settings.AdditionalScanFolders.Any(Same) ||
+               _settings.WatchedFolders.Any(Same) ||
+               _settings.WatchedDrives.Any(Same) ||
+               _settings.ScanDrives.Any(Same) ||
+               _settings.CategoryFolders.Any(c => Same(c.Folder)) ||
+               Same(_settings.TvConsolidationDir) ||
+               Same(_settings.FilmConsolidationDir);
+    }
+
+    /// <summary>
+    /// True for a file the catalogue knows about and has not filed yet. However small it is,
+    /// that is work the user has not finished — so a folder holding one is never taken away,
+    /// whatever the size limit says.
+    /// </summary>
+    private bool IsWaitingToBeFiled(string path) =>
+        _catalog.ByPath.TryGetValue(path, out var entry) &&
+        !ConsolidationPlanner.IsCorrectlyFiled(
+            entry, CategoryResolver.Effective(entry, _settings), _settings);
 
     /// <summary>
     /// The doomed list with the file that is being kept taken out of it. Two byte-identical
@@ -2296,22 +2436,77 @@ public class MainViewModel : ObservableObject
         EmptyFolderCleaner.EmptiedBy(deletedPaths);
 
     /// <summary>
-    /// Remove folders the user has agreed to, taking any parent they empty in turn. The
-    /// catalogue holds files rather than folders, so there is nothing to prune from it —
-    /// but the results are rebuilt anyway, since a removed folder changes what "filed"
-    /// means for anything that pointed into it.
+    /// Remove folders the user has agreed to, taking any parent they empty in turn.
+    ///
+    /// Deleted outright rather than recycled, unless the user has said otherwise: what is
+    /// going has already been judged to be nothing — either an empty folder or one holding
+    /// less than the category's size limit, with no catalogued file waiting to be filed
+    /// anywhere in it. There is nothing in the Recycle Bin's job description for that.
+    ///
+    /// The catalogue holds files rather than folders, so there is nothing to prune from it —
+    /// but the results are rebuilt anyway, since a removed folder changes what "filed" means
+    /// for anything that pointed into it, and anything that was inside it is now gone.
     /// </summary>
-    public async Task<int> RemoveEmptyFoldersAsync(IReadOnlyList<string> folders, bool toRecycleBin)
+    public async Task<int> RemoveFoldersAsync(IReadOnlyList<string> folders)
     {
         if (folders.Count == 0) return 0;
 
-        var removed = await Task.Run(() => EmptyFolderCleaner.Remove(folders, toRecycleBin));
-        if (removed.Count > 0)
+        var recycle = !_settings.DeleteEmptyFoldersPermanently;
+        var removed = await Task.Run(() => FolderLeftovers.Remove(folders, recycle, IsConfiguredFolder));
+        if (removed.Count == 0) return 0;
+
+        // A folder that went with something still in it takes those entries with it.
+        var gone = removed.Select(f => f.TrimEnd('\\', '/') + Path.DirectorySeparatorChar).ToList();
+        var dropped = _catalog.Files.RemoveAll(f =>
+            gone.Any(g => f.FullPath.StartsWith(g, StringComparison.OrdinalIgnoreCase)));
+        if (dropped > 0)
         {
-            RebuildRows();
-            StatusText = $"{removed.Count} empty folder(s) removed.";
+            _catalog.RebuildIndex();
+            ExtraLinker.Link(_catalog.Files);
+            CatalogStore.Save(_catalog, _catalogPath);
         }
+
+        RebuildRows();
+        StatusText = $"{removed.Count} folder(s) removed" +
+                     (dropped > 0 ? $", along with {dropped} catalogue entr(ies) inside them." : ".");
         return removed.Count;
+    }
+
+    /// <summary>
+    /// Copies of files that are now filed which are still sitting somewhere else — what the
+    /// sweep at the end of a consolidation is for.
+    ///
+    /// A file that has just been filed must not be left with copies of it lying about, and
+    /// that is as true of a whole season put right by a folder rename as of a file copied one
+    /// at a time. The filed copy is the keeper by definition, so everything here is redundant
+    /// and all that is left is to ask how firmly it should go.
+    /// </summary>
+    public List<MediaFile> RedundantCopiesOf(IEnumerable<MediaFile> filed)
+    {
+        var redundant = new List<MediaFile>();
+        var seen = new HashSet<MediaFile>();
+
+        foreach (var file in filed)
+        {
+            if (!ConsolidationPlanner.IsCorrectlyFiled(
+                    file, CategoryResolver.Effective(file, _settings), _settings)) continue;
+
+            foreach (var copy in CopiesOf(file))
+            {
+                if (ReferenceEquals(copy, file) || !seen.Add(copy)) continue;
+
+                // Two copies can both be inside the library — the same episode filed under
+                // two spellings. Neither is redundant until one of them is the keeper, and
+                // the keeper is the one that is correctly filed, so a second filed copy is
+                // left alone rather than quietly deleted.
+                if (ConsolidationPlanner.IsCorrectlyFiled(
+                        copy, CategoryResolver.Effective(copy, _settings), _settings)) continue;
+
+                if (File.Exists(copy.FullPath)) redundant.Add(copy);
+            }
+        }
+
+        return redundant;
     }
 
     /// <summary>Propose consolidation moves for the whole catalogue.</summary>
@@ -2364,8 +2559,293 @@ public class MainViewModel : ObservableObject
 
         StatusText = msg.Split('\n')[0];
         PersistAndRefresh();
-        return new ConsolidationOutcome(report.Succeeded, 0, report.Failed, report.AlreadyPresent, msg);
+        return new ConsolidationOutcome(report.Succeeded, 0, report.Failed, report.AlreadyPresent, msg)
+        {
+            LeftoverFolders = FindLeftovers(origins),
+            Touched = files
+        };
     }
+
+    // --- Consolidating the whole catalogue, hands off ------------------------
+
+    /// <summary>What a hands-off consolidation run came to.</summary>
+    /// <param name="Review">
+    /// Everything the run declined to touch, with the reason. This is the important half of
+    /// the report: the files it filed are finished with, and the ones it did not are the
+    /// list of what is left to do.
+    /// </param>
+    public record AutoConsolidationReport(
+        int Filed, int Removed, int Corrupt, int Failed, bool Cancelled,
+        List<AutoReview> Review, List<string> Notes,
+        IReadOnlyList<MediaFile> Touched, IReadOnlyList<LeftoverFolder> LeftoverFolders)
+    {
+        public string Describe()
+        {
+            var parts = new List<string> { $"{Filed} filed" };
+            if (Removed > 0) parts.Add($"{Removed} redundant copy(ies) deleted");
+            if (Corrupt > 0) parts.Add($"{Corrupt} damaged copy(ies) removed");
+            if (Failed > 0) parts.Add($"{Failed} failed");
+            if (Review.Count > 0) parts.Add($"{Review.Count} left for you to look at");
+
+            var text = "Automatic consolidation: " + string.Join(", ", parts) +
+                       (Cancelled ? " (stopped part-way)." : ".");
+            if (Notes.Count > 0)
+                text += "\n\n" + string.Join("\n", Notes.Take(20).Select(n => "    " + n)) +
+                        (Notes.Count > 20 ? $"\n    …and {Notes.Count - 20} more." : "");
+            return text;
+        }
+    }
+
+    /// <summary>What one job settled on, before anything has moved.</summary>
+    private record AutoDecision(MediaFile Keeper, List<MediaFile> Doomed, string? Note);
+
+    /// <summary>
+    /// Work out what a hands-off run would do, without doing any of it — so the user can be
+    /// shown the size of the job and what it will not touch before agreeing to it.
+    /// </summary>
+    public (List<AutoJob> Jobs, List<AutoReview> Review) PlanAutoConsolidation(
+        IReadOnlyList<MediaFile>? scope = null) =>
+        AutoConsolidator.Plan(
+            scope is { Count: > 0 } ? scope : _catalog.Files,
+            _settings, f => CategoryResolver.Effective(f, _settings));
+
+    /// <summary>
+    /// File everything that can be filed without asking, and say plainly what was left.
+    ///
+    /// The order of the decisions is the order a careful person would make them. A file that
+    /// does not yet say what it is cannot be filed and is set aside. A file with no other
+    /// copy is simply filed. Copies that are the same bytes decide themselves — the one
+    /// already in the library wins, because keeping it means moving nothing. Only genuinely
+    /// different files claiming to be the same thing are a real question, and that one is
+    /// settled by looking: fingerprints to confirm they are the same content at all, quality
+    /// and size to choose between them, and a decode to make sure the survivor is not the
+    /// damaged one. A copy that fails the decode is removed along with its byte-identical
+    /// twins — which are damaged by definition — and the next best is tried.
+    ///
+    /// Nothing is deleted until the copy that is being kept has actually arrived in the
+    /// library. A run that fails half way through leaves every file it had not yet filed
+    /// exactly where it was.
+    /// </summary>
+    public async Task<AutoConsolidationReport> AutoConsolidateAsync(
+        IReadOnlyList<MediaFile>? scope = null)
+    {
+        var (jobs, review) = PlanAutoConsolidation(scope);
+        var notes = new List<string>();
+        var none = new List<MediaFile>();
+
+        if (!_settings.HasAnyConsolidationFolder)
+            return new AutoConsolidationReport(0, 0, 0, 0, false,
+                review, new List<string>
+                {
+                    "No category has a consolidation folder set, so there is nowhere to file " +
+                    "anything. Set one on the Library tab in Settings."
+                }, none, Array.Empty<LeftoverFolder>());
+
+        if (jobs.Count == 0)
+            return new AutoConsolidationReport(0, 0, 0, 0, false, review, notes, none,
+                Array.Empty<LeftoverFolder>());
+
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        IsScanning = true;
+        BeginTiming();
+        ProgressValue = 0;
+        ProgressMax = Math.Max(1, jobs.Count);
+
+        var decisions = new List<AutoDecision>();
+        var corrupt = 0;
+        var cancelled = false;
+
+        try
+        {
+            for (var i = 0; i < jobs.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var job = jobs[i];
+
+                ProgressValue = i;
+                UpdateEta(i, jobs.Count);
+                StatusText = ProgressLine("Working out what to keep", i + 1, jobs.Count, job.Display);
+
+                var settled = await SettleJobAsync(job, review, notes, ct);
+                if (settled == null) continue;
+
+                corrupt += settled.Value.Corrupt;
+                if (settled.Value.Decision is { } decision) decisions.Add(decision);
+            }
+        }
+        catch (OperationCanceledException) { cancelled = true; }
+        catch (Exception ex) { notes.Add($"Stopped: {ex.Message}"); }
+        finally
+        {
+            EndTiming();
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+        }
+
+        if (decisions.Count == 0)
+        {
+            RebuildRows();
+            return new AutoConsolidationReport(0, 0, corrupt, 0, cancelled, review, notes, none,
+                Array.Empty<LeftoverFolder>());
+        }
+
+        // Everything that survived the decisions, filed in one batch so the progress bar and
+        // the ETA cover the whole job rather than restarting for each file.
+        var keepers = decisions.Select(d => d.Keeper).Distinct().ToList();
+        var outcome = await ConsolidateModelsAsync(
+            keepers.Concat(LinkedExtras(keepers)).Distinct().ToList(), deleteOriginal: true);
+
+        // Only now, and only for the ones that actually arrived: a copy is not redundant
+        // until the copy replacing it is really in the library.
+        var doomed = new List<string>();
+        var filed = 0;
+        foreach (var decision in decisions)
+        {
+            var arrived = ConsolidationPlanner.IsCorrectlyFiled(
+                decision.Keeper, CategoryResolver.Effective(decision.Keeper, _settings), _settings);
+            if (!arrived)
+            {
+                notes.Add($"{decision.Keeper.FileName}: could not be filed, so its other copies " +
+                          "were left alone.");
+                continue;
+            }
+
+            filed++;
+            doomed.AddRange(decision.Doomed
+                .Where(d => !ReferenceEquals(d, decision.Keeper))
+                .Select(d => d.FullPath));
+            if (decision.Note is { Length: > 0 } note) notes.Add(note);
+        }
+
+        var removed = await DeleteQuietlyAsync(doomed, toRecycleBin: true);
+
+        PersistAndRefresh();
+
+        var report = new AutoConsolidationReport(
+            filed, removed, corrupt, outcome.Failed, cancelled, review, notes,
+            outcome.Touched, outcome.LeftoverFolders);
+        StatusText = report.Describe().Split('\n')[0];
+        return report;
+    }
+
+    /// <summary>
+    /// Decide one job: which copy survives and which go. Null when the job cannot be settled
+    /// without the user, in which case the reason has been added to <paramref name="review"/>.
+    /// </summary>
+    private async Task<(AutoDecision? Decision, int Corrupt)?> SettleJobAsync(
+        AutoJob job, List<AutoReview> review, List<string> notes, CancellationToken ct)
+    {
+        var destination = ConsolidationPlanner.PlanDirectory(job.Files[0], job.Category, _settings);
+
+        switch (job.Kind)
+        {
+            case AutoJobKind.Single:
+                return (new AutoDecision(job.Files[0], new List<MediaFile>(), null), 0);
+
+            case AutoJobKind.ExactCopies:
+            {
+                // Every copy is the same bytes, so which one survives changes nothing about
+                // what the library ends up holding — only how much work it takes to get
+                // there. The copy already in the library wins for exactly that reason.
+                var keeper = AutoConsolidator.PreferLibraryCopy(job.Files, destination, _settings);
+                var others = job.Others(keeper);
+                return (new AutoDecision(keeper, others,
+                    others.Count > 0
+                        ? $"{job.Display}: kept one of {job.Files.Count} identical copies."
+                        : null), 0);
+            }
+        }
+
+        // --- Rivals: genuinely different files claiming to be the same thing -------------
+
+        // One file stands for each distinct set of bytes, preferring a copy already in the
+        // library so the work of comparing is done on the copy we would rather keep anyway.
+        var candidates = job.Distinct
+            .Select(set => AutoConsolidator.PreferLibraryCopy(set, destination, _settings))
+            .ToList();
+
+        if (!CanAnalyze)
+        {
+            review.Add(new AutoReview(candidates[0],
+                $"{job.Distinct.Count} different files claim to be this, and comparing them needs " +
+                "FFmpeg/ffprobe (and fpcalc for audio) — set them up under Settings → External tools"));
+            return null;
+        }
+
+        // Fingerprint whatever has not been fingerprinted yet. Only the representatives:
+        // the other copies are the same bytes and would give the same answer.
+        var unfingerprinted = candidates.Where(NeedsFingerprint).ToList();
+        if (unfingerprinted.Count > 0)
+        {
+            StatusText = ProgressLine("Fingerprinting to compare", 0, 0, job.Display);
+            var engine = new ContentAnalysisEngine(_tools);
+            await engine.AnalyzeAsync(unfingerprinted, fingerprint: true, deepCheck: false, null, ct);
+        }
+
+        // Every copy has to look like the first one. The comparison allows for a copy that
+        // starts a second or two later than another — an extra beat of distributor logo is
+        // the usual reason two rips of one film do not line up — so a real match is not
+        // mistaken for a disagreement.
+        var odd = candidates.Skip(1)
+            .FirstOrDefault(c => !FingerprintMatcher.LooksLikeSameContent(candidates[0], c));
+        if (odd != null)
+        {
+            review.Add(new AutoReview(odd,
+                $"claims to be \"{job.Display}\" but does not sound or look like the other copy — " +
+                "one of them is mislabelled, so which to keep is your call"));
+            return null;
+        }
+
+        // Best picture first; among copies of one quality the smallest, since at a given
+        // resolution the extra bytes are padding rather than detail.
+        var corrupt = 0;
+        foreach (var candidate in AutoConsolidator.RankCandidates(candidates))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (CanDoVideo || candidate.Kind == MediaKind.Audio)
+            {
+                StatusText = ProgressLine("Deep checking the best copy", 0, 0, candidate.FileName);
+                var engine = new ContentAnalysisEngine(_tools);
+                await engine.AnalyzeAsync(new[] { candidate }, fingerprint: false, deepCheck: true,
+                    null, ct);
+            }
+
+            if (candidate.Integrity == IntegrityStatus.Corrupt)
+            {
+                // Damaged, and so is every byte-identical copy of it — the same bytes cannot
+                // be sound in one place and broken in another. They all go, and the next
+                // best copy gets its turn.
+                var twins = job.Distinct.First(set => set.Contains(candidate));
+                corrupt += await DeleteQuietlyAsync(
+                    twins.Select(t => t.FullPath), toRecycleBin: true);
+                notes.Add($"{job.Display}: {candidate.FileName} would not decode — it and its " +
+                          $"{twins.Count - 1} identical copy(ies) were removed.");
+                continue;
+            }
+
+            var doomed = job.Files
+                .Where(f => !ReferenceEquals(f, candidate) && File.Exists(f.FullPath))
+                .ToList();
+            return (new AutoDecision(candidate, doomed,
+                $"{job.Display}: kept {candidate.FileName} ({candidate.QualityDisplay}, " +
+                $"{Format.Bytes(candidate.SizeBytes)}) of {job.Distinct.Count} different copies."), corrupt);
+        }
+
+        review.Add(new AutoReview(job.Files[0],
+            "every copy of this failed its decode, so there is nothing sound left to file"));
+        return (null, corrupt);
+    }
+
+    /// <summary>True when nothing has fingerprinted this file in the way its kind needs.</summary>
+    private static bool NeedsFingerprint(MediaFile file) => file.Kind switch
+    {
+        MediaKind.Audio => string.IsNullOrEmpty(file.AudioFingerprint),
+        MediaKind.Video => string.IsNullOrEmpty(file.VideoFingerprint),
+        _ => false
+    };
 
     /// <summary>Files that cannot be consolidated because nothing is known about them yet.</summary>
     public List<MediaFile> WithoutTitle(IEnumerable<MediaFile> files) =>
@@ -2569,15 +3049,18 @@ public class MainViewModel : ObservableObject
 
             // Skip first, so a taken name is reported rather than worked around, and the
             // question is only asked when there is genuinely something to decide.
+            //
+            // Subtitles always come along on a move the user asked for: they were chosen
+            // together with the file, whatever the library setting says about consolidating.
             var result = await FileRelocator.RelocateAsync(file, destinationDir, deleteOriginal,
-                newFileName: null, DuplicatePolicy.Skip, bytes);
+                newFileName: null, DuplicatePolicy.Skip, bytes, subtitles: SubtitlePolicy.Follow);
             if (!result.NameTaken) return result;
 
             var (policy, decided) = await AskAboutCollisionAsync(file, result.NewPath, run);
             if (decided != null) return decided;
 
             return await FileRelocator.RelocateAsync(file, destinationDir, deleteOriginal,
-                newFileName: null, policy, bytes);
+                newFileName: null, policy, bytes, subtitles: SubtitlePolicy.Follow);
         });
 
         var removed = await FinishCollisionRunAsync(run);
@@ -2722,16 +3205,28 @@ public class MainViewModel : ObservableObject
         MediaFile file, string destDir, string? newName, bool deleteOriginal,
         CollisionRun run, IProgress<long> bytes)
     {
+        var subtitles = ConsolidationSubtitlePolicy;
+
         var result = await FileRelocator.RelocateAsync(
-            file, destDir, deleteOriginal, newName, DuplicatePolicy.Skip, bytes);
+            file, destDir, deleteOriginal, newName, DuplicatePolicy.Skip, bytes,
+            subtitles: subtitles);
         if (!result.NameTaken) return result;
 
         var (policy, decided) = await AskAboutCollisionAsync(file, result.NewPath, run);
         if (decided != null) return decided;
 
         return await FileRelocator.RelocateAsync(
-            file, destDir, deleteOriginal, newName, policy, bytes);
+            file, destDir, deleteOriginal, newName, policy, bytes, subtitles: subtitles);
     }
+
+    /// <summary>
+    /// What happens to a subtitle sitting beside a file being filed: it comes along, or —
+    /// when the user has said the library should hold only the media — it goes. Leaving it
+    /// is not one of the choices, because a subtitle whose film has moved away is matched to
+    /// nothing and will never be matched to anything again.
+    /// </summary>
+    private SubtitlePolicy ConsolidationSubtitlePolicy =>
+        _settings.ConsolidateSubtitles ? SubtitlePolicy.Follow : SubtitlePolicy.Discard;
 
     /// <summary>Everything the user needs to decide a collision: both files and all their copies.</summary>
     private CollisionRequest BuildCollisionRequest(
@@ -3448,12 +3943,56 @@ public class MainViewModel : ObservableObject
             CatalogStore.Save(_catalog, _catalogPath);
             RebuildRows();
 
-            Notify?.Invoke("Media Catalog", $"Added new file: {info.Name}");
+            QueueNewFileNotice(info.Name);
             StatusText = $"New file detected and added: {info.Name}";
 
             _ = HashNewFileAsync(entry); // hash it once it has stopped growing
         }
         catch { /* a watcher hiccup must never crash the app */ }
+    }
+
+    // --- Telling the user about new files -----------------------------------
+    //
+    // Files arrive in handfuls. A download finishing writes one file; a folder being copied
+    // in writes forty, within a second of each other, and forty notifications about that is
+    // thirty-nine too many — it is one thing that happened, not forty.
+    //
+    // So the first arrival starts a short wait and everything landing during it joins the
+    // same message. The wait is not extended by later arrivals: it is there to gather a
+    // burst, not to hold the news back until the copying finally stops.
+
+    private readonly List<string> _pendingNotices = new();
+    private System.Windows.Threading.DispatcherTimer? _noticeTimer;
+
+    private void QueueNewFileNotice(string fileName)
+    {
+        _pendingNotices.Add(fileName);
+        if (_noticeTimer is { IsEnabled: true }) return;   // already gathering this burst
+
+        var seconds = Math.Clamp(_settings.NewFileNotifyDelaySeconds, 1, 600);
+        _noticeTimer ??= CreateNoticeTimer();
+        _noticeTimer.Interval = TimeSpan.FromSeconds(seconds);
+        _noticeTimer.Start();
+    }
+
+    private System.Windows.Threading.DispatcherTimer CreateNoticeTimer()
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer();
+        timer.Tick += (_, _) => FlushNewFileNotices();
+        return timer;
+    }
+
+    private void FlushNewFileNotices()
+    {
+        _noticeTimer?.Stop();
+
+        var names = _pendingNotices.ToList();
+        _pendingNotices.Clear();
+        if (names.Count == 0) return;
+
+        Notify?.Invoke("Media Catalog", names.Count == 1
+            ? $"Added new file: {names[0]}"
+            : $"Added {names.Count} new files, starting with {names[0]}.");
     }
 
     /// <summary>
@@ -3613,6 +4152,8 @@ public class MainViewModel : ObservableObject
     {
         SaveFilters();
         StopWatching();
+        _noticeTimer?.Stop();
+        _pendingNotices.Clear();
     }
 
     private void RaiseCommandStates()

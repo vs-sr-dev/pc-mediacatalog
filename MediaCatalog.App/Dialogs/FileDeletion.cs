@@ -57,7 +57,7 @@ public static class FileDeletion
                 var elevated = await vm.RetryDeleteElevatedAsync(stillThere, recycle);
                 MessageBox.Show(owner, elevated.Message, title,
                     MessageBoxButton.OK, MessageBoxImage.Information);
-                await OfferEmptyFoldersAsync(owner, vm, wanted, recycle);
+                await OfferEmptyFoldersAsync(owner, vm, wanted);
                 return true;
             }
         }
@@ -67,7 +67,7 @@ public static class FileDeletion
             outcome.Result.Failed > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
 
         if (outcome.Result.Deleted > 0)
-            await OfferEmptyFoldersAsync(owner, vm, wanted, recycle);
+            await OfferEmptyFoldersAsync(owner, vm, wanted);
 
         return outcome.Result.Deleted > 0;
     }
@@ -78,8 +78,12 @@ public static class FileDeletion
     /// their parents with them when those are emptied in turn, which is what happens to a
     /// season folder that was the last season of a show.
     /// </summary>
+    /// <remarks>
+    /// How firmly the folder goes is a setting rather than an echo of how the files went: a
+    /// file might be worth recovering, an empty folder never is.
+    /// </remarks>
     private static async Task OfferEmptyFoldersAsync(
-        Window owner, MainViewModel vm, IReadOnlyList<string> deletedPaths, bool toRecycleBin)
+        Window owner, MainViewModel vm, IReadOnlyList<string> deletedPaths)
     {
         if (!vm.Settings.OfferRemoveEmptyFolders) return;
 
@@ -98,7 +102,7 @@ public static class FileDeletion
             "Empty folders", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (ask != MessageBoxResult.Yes) return;
 
-        var removed = await vm.RemoveEmptyFoldersAsync(empty, toRecycleBin);
+        var removed = await vm.RemoveFoldersAsync(empty);
         MessageBox.Show(owner,
             removed == 0
                 ? "The folders could not be removed — something else may be using them."
