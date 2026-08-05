@@ -62,6 +62,7 @@ public class SettingsWindow : Window
     private readonly IReadOnlyList<string> _knownCategories;
     private readonly IReadOnlyList<string> _driveRoots;
     private readonly Func<Task<string>>? _downloadImdb;
+    private readonly Func<Task<string>>? _downloadImdbEpisodes;
 
     private readonly TabControl _tabs = new();
 
@@ -69,7 +70,13 @@ public class SettingsWindow : Window
     private readonly TextBox _apiKey = new();
     private readonly TextBox _readToken = new();
     private readonly TextBox _imdbUrl = new();
+    private readonly TextBox _imdbEpisodeUrl = new();
     private readonly TextBlock _imdbStatus;
+
+    // The window of release years worth extracting. Very few people collect media from
+    // every year there has been one, and every row left out is a row nothing has to read.
+    private readonly TextBox _extractFrom = new() { Width = 70 };
+    private readonly TextBox _extractTo = new() { Width = 70 };
 
     // --- Startup / window / watching ---
     private readonly CheckBox _startup = new() { Content = "Start Media Catalog when Windows starts" };
@@ -130,6 +137,10 @@ public class SettingsWindow : Window
     {
         Content = "Delete those folders outright rather than sending them to the Recycle Bin"
     };
+    private readonly CheckBox _autoRemoveFolders = new()
+    {
+        Content = "Take away the folders a consolidation empties without asking"
+    };
 
     // --- Subtitles ---
     private readonly CheckBox _consolidateSubtitles = new()
@@ -182,6 +193,9 @@ public class SettingsWindow : Window
     /// <summary>The per-category "what may be left behind" boxes, in the order they are shown.</summary>
     private readonly List<(string Category, TextBox Bytes)> _leftoverRows = new();
 
+    /// <summary>The per-category "how far the lengths may disagree" boxes.</summary>
+    private readonly List<(string Category, TextBox Seconds)> _toleranceRows = new();
+
     /// <summary>Raised when the user saves; carries the new settings.</summary>
     public event Action<AppSettings>? Saved;
 
@@ -197,13 +211,15 @@ public class SettingsWindow : Window
         IReadOnlyList<string> knownCategories,
         IReadOnlyList<string> driveRoots,
         ToolSettings tools,
-        Func<Task<string>>? downloadImdb = null)
+        Func<Task<string>>? downloadImdb = null,
+        Func<Task<string>>? downloadImdbEpisodes = null)
     {
         _incoming = settings;
         _incomingTools = tools;
         _knownCategories = knownCategories;
         _driveRoots = driveRoots;
         _downloadImdb = downloadImdb;
+        _downloadImdbEpisodes = downloadImdbEpisodes;
         _imdbStatus = Hint(ImdbStatusText());
 
         Title = "Settings"; Width = 760; Height = 640;
@@ -269,6 +285,9 @@ public class SettingsWindow : Window
         _apiKey.Text = settings.TmdbApiKey;
         _readToken.Text = settings.TmdbReadAccessToken;
         _imdbUrl.Text = settings.EffectiveImdbDownloadUrl;
+        _imdbEpisodeUrl.Text = settings.EffectiveImdbEpisodeDownloadUrl;
+        _extractFrom.Text = settings.ExtractStartYear?.ToString() ?? "";
+        _extractTo.Text = settings.ExtractEndYear?.ToString() ?? "";
         _startup.IsChecked = settings.StartWithWindows;
         _startInTray.IsChecked = settings.StartInTray;
         _startInTray.IsEnabled = settings.StartWithWindows;
@@ -287,6 +306,7 @@ public class SettingsWindow : Window
         _skipRecycleBin.IsChecked = settings.SkipRecycleBinByDefault;
         _offerEmptyFolders.IsChecked = settings.OfferRemoveEmptyFolders;
         _deleteFoldersPermanently.IsChecked = settings.DeleteEmptyFoldersPermanently;
+        _autoRemoveFolders.IsChecked = settings.RemoveEmptyFoldersAutomatically;
         _consolidateSubtitles.IsChecked = settings.ConsolidateSubtitles;
         _notifyDelay.Text = Math.Clamp(settings.NewFileNotifyDelaySeconds, 1, 600).ToString();
         _capitaliseTitles.IsChecked = settings.CapitaliseTitles;
@@ -379,6 +399,12 @@ public class SettingsWindow : Window
             _skipRecycleBin,
             Warning("We don't recommend this."),
             _offerEmptyFolders,
+            _autoRemoveFolders,
+            Hint("With this on, the folders a consolidation empties simply go, and the run says how " +
+                 "many did. There is nothing to decide: what goes has already been judged to be " +
+                 "nothing, and a folder holding a catalogued file you have not filed yet, or a " +
+                 "folder you have named anywhere in these settings, is never one of them. Turn it " +
+                 "off to be shown the list and asked first."),
             _deleteFoldersPermanently,
             Hint("Safe in a way that deleting a file permanently is not: what goes has already " +
                  "been judged to be nothing — an empty folder, or one holding less than the size " +
@@ -482,6 +508,22 @@ public class SettingsWindow : Window
             Hint("\nA folder you have named anywhere in these settings — one you scan, one you " +
                  "watch, a consolidation folder — is never removed either, however empty it ends " +
                  "up. A download folder is empty most of the time; that is what it is for.")));
+
+        panel.Children.Add(Group("How far two copies may disagree about their length",
+            DurationToleranceEditor(_incoming),
+            Hint("Two copies of one thing rarely run to the same second: one has the distributor's " +
+                 "ident, the other has the credits trimmed. Within this many seconds they are " +
+                 "treated as the same thing and consolidated by the ordinary rules; beyond it they " +
+                 "are put to you, because at some point a longer file is a different cut rather " +
+                 "than the same one."),
+            Hint("\nThe figure is per category because a minute means opposite things in each. " +
+                 "Sixty seconds between two rips of a film is the credits and nobody cares which " +
+                 "copy has them; sixty seconds between two copies of a song is a different " +
+                 "recording. Video starts at 60 seconds and audio at 2. Zero means the lengths " +
+                 "have to match exactly."),
+            Hint("\nWhen two copies do differ in length and are otherwise the same, the longer one " +
+                 "is kept — provided it is not of worse quality. A copy with the credits on it is " +
+                 "the more complete copy, and the shorter one has nothing the longer one lacks.")));
 
         panel.Children.Add(Group("Sorting",
             _articleLast,
@@ -642,6 +684,56 @@ public class SettingsWindow : Window
         return wrap;
     }
 
+    /// <summary>
+    /// One box per category saying how far two copies of one thing may disagree about their
+    /// length and still be settled without asking. Extras are not listed: they follow the
+    /// show or film they belong to, as everything else about them does.
+    /// </summary>
+    private FrameworkElement DurationToleranceEditor(AppSettings settings)
+    {
+        var wrap = new StackPanel();
+
+        foreach (var category in ToleranceCategories(settings))
+        {
+            var box = new TextBox
+            {
+                Width = 70, VerticalContentAlignment = VerticalAlignment.Center,
+                Text = settings.DurationToleranceFor(category).ToString()
+            };
+            _toleranceRows.Add((category, box));
+
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 2)
+            };
+            row.Children.Add(new TextBlock
+            {
+                Text = category, Width = 130, VerticalAlignment = VerticalAlignment.Center
+            });
+            row.Children.Add(box);
+            row.Children.Add(new TextBlock
+            {
+                Text = "seconds apart is still the same thing",
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = System.Windows.Media.Brushes.Gray, Margin = new Thickness(8, 0, 0, 0)
+            });
+            wrap.Children.Add(row);
+        }
+
+        if (_toleranceRows.Count == 0)
+            wrap.Children.Add(Hint("(no categories yet)"));
+
+        return wrap;
+    }
+
+    /// <summary>The categories both per-category editors offer, so the two lists agree.</summary>
+    private IEnumerable<string> ToleranceCategories(AppSettings settings) =>
+        _knownCategories
+            .Concat(settings.DurationTolerances.Select(t => t.Category))
+            .Where(c => !string.IsNullOrWhiteSpace(c) && !CategoryResolver.IsExtra(c) &&
+                        !string.Equals(c, CategoryResolver.Unknown, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
     private StackPanel ToolsTab()
     {
         var panel = new StackPanel();
@@ -679,44 +771,70 @@ public class SettingsWindow : Window
         // The two sources take up a great deal of room between them and have nothing to do
         // with each other, so each gets its own box rather than sharing one long column.
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
-        if (_downloadImdb != null)
+
+        Button? Downloader(string caption, string tip, Func<Task<string>>? job)
         {
-            var download = new Button { Content = "Download now", Width = 130, Padding = new Thickness(0, 3, 0, 3) };
-            download.Click += async (_, _) =>
+            if (job == null) return null;
+            var button = new Button
             {
-                download.IsEnabled = false;
+                Content = caption, Width = 150, Padding = new Thickness(0, 3, 0, 3),
+                Margin = new Thickness(0, 0, 8, 0), ToolTip = tip
+            };
+            button.Click += async (_, _) =>
+            {
+                button.IsEnabled = false;
                 try
                 {
-                    var result = await _downloadImdb();
+                    var result = await job();
                     _imdbStatus.Text = ImdbStatusText();
                     MessageBox.Show(this, result, "IMDb data",
                         MessageBoxButton.OK, MessageBoxImage.Information);
                 }
-                finally { download.IsEnabled = true; }
+                finally { button.IsEnabled = true; }
             };
-            row.Children.Add(download);
+            return button;
         }
+
+        if (Downloader("Download titles", "Fetch title.basics.tsv.gz and extract it.", _downloadImdb)
+            is { } titles) row.Children.Add(titles);
+        if (Downloader("Download episodes",
+                "Fetch title.episode.tsv.gz and re-extract, so a season's real length is known.",
+                _downloadImdbEpisodes) is { } episodes) row.Children.Add(episodes);
+
         var reset = new Button
         {
-            Content = "Use the default address", Width = 170,
-            Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(0, 3, 0, 3)
+            Content = "Use the default addresses", Width = 180,
+            Padding = new Thickness(0, 3, 0, 3)
         };
-        reset.Click += (_, _) => _imdbUrl.Text = AppSettings.DefaultImdbDownloadUrl;
+        reset.Click += (_, _) =>
+        {
+            _imdbUrl.Text = AppSettings.DefaultImdbDownloadUrl;
+            _imdbEpisodeUrl.Text = AppSettings.DefaultImdbEpisodeDownloadUrl;
+        };
         row.Children.Add(reset);
 
         panel.Children.Add(Group("IMDb — the local data (no rate limit)",
             _useImdbFirst,
             _imdbInMemory,
             _imdbStatus,
-            Labeled("Download from:", _imdbUrl, 110),
-            Hint("Where title.basics.tsv.gz is fetched from. The default is IMDb's own published " +
-                 "address; it is a setting so a changed address can be corrected here rather than " +
-                 "waiting for a new version."),
+            Labeled("Titles from:", _imdbUrl, 110),
+            Labeled("Episodes from:", _imdbEpisodeUrl, 110),
+            Hint("Where title.basics.tsv.gz and title.episode.tsv.gz are fetched from. The defaults " +
+                 "are IMDb's own published addresses; they are settings so a changed address can be " +
+                 "corrected here rather than waiting for a new version."),
             row,
-            Hint("The download is around 150 MB and is boiled down to a two-column extract of " +
-                 "titles and years — the only part this program uses. Broadcast timestamps and " +
-                 "untitled-episode placeholders are dropped on the way in. Progress is shown in " +
-                 "the status bar.")));
+            Hint("The titles download is around 150 MB. What is kept of it is the identifier, the " +
+                 "title, the years, the type and the genres — with the type and the genres held as " +
+                 "numbers explained by two small tables beside it, since \"tvEpisode\" written out " +
+                 "on eight million rows is most of a gigabyte spent saying one word. The original " +
+                 "title, the adult flag and the running time are dropped: the first repeats the " +
+                 "primary title, the second is of no use here, and the third is better read from " +
+                 "your own file than believed from a database."),
+            Hint("\nThe episodes download says which episode of which programme each identifier is. " +
+                 "It is optional, and it is what makes \"which episodes am I missing?\" a question " +
+                 "with an answer: a folder holding episodes 1 to 12 looks complete from the inside, " +
+                 "and only this can say the season ran to thirteen."),
+            ExtractYearEditor()));
 
         panel.Children.Add(Group("themoviedb.org — the online fallback (deprecated)",
             Warning("Only used when IMDBData.tsv does not exist. TMDb answers one query every two " +
@@ -912,6 +1030,48 @@ public class SettingsWindow : Window
         return bytes is >= 0 and < long.MaxValue ? (long)bytes : null;
     }
 
+    /// <summary>
+    /// The window of release years the extraction keeps. Most people are cataloguing what
+    /// they own rather than what has ever been filmed, and every row left out is a row
+    /// nothing has to read for the rest of the program's life.
+    /// </summary>
+    private FrameworkElement ExtractYearEditor()
+    {
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0)
+        };
+        row.Children.Add(new TextBlock
+        {
+            Text = "Years to keep:", Width = 110, VerticalAlignment = VerticalAlignment.Center
+        });
+        row.Children.Add(new TextBlock
+        {
+            Text = "from", VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0)
+        });
+        row.Children.Add(_extractFrom);
+        row.Children.Add(new TextBlock
+        {
+            Text = "to", VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(12, 0, 6, 0)
+        });
+        row.Children.Add(_extractTo);
+
+        var wrap = new StackPanel();
+        wrap.Children.Add(row);
+        wrap.Children.Add(Hint("Titles released outside these years are left out of the extract. " +
+                               "1950 to nothing in particular by default: the dataset reaches back to " +
+                               "the 1890s, and hardly anybody is cataloguing that. Clear the first box " +
+                               "to keep every year there is; leave the second empty for everything " +
+                               "from the first year onwards, which is what most people want."));
+        wrap.Children.Add(Hint("\nA title with no year at all is kept whichever way these are set: a " +
+                               "missing date is not a date outside the range. Changing the years takes " +
+                               "effect the next time the data is extracted — press Download titles, or " +
+                               "delete IMDBData.tsv and verify titles again."));
+        return wrap;
+    }
+
     /// <summary>Where the IMDb data stands right now, so the options above make sense.</summary>
     private static string ImdbStatusText()
     {
@@ -919,14 +1079,25 @@ public class SettingsWindow : Window
         var source = MediaCatalog.Core.Imdb.ImdbExtractor.FindSource(
             AppPaths.ImdbSourcePath, AppPaths.ImdbSourceGzPath);
 
-        return File.Exists(extract)
-            ? $"IMDBData.tsv is present ({FormatSize(new FileInfo(extract).Length)})."
-            : source != null
+        var episodes = File.Exists(AppPaths.ImdbEpisodesPath)
+            ? $" Episode data is present ({FormatSize(new FileInfo(AppPaths.ImdbEpisodesPath).Length)}), " +
+              "so a season can be checked against the number of episodes broadcast."
+            : " There is no episode data, so a season can only be checked up to the highest " +
+              "episode you hold.";
+
+        if (!File.Exists(extract))
+            return source != null
                 ? $"{Path.GetFileName(source)} is present and will be extracted to IMDBData.tsv the " +
                   "first time titles are verified."
                 : "There is no IMDb data yet. Download it below, or put title.basics.tsv.gz in " +
-                  $"{AppPaths.DataDirectory} by hand — it is extracted automatically, and only the " +
-                  "title and year are kept.";
+                  $"{AppPaths.DataDirectory} by hand — it is extracted automatically.";
+
+        var format = MediaCatalog.Core.Imdb.ImdbExtractFormat.IsCurrentFormat(extract)
+            ? ""
+            : " It was written by an earlier version and carries no genres or episode links — " +
+              "download the titles again to gain them.";
+
+        return $"IMDBData.tsv is present ({FormatSize(new FileInfo(extract).Length)}).{format}{episodes}";
     }
 
     private FrameworkElement ListEditor(ObservableCollection<string> items, string addPrompt, Action<string> onAdd)
@@ -1472,13 +1643,49 @@ public class SettingsWindow : Window
         }
 
         var url = _imdbUrl.Text.Trim();
-        if (url.Length > 0 &&
-            (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
-             (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)))
+        var episodeUrl = _imdbEpisodeUrl.Text.Trim();
+        foreach (var address in new[] { url, episodeUrl })
+            if (address.Length > 0 &&
+                (!Uri.TryCreate(address, UriKind.Absolute, out var parsed) ||
+                 (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)))
+            {
+                Complain($"'{address}' is not an http:// or https:// address. Clear the box to fall " +
+                         "back on the default, or press \"Use the default addresses\".",
+                    SettingsTab.DataSources);
+                return;
+            }
+
+        // The year window. Empty means "no limit at that end", which is a perfectly good
+        // answer; anything else has to be a year, since a typo here would quietly halve the
+        // data the whole program works from.
+        if (!TryYear(_extractFrom.Text, out var extractFrom) ||
+            !TryYear(_extractTo.Text, out var extractTo))
         {
-            Complain($"'{url}' is not an http:// or https:// address. Clear the box to fall back " +
-                     "on the default, or press \"Use the default address\".", SettingsTab.DataSources);
+            Complain("The years to keep must be whole years between 1800 and 2200. Leave a box " +
+                     "empty for no limit at that end.", SettingsTab.DataSources);
             return;
+        }
+        if (extractFrom is { } first && extractTo is { } last && first > last)
+        {
+            Complain("The first year to keep is after the last, so no title could ever be kept.",
+                SettingsTab.DataSources);
+            return;
+        }
+
+        // The length tolerances, in seconds.
+        var tolerances = new List<DurationTolerance>();
+        foreach (var (category, box) in _toleranceRows)
+        {
+            var text = box.Text.Trim();
+            var seconds = text.Length == 0 ? 0 : int.TryParse(text, out var parsed) ? parsed : -1;
+            if (seconds is < 0 or > 86_400)
+            {
+                Complain($"The length tolerance for '{category}' must be a whole number of seconds " +
+                         "from 0 to 86400. 0 means the lengths have to match exactly.",
+                    SettingsTab.Library);
+                return;
+            }
+            tolerances.Add(new DurationTolerance { Category = category, Seconds = seconds });
         }
 
         if (!int.TryParse(_notifyDelay.Text.Trim(), out var notifyDelay) ||
@@ -1533,6 +1740,9 @@ public class SettingsWindow : Window
             TmdbApiKey = _apiKey.Text.Trim(),
             TmdbReadAccessToken = _readToken.Text.Trim(),
             ImdbDownloadUrl = url,
+            ImdbEpisodeDownloadUrl = episodeUrl,
+            ExtractStartYear = extractFrom,
+            ExtractEndYear = extractTo,
             StartWithWindows = _startup.IsChecked == true,
             StartInTray = _startInTray.IsChecked == true,
             AlwaysStartMinimised = _alwaysMinimised.IsChecked == true,
@@ -1550,8 +1760,11 @@ public class SettingsWindow : Window
             DeleteEmptyFoldersPermanently = _deleteFoldersPermanently.IsChecked == true,
             ConsolidateSubtitles = _consolidateSubtitles.IsChecked == true,
             NewFileNotifyDelaySeconds = notifyDelay,
+            RemoveEmptyFoldersAutomatically = _autoRemoveFolders.IsChecked == true,
             LeftoverThresholds = leftovers,
             LeftoverThresholdsInitialised = true,   // the user has now seen and set them
+            DurationTolerances = tolerances,
+            DurationTolerancesInitialised = true,
             CategoryOrder = _categoryOrder.ToList(),
             CapitaliseTitles = _capitaliseTitles.IsChecked == true,
             SortLeadingArticleLast = _articleLast.IsChecked == true,
@@ -1589,6 +1802,20 @@ public class SettingsWindow : Window
 
         Saved?.Invoke(result);
         Close();
+    }
+
+    /// <summary>
+    /// Read a year, where an empty box means "no limit at this end" rather than a mistake.
+    /// False only for text that is neither.
+    /// </summary>
+    private static bool TryYear(string text, out int? year)
+    {
+        year = null;
+        var s = (text ?? string.Empty).Trim();
+        if (s.Length == 0) return true;
+        if (!int.TryParse(s, out var parsed) || parsed is < 1800 or > 2200) return false;
+        year = parsed;
+        return true;
     }
 
     /// <summary>Say what is wrong, on the tab where it can be put right.</summary>

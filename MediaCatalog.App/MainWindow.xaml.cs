@@ -338,7 +338,8 @@ public partial class MainWindow : Window
 
         var dlg = new SettingsWindow(
             _vm.Settings, _vm.Categories, _vm.AvailableDriveRoots,
-            _vm.CurrentToolSettings, () => _vm.DownloadImdbDataAsync())
+            _vm.CurrentToolSettings, () => _vm.DownloadImdbDataAsync(),
+            () => _vm.DownloadImdbEpisodesAsync())
         { Owner = this };
         dlg.Saved += settings => _vm.ApplyAppSettings(settings);
         dlg.ToolsSaved += tools => _vm.ApplyToolSettings(tools);
@@ -630,6 +631,17 @@ public partial class MainWindow : Window
     {
         if (leftovers.Count == 0 || !_vm.Settings.OfferRemoveEmptyFolders) return;
 
+        // Nothing here is a decision. Every folder in the list is either empty or holds less
+        // than the size set for its category, none holds a catalogued file still waiting to
+        // be filed, and none is a folder named anywhere in the settings — those three tests
+        // are the judgement, and they have already been made. A question whose answer is
+        // always yes is not a question, so by default it is not asked.
+        if (_vm.Settings.RemoveEmptyFoldersAutomatically)
+        {
+            await _vm.RemoveFoldersAsync(leftovers.Select(f => f.Path).ToList());
+            return;
+        }
+
         var listed = string.Join("\n", leftovers.Take(15).Select(f => "    " + f.Describe()));
         if (leftovers.Count > 15) listed += $"\n    …and {leftovers.Count - 15} more";
 
@@ -809,10 +821,17 @@ public partial class MainWindow : Window
         // Two files claiming to be the same film, only one of which should end up in the
         // library. Settled before anything moves, since filing one of them and leaving the
         // other where it is has answered the question the wrong way round.
-        if (!await ResolveTitleDuplicatesAsync(rows.Select(r => r.Model).ToList())) return;
+        var survivors = await ResolveTitleDuplicatesAsync(rows.Select(r => r.Model).ToList());
+        if (survivors == null) return;
 
-        // The dialog may well have deleted some of what was selected.
+        // The dialog may well have deleted some of what was selected — and the copy that won
+        // a set may not have been part of the selection at all, in which case it is now the
+        // only copy there is and filing it is the rest of the job.
         rows = rows.Where(r => File.Exists(r.Model.FullPath)).ToList();
+        foreach (var keeper in survivors)
+            if (File.Exists(keeper.FullPath) && rows.All(r => !ReferenceEquals(r.Model, keeper)))
+                rows.Add(new FileRow(keeper));
+
         if (rows.Count == 0)
         {
             MessageBox.Show(this, "Nothing is left of the selection to consolidate.",
@@ -843,41 +862,69 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Files being consolidated that have a twin claiming to be the same thing without being
-    /// the same bytes. Only one of them belongs in the library, and a content hash cannot
-    /// choose between them, so the user is shown every copy with the facts that decide it —
-    /// size, length, quality, and whether it still decodes — and picks the one to keep. The
-    /// rest are deleted, and the survivor goes on to be consolidated with the selection.
+    /// the same bytes. Only one of them belongs in the library.
+    ///
+    /// The rules that settle this during an automatic run settle it here too, and are tried
+    /// first: whether two copies are the same content, and which of them is the better copy,
+    /// are questions that can be answered by looking rather than by asking. Only the sets
+    /// they cannot answer — copies that do not look alike, copies too far apart in length to
+    /// be the same cut, or no tools with which to tell — are put to the user, with every copy
+    /// and the facts that decide it.
     /// </summary>
-    /// <returns>False when the user backed out of consolidating altogether.</returns>
-    private Task<bool> ResolveTitleDuplicatesAsync(IReadOnlyList<MediaFile> files)
+    /// <returns>
+    /// The copies that won their set, to be filed along with the selection, or null when the
+    /// user backed out of consolidating altogether.
+    /// </returns>
+    private async Task<List<MediaFile>?> ResolveTitleDuplicatesAsync(IReadOnlyList<MediaFile> files)
     {
+        var none = new List<MediaFile>();
+
         var groups = new List<Core.Duplicates.TitleDuplicateGroup>();
         foreach (var file in files)
             if (_vm.TitleDuplicateGroupFor(file) is { } group && !groups.Contains(group))
                 groups.Add(group);
-        if (groups.Count == 0) return Task.FromResult(true);
+        if (groups.Count == 0) return none;
+
+        var settlement = await _vm.SettleTitleDuplicatesAsync(groups);
+        UpdateUndoButton();
+
+        var remaining = settlement.Undecided;
+        if (remaining.Count == 0)
+        {
+            if (settlement.Settled > 0)
+                MessageBox.Show(this,
+                    $"{settlement.Describe()}\n\n" +
+                    string.Join("\n", settlement.Notes.Take(15).Select(n => "    " + n)),
+                    "Possible duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
+            return settlement.Keepers;
+        }
+
+        var settledLine = settlement.Settled > 0 ? settlement.Describe() + "\n\n" : "";
 
         var ask = MessageBox.Show(this,
-            (groups.Count == 1
-                ? $"\"{groups[0].Key}\" has more than one copy claiming to be it, and they are not " +
-                  "the same bytes — the same thing from two different releases.\n\n"
-                : $"{groups.Count} of the file(s) selected have another copy claiming to be the " +
-                  "same thing without being the same bytes.\n\n") +
-            "Only one of each should end up in the library, and nothing but a look at them can " +
-            "say which.\n\n" +
+            settledLine +
+            (remaining.Count == 1
+                ? $"\"{remaining[0].Key}\" has more than one copy claiming to be it, and nothing " +
+                  "here can choose between them.\n\n"
+                : $"{remaining.Count} set(s) have copies claiming to be the same thing that " +
+                  "nothing here can choose between.\n\n") +
+            "Either they do not look alike — one of them is mislabelled — or they are too far " +
+            "apart in length to be the same cut of the same thing. Only a look at them can say " +
+            "which.\n\n" +
             "Yes — show every copy now, so you can choose which to keep and delete the rest.\n" +
             "No — consolidate anyway, leaving the other copies where they are.\n" +
             "Cancel — do nothing.",
             "Possible duplicates", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
 
-        if (ask == MessageBoxResult.Cancel) return Task.FromResult(false);
-        if (ask == MessageBoxResult.No) return Task.FromResult(true);
+        if (ask == MessageBoxResult.Cancel) return null;
+        if (ask == MessageBoxResult.No) return settlement.Keepers;
 
-        // Opened on the first affected set; the list on the left holds the others, so one
+        // Opened on the first unresolved set; the list on the left holds the others, so one
         // dialog covers the lot however many were selected.
-        new TitleDuplicatesWindow(_vm, groups[0].Files.FirstOrDefault()) { Owner = this }.ShowDialog();
+        new TitleDuplicatesWindow(_vm, remaining[0].Files.FirstOrDefault()) { Owner = this }
+            .ShowDialog();
         UpdateUndoButton();
-        return Task.FromResult(true);
+        return settlement.Keepers;
     }
 
     // --- Consolidating everything that can be done without asking ------------
@@ -1452,6 +1499,32 @@ public partial class MainWindow : Window
     /// The library copy is the one being kept by definition, so there is nothing to choose
     /// between — only how firmly the rest should go, which the delete confirmation asks.
     /// </summary>
+    /// <summary>
+    /// Look through the consolidated programmes for episodes that are not there.
+    ///
+    /// Consolidated ones only, and deliberately: files still scattered around a download
+    /// folder are half-finished by definition, and telling somebody that a season they have
+    /// not filed yet is incomplete is telling them what they already know.
+    /// </summary>
+    private async void OnMissingEpisodesClick(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.HasImdbEpisodeData)
+        {
+            var carryOn = MessageBox.Show(this,
+                "There is no IMDb episode data, so a season can only be checked up to the highest " +
+                "episode you hold — a gap in the middle will be found, a missing last episode will " +
+                "not.\n\n" +
+                "Settings → Data sources → Download episodes puts that right; it is a small " +
+                "download and only has to be done once.\n\n" +
+                "Check what can be checked now anyway?",
+                "Missing episodes", MessageBoxButton.YesNo, MessageBoxImage.Information);
+            if (carryOn != MessageBoxResult.Yes) return;
+        }
+
+        var report = await _vm.ScanMissingEpisodesAsync();
+        new MissingEpisodesWindow(report) { Owner = this }.ShowDialog();
+    }
+
     private async void OnPurgeConsolidatedDuplicatesClick(object sender, RoutedEventArgs e)
     {
         var redundant = _vm.DuplicatesOfConsolidatedFiles();

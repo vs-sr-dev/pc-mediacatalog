@@ -90,6 +90,14 @@ public static class FileDeletion
         var empty = vm.EmptyFoldersLeftBy(deletedPaths);
         if (empty.Count == 0) return;
 
+        // Genuinely empty, every one of them, and none is a folder the settings name. There
+        // is nothing to weigh up, so unless the user has asked to be consulted they simply go.
+        if (vm.Settings.RemoveEmptyFoldersAutomatically)
+        {
+            await vm.RemoveFoldersAsync(empty);
+            return;
+        }
+
         var listed = string.Join("\n", empty.Take(15).Select(f => "    " + f));
         if (empty.Count > 15) listed += $"\n    …and {empty.Count - 15} more";
 

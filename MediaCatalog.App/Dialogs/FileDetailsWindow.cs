@@ -25,6 +25,8 @@ public class FileDetailsWindow : Window
     private readonly MediaFile _file;
 
     private readonly TextBox _title = new();
+    private readonly TextBox _secondaryTitle = new();
+    private readonly TextBox _genres = new();
     private readonly TextBox _year = new() { Width = 80 };
     private readonly TextBox _season = new() { Width = 80 };
     private readonly TextBox _episode = new() { Width = 80 };
@@ -47,6 +49,8 @@ public class FileDetailsWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner; ResizeMode = ResizeMode.NoResize;
 
         _title.Text = file.EffectiveTitle;
+        _secondaryTitle.Text = file.SecondaryTitle;
+        _genres.Text = file.Genres;
         _year.Text = file.Year?.ToString() ?? "";
         _season.Text = file.Season?.ToString() ?? "";
         _episode.Text = file.Episode?.ToString() ?? "";
@@ -74,7 +78,13 @@ public class FileDetailsWindow : Window
                                 (identicalCopies > 0 ? $"  •  {identicalCopies} identical copy(ies)" : "")));
 
         panel.Children.Add(Section("What the content is"));
-        panel.Children.Add(Labeled("Title:", _title));
+        panel.Children.Add(Labeled("Primary title:", _title));
+        panel.Children.Add(Labeled("Second title:", _secondaryTitle));
+        panel.Children.Add(Hint("The primary title is the programme's or the film's name, and is what " +
+                                "decides where the file is filed. The second title is the name under " +
+                                "that one — an episode's own title, a film's tag line — and decides " +
+                                "nothing. Most files have only the first."));
+        panel.Children.Add(Labeled("Genres:", _genres));
         panel.Children.Add(Labeled("Year:", _year));
         panel.Children.Add(Labeled("Season:", _season));
         panel.Children.Add(Labeled("Episode:", _episode));
@@ -170,6 +180,8 @@ public class FileDetailsWindow : Window
 
         Edits = new MainViewModel.FileEdits(
             _title.Text.Trim(),
+            _secondaryTitle.Text.Trim(),
+            _genres.Text.Trim(),
             year,
             season,
             episode,

@@ -61,12 +61,17 @@ public class AutoConsolidateWindow : Window
             "The same thing from two different releases. Each distinct copy is fingerprinted and " +
             "compared — allowing for one starting a second or two after another, which is what an " +
             "extra beat of distributor logo does to two rips of one film. If they really are the " +
-            "same content, the best picture wins, and among copies of one quality the smallest, " +
-            "since at a given resolution the extra bytes are padding rather than detail. That copy " +
+            "same content, the best picture wins; among copies of one quality the longest, since " +
+            "a copy with the credits on it holds everything the shorter one holds and more; and " +
+            "among copies of one quality and one length the smallest, since at a given resolution " +
+            "and running time the extra bytes are padding rather than detail. That copy " +
             "is then decoded end to end; if it is damaged it and its identical twins are removed " +
             "and the next best is tried, until one survives or none is left. If the fingerprints " +
             "disagree, nothing is touched and it comes to you instead — one of them is mislabelled, " +
-            "and only you can say which."));
+            "and only you can say which. Copies of different lengths are compared over the stretch " +
+            "they have in common, so two complete copies of one film no longer look like nothing " +
+            "alike; but copies further apart in length than the tolerance set for their category " +
+            "come to you, because at some point a longer copy is a different cut of the thing."));
 
         body.Children.Add(Step($"{review.Count} will not be touched",
             "Each is missing something that decides where it goes — a title, a year, an episode " +

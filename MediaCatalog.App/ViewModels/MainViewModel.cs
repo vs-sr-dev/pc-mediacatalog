@@ -138,6 +138,7 @@ public class MainViewModel : ObservableObject
     private ScanSession _session;
     private TmdbCache _tmdbCache;
     private readonly ImdbTitleIndex _imdb = new(AppPaths.ImdbDataPath);
+    private readonly ImdbEpisodeIndex _imdbEpisodes = new();
     private NewFileWatcher? _watcher;
     private List<string> _lastRoots = new();
     private readonly List<FileRow> _allRows = new();
@@ -331,8 +332,8 @@ public class MainViewModel : ObservableObject
     // --- Wildcard column filter ---
     public static readonly string[] FilterColumns =
     {
-        "Name", "Kind", "Category", "Title", "Year", "S/E", "Size", "Length", "Quality",
-        "Integrity", "Path", "Dup", "TMDb", "Filed"
+        "Name", "Kind", "Category", "Primary title", "Secondary title", "Genres", "Year",
+        "S/E", "Size", "Length", "Quality", "Integrity", "Path", "Dup", "TMDb", "Consolidated"
     };
 
     public Array Columns => FilterColumns;
@@ -355,12 +356,20 @@ public class MainViewModel : ObservableObject
     {
         "Dup" => new[] { BlankFilterToken, "DUP", "~dup", "title" },
         "Kind" => Enum.GetNames<MediaKind>(),
-        "Filed" => new[] { "yes", "no" },
+        "Consolidated" => new[] { "yes", "no" },
         "Integrity" => Enum.GetNames<IntegrityStatus>(),
         "TMDb" => new[] { BlankFilterToken, "✓", "✎" },
         "Category" => Categories.ToArray(),
+        // The genres the data actually holds, since nobody remembers whether IMDb writes
+        // "Sci-Fi" or "Science Fiction". A row carries several, so the filter is a contains
+        // match on the list and "(blank)" asks for the ones nothing has looked up.
+        "Genres" => new[] { BlankFilterToken }.Concat(KnownGenres).ToArray(),
         _ => Array.Empty<string>()
     };
+
+    /// <summary>Every genre the local IMDb data knows about, for the filter's drop-down.</summary>
+    public IReadOnlyList<string> KnownGenres =>
+        _imdb.IsAvailable ? _imdb.KnownGenres : Array.Empty<string>();
 
     /// <summary>The values offered for the column the filter box is pointed at.</summary>
     public ObservableCollection<string> FilterValues { get; } = new();
@@ -1463,8 +1472,14 @@ public class MainViewModel : ObservableObject
     /// The last episode of a double episode, when the file holds more than one. Null for
     /// the ordinary single-episode case.
     /// </param>
+    /// <param name="Title">The primary title — the programme's or film's name.</param>
+    /// <param name="SecondaryTitle">
+    /// The second name, when there is one: the episode's own title, a film's tag line.
+    /// </param>
     public record FileEdits(
         string Title,
+        string SecondaryTitle,
+        string Genres,
         int? Year,
         int? Season,
         int? Episode,
@@ -1487,7 +1502,8 @@ public class MainViewModel : ObservableObject
 
         var before = copies.Select(f => (File: f, f.TmdbName, f.TmdbVerified, f.ImdbVerified,
             f.TitleManuallySet, f.Year, f.Season, f.Episode, f.EpisodeEnd,
-            f.NumberingManuallySet, f.CategoryOverride, f.YearAmbiguous, f.AlternativeYear)).ToList();
+            f.NumberingManuallySet, f.CategoryOverride, f.YearAmbiguous, f.AlternativeYear,
+            f.SecondaryTitle, f.Genres)).ToList();
         var previousModified = file.LastModifiedUtc;
         var previousIntegrity = file.Integrity;
         var previousKind = file.Kind;
@@ -1497,6 +1513,8 @@ public class MainViewModel : ObservableObject
         var changes = new List<string>();
         var title = (edits.Title ?? string.Empty).Trim();
         var previousTitle = file.EffectiveTitle.Trim();
+        var previousSecondary = file.SecondaryTitle;
+        var previousGenres = file.Genres;
         var titleChanged = title.Length > 0 &&
                            !string.Equals(title, previousTitle, StringComparison.Ordinal);
         var category = (edits.Category ?? string.Empty).Trim();
@@ -1518,6 +1536,11 @@ public class MainViewModel : ObservableObject
             // of a source that never saw it.
             if (titleChanged) TitleUpdater.Set(new[] { copy }, title, manual: true);
 
+            // The second title and the genres describe the content, so they travel to every
+            // byte-identical copy exactly as the title and the year do.
+            copy.SecondaryTitle = (edits.SecondaryTitle ?? string.Empty).Trim();
+            copy.Genres = (edits.Genres ?? string.Empty).Trim();
+
             copy.Year = edits.Year;
             if (yearTyped) { copy.YearAmbiguous = false; copy.AlternativeYear = null; }
             copy.Season = edits.Season;
@@ -1528,6 +1551,10 @@ public class MainViewModel : ObservableObject
             copy.CategoryOverride = category;
         }
         if (titleChanged) changes.Add($"title '{title}'");
+        if (!string.Equals((edits.SecondaryTitle ?? "").Trim(), previousSecondary, StringComparison.Ordinal))
+            changes.Add("second title");
+        if (!string.Equals((edits.Genres ?? "").Trim(), previousGenres, StringComparison.Ordinal))
+            changes.Add("genres");
         if (numberingTyped && file.NumberingDisplay is { Length: > 0 } typed)
             changes.Add($"numbering {typed}");
 
@@ -1604,6 +1631,8 @@ public class MainViewModel : ObservableObject
                 b.File.CategoryOverride = b.CategoryOverride;
                 b.File.YearAmbiguous = b.YearAmbiguous;
                 b.File.AlternativeYear = b.AlternativeYear;
+                b.File.SecondaryTitle = b.SecondaryTitle;
+                b.File.Genres = b.Genres;
             }
             file.Integrity = previousIntegrity;
             file.Kind = previousKind;
@@ -2213,11 +2242,15 @@ public class MainViewModel : ObservableObject
                 // Identical files decide it themselves: keeping either keeps the same
                 // content, and the library's copy is already where it belongs.
                 ? new CollisionResolution(CollisionChoice.KeepExisting, DeleteDuplicates: true)
-                : standing ?? (EpisodeConflictResolver == null
-                    // Nobody to ask, so take the answer that cannot lose anything.
-                    ? new CollisionResolution(CollisionChoice.Skip)
-                    : await EpisodeConflictResolver(new EpisodeConflict(
-                        file, twin, CopiesOf(file), CopiesOf(twin), identical, episode)));
+                // Different files, but the same rules that settle any other pair of rivals
+                // apply here: the user is asked only about the copies those rules cannot
+                // choose between.
+                : await SettleEpisodeRivalsAsync(file, twin, category, notes)
+                  ?? standing ?? (EpisodeConflictResolver == null
+                      // Nobody to ask, so take the answer that cannot lose anything.
+                      ? new CollisionResolution(CollisionChoice.Skip)
+                      : await EpisodeConflictResolver(new EpisodeConflict(
+                          file, twin, CopiesOf(file), CopiesOf(twin), identical, episode)));
 
             if (!identical && choice.ApplyToRemaining) standing = choice;
 
@@ -2281,6 +2314,62 @@ public class MainViewModel : ObservableObject
             if (!toFile.Contains(winner)) toFile.Add(winner);
 
         return new EpisodeOutcome(keptInLibrary, skipped, removed, cancelled, kept, notes);
+    }
+
+    /// <summary>
+    /// Choose between the episode being filed and the copy of it the library already holds,
+    /// by exactly the rules that choose between any other two rivals — or return null,
+    /// meaning the rules cannot choose and only the user can.
+    ///
+    /// Two files claiming to be one episode used to be put to the user every time, which is
+    /// the wrong instinct: most of those pairs answer themselves. They are the same content
+    /// or they are not, one is a better copy or it is not, and the only cases worth
+    /// interrupting somebody for are the ones where the answer really is not there — a pair
+    /// that does not look alike, a pair too far apart in length to be the same cut, or no
+    /// tools to tell either way.
+    /// </summary>
+    private async Task<CollisionResolution?> SettleEpisodeRivalsAsync(
+        MediaFile incoming, MediaFile existing, string category, List<string> notes)
+    {
+        if (!CanAnalyze) return null;
+
+        var ct = _cts?.Token ?? CancellationToken.None;
+        var pair = new[] { incoming, existing };
+
+        // Measure and fingerprint whatever has not been, then ask the two questions in
+        // order: are these the same thing at all, and are they the same cut of it.
+        var unmeasured = pair.Where(f => NeedsFingerprint(f) || MediaProbe.NeedsProbe(f)).ToList();
+        if (unmeasured.Count > 0)
+        {
+            StatusText = ProgressLine("Comparing with the copy in the library", 0, 0,
+                incoming.FileName);
+            var engine = new ContentAnalysisEngine(_tools);
+            await engine.AnalyzeAsync(unmeasured, fingerprint: true, deepCheck: false, null, ct);
+        }
+
+        if (!await ContentSameness.LooksLikeSameContentAsync(incoming, existing, _tools, ct))
+            return null;
+
+        var tolerance = _settings.DurationToleranceFor(category);
+        if (!ContentSameness.LengthsAgree(incoming, existing, tolerance)) return null;
+
+        // Same content, same cut. The better copy wins, and every other copy of the loser
+        // goes with it — leaving exactly one, in the library, which is the whole point.
+        var best = AutoConsolidator.RankCandidates(pair)[0];
+        var episode = LibraryEpisodes.Describe(incoming);
+
+        if (ReferenceEquals(best, existing))
+        {
+            notes.Add($"{episode}: the library's copy is the better one " +
+                      $"({existing.QualityDisplay}, {Format.Bytes(existing.SizeBytes)}), so the " +
+                      "arrival went to the Recycle Bin.");
+            return new CollisionResolution(CollisionChoice.KeepExisting, DeleteDuplicates: true);
+        }
+
+        notes.Add($"{episode}: the copy being filed is the better one " +
+                  $"({incoming.QualityDisplay}, {Format.Bytes(incoming.SizeBytes)}), so the " +
+                  "library's went to the Recycle Bin.");
+        return new CollisionResolution(CollisionChoice.KeepIncoming, DeleteDuplicates: true);
     }
 
     /// <summary>
@@ -2774,27 +2863,49 @@ public class MainViewModel : ObservableObject
             return null;
         }
 
-        // Fingerprint whatever has not been fingerprinted yet. Only the representatives:
-        // the other copies are the same bytes and would give the same answer.
-        var unfingerprinted = candidates.Where(NeedsFingerprint).ToList();
-        if (unfingerprinted.Count > 0)
+        // Fingerprint whatever has not been fingerprinted yet, and measure whatever has not
+        // been measured — the length decides both whether these are comparable at all and,
+        // below, which of them is the more complete copy. Only the representatives: the other
+        // copies are the same bytes and would give the same answer.
+        var unmeasured = candidates
+            .Where(c => NeedsFingerprint(c) || MediaProbe.NeedsProbe(c))
+            .ToList();
+        if (unmeasured.Count > 0)
         {
             StatusText = ProgressLine("Fingerprinting to compare", 0, 0, job.Display);
             var engine = new ContentAnalysisEngine(_tools);
-            await engine.AnalyzeAsync(unfingerprinted, fingerprint: true, deepCheck: false, null, ct);
+            await engine.AnalyzeAsync(unmeasured, fingerprint: true, deepCheck: false, null, ct);
         }
 
         // Every copy has to look like the first one. The comparison allows for a copy that
         // starts a second or two later than another — an extra beat of distributor logo is
-        // the usual reason two rips of one film do not line up — so a real match is not
-        // mistaken for a disagreement.
-        var odd = candidates.Skip(1)
-            .FirstOrDefault(c => !FingerprintMatcher.LooksLikeSameContent(candidates[0], c));
-        if (odd != null)
+        // the usual reason two rips of one film do not line up — and, when the two are of
+        // different lengths, for their samples having landed at different moments, which used
+        // to make two complete copies of one film look like nothing alike.
+        foreach (var other in candidates.Skip(1))
         {
-            review.Add(new AutoReview(odd,
+            ct.ThrowIfCancellationRequested();
+            if (await ContentSameness.LooksLikeSameContentAsync(candidates[0], other, _tools, ct))
+                continue;
+
+            review.Add(new AutoReview(other,
                 $"claims to be \"{job.Display}\" but does not sound or look like the other copy — " +
                 "one of them is mislabelled, so which to keep is your call"));
+            return null;
+        }
+
+        // They are the same content. Whether they are the same *cut* is a different question,
+        // and it is the one the user has answered in advance with a tolerance for the
+        // category: a minute between two rips of a film is the credits and decides nothing,
+        // while a minute between two copies of a song is a different recording.
+        var tolerance = _settings.DurationToleranceFor(job.Category);
+        if (ContentSameness.WidestGap(candidates) is { } gap && gap > tolerance)
+        {
+            review.Add(new AutoReview(AutoConsolidator.RankCandidates(candidates)[0],
+                $"the copies of \"{job.Display}\" are {ContentSameness.Describe(gap)} apart in " +
+                $"length, which is more than the {tolerance}s allowed for '{job.Category}' — at " +
+                "some point a longer copy is a different cut rather than the same one, so which " +
+                "to keep is your call"));
             return null;
         }
 
@@ -2829,14 +2940,151 @@ public class MainViewModel : ObservableObject
             var doomed = job.Files
                 .Where(f => !ReferenceEquals(f, candidate) && File.Exists(f.FullPath))
                 .ToList();
+
+            // Say when the length was what decided it: "the longer one" is the least obvious
+            // of the rules and the one somebody is most likely to want to check.
+            var longest = ContentSameness.WidestGap(candidates) is { } spread && spread >= 1 &&
+                          candidates.All(c => c.DurationSeconds <= candidate.DurationSeconds)
+                ? $", the longest by {ContentSameness.Describe(spread)}"
+                : "";
+
             return (new AutoDecision(candidate, doomed,
                 $"{job.Display}: kept {candidate.FileName} ({candidate.QualityDisplay}, " +
-                $"{Format.Bytes(candidate.SizeBytes)}) of {job.Distinct.Count} different copies."), corrupt);
+                $"{Format.Bytes(candidate.SizeBytes)}{longest}) of {job.Distinct.Count} " +
+                "different copies."), corrupt);
         }
 
         review.Add(new AutoReview(job.Files[0],
             "every copy of this failed its decode, so there is nothing sound left to file"));
         return (null, corrupt);
+    }
+
+    /// <summary>What settling the same-title twins on our own came to.</summary>
+    /// <param name="Undecided">
+    /// The sets the rules could not choose between, which are the only ones worth putting to
+    /// the user.
+    /// </param>
+    /// <param name="Keepers">
+    /// The copy that won each set. The caller consolidates these: a survivor left where it
+    /// was, with its rivals deleted around it, is only half the job.
+    /// </param>
+    public record TwinSettlement(
+        int Settled, int Removed, int Corrupt,
+        List<TitleDuplicateGroup> Undecided, List<string> Notes, List<MediaFile> Keepers)
+    {
+        public string Describe()
+        {
+            if (Settled == 0) return string.Empty;
+            var text = $"{Settled} set(s) settled on their own";
+            if (Removed > 0) text += $", {Removed} redundant copy(ies) deleted";
+            if (Corrupt > 0) text += $", {Corrupt} damaged copy(ies) removed";
+            return text + ".";
+        }
+    }
+
+    /// <summary>
+    /// Settle as many same-title twins as the rules can, and hand back only the sets they
+    /// cannot.
+    ///
+    /// Two files claiming to be one film, differing in every byte, look like a question for
+    /// a person — and most of the time they are not. They are the same content or they are
+    /// not; one is a better copy or it is not. Those are questions the program can answer by
+    /// looking, using exactly the rules an automatic consolidation uses, and asking anyway
+    /// wastes the user's attention on the cases that had an answer all along.
+    ///
+    /// What is left over is genuinely undecidable: copies that do not look alike, copies too
+    /// far apart in length to be the same cut, or no tools with which to tell.
+    /// </summary>
+    public async Task<TwinSettlement> SettleTitleDuplicatesAsync(
+        IReadOnlyList<TitleDuplicateGroup> groups)
+    {
+        var undecided = new List<TitleDuplicateGroup>();
+        var notes = new List<string>();
+        var review = new List<AutoReview>();
+        var keepers = new List<MediaFile>();
+        int settled = 0, removed = 0, corrupt = 0;
+
+        if (!CanAnalyze)
+            return new TwinSettlement(0, 0, 0, groups.ToList(), notes, keepers);
+
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        IsScanning = true;
+        ProgressValue = 0;
+        ProgressMax = Math.Max(1, groups.Count);
+
+        try
+        {
+            for (var i = 0; i < groups.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var group = groups[i];
+                ProgressValue = i;
+
+                var live = group.Files.Where(f => File.Exists(f.FullPath)).ToList();
+                if (live.Count < 2) continue;
+
+                var category = CategoryResolver.Effective(live[0], _settings);
+                StatusText = ProgressLine("Comparing the copies", i + 1, groups.Count, group.Key);
+
+                var before = review.Count;
+                var settledJob = await SettleJobAsync(
+                    AsJob(group.Key, category, live), review, notes, ct);
+
+                // A reason added to the review list is the rules saying they cannot choose.
+                if (settledJob is not { Decision: { } decision } || review.Count > before)
+                {
+                    corrupt += settledJob?.Corrupt ?? 0;
+                    undecided.Add(group);
+                    continue;
+                }
+
+                corrupt += settledJob.Value.Corrupt;
+                removed += await DeleteQuietlyAsync(
+                    decision.Doomed.Where(d => !ReferenceEquals(d, decision.Keeper))
+                                   .Select(d => d.FullPath),
+                    toRecycleBin: true);
+                if (decision.Note is { Length: > 0 } note) notes.Add(note);
+                keepers.Add(decision.Keeper);
+                settled++;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Whatever is left unexamined is undecided as far as the caller is concerned.
+            foreach (var group in groups.Where(g => !undecided.Contains(g))) undecided.Add(group);
+        }
+        finally
+        {
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+            if (settled > 0 || removed > 0) PersistAndRefresh();
+        }
+
+        return new TwinSettlement(settled, removed, corrupt, undecided, notes, keepers);
+    }
+
+    /// <summary>
+    /// A set of same-title copies dressed as an ordinary consolidation job, so the one
+    /// implementation of "which of these do we keep" serves both. Duplicating those rules for
+    /// a second caller is how two answers to one question start disagreeing.
+    /// </summary>
+    private static AutoJob AsJob(string display, string category, IReadOnlyList<MediaFile> files)
+    {
+        var byHash = new Dictionary<string, List<MediaFile>>(StringComparer.OrdinalIgnoreCase);
+        var alone = new List<IReadOnlyList<MediaFile>>();
+
+        foreach (var file in files)
+        {
+            if (!file.HasHash) { alone.Add(new[] { file }); continue; }
+            if (!byHash.TryGetValue(file.Sha256, out var set))
+                byHash[file.Sha256] = set = new List<MediaFile>();
+            set.Add(file);
+        }
+
+        var distinct = byHash.Values.Cast<IReadOnlyList<MediaFile>>().Concat(alone).ToList();
+        return new AutoJob(display, display, category, files, distinct);
     }
 
     /// <summary>True when nothing has fingerprinted this file in the way its kind needs.</summary>
@@ -3522,6 +3770,16 @@ public class MainViewModel : ObservableObject
         ImdbExtractor.FindSource(AppPaths.ImdbSourcePath, AppPaths.ImdbSourceGzPath);
 
     /// <summary>
+    /// The raw episode dataset, if it is there. Optional: everything else works without it,
+    /// and the one thing that does not is knowing how long a season was supposed to be.
+    /// </summary>
+    public string? ImdbEpisodeSourceFile =>
+        ImdbExtractor.FindSource(AppPaths.ImdbEpisodeSourcePath, AppPaths.ImdbEpisodeSourceGzPath);
+
+    /// <summary>True once the episode extract exists and missing episodes can be found.</summary>
+    public bool HasImdbEpisodeData => _imdbEpisodes.IsAvailable;
+
+    /// <summary>
     /// True when the raw IMDb file is present but the extract isn't — the one case where
     /// extraction should be offered without being asked for.
     /// </summary>
@@ -3532,9 +3790,10 @@ public class MainViewModel : ObservableObject
             ? ImdbSourceFile != null
                 ? "IMDb: title.basics.tsv found, not yet extracted"
                 : "IMDb: no data"
-            : _imdb.IsLoaded
-                ? $"IMDb: {_imdb.Count:N0} titles in memory"
-                : "IMDb: reading from disk";
+            : (_imdb.IsLoaded
+                  ? $"IMDb: {_imdb.Count:N0} titles in memory"
+                  : "IMDb: reading from disk") +
+              (HasImdbEpisodeData ? " + episodes" : "");
 
     /// <summary>
     /// Boil <c>title.basics.tsv</c> (or its gzip) down to <c>IMDBData.tsv</c>. The source
@@ -3561,17 +3820,32 @@ public class MainViewModel : ObservableObject
                 ProgressValue = (int)Math.Min(1000, p.BytesRead * 1000 / p.BytesTotal);
                 UpdateEta(p.BytesRead, p.BytesTotal);
             }
-            StatusText = $"Extracting IMDb titles — {p.LinesKept:N0} kept";
+            StatusText = p.Phase == "episodes"
+                ? $"Extracting IMDb episodes — {p.LinesKept:N0} kept"
+                : $"Extracting IMDb titles — {p.LinesKept:N0} kept";
         });
 
         try
         {
             _imdb.Unload();
             var report = await ImdbExtractor.ExtractAsync(
-                source, AppPaths.ImdbDataPath, progress, _cts.Token);
+                source, ImdbExtractor.Destinations.Default, _settings,
+                ImdbEpisodeSourceFile, progress, _cts.Token);
+
             StatusText = $"IMDb extract written: {report.Kept:N0} titles kept, " +
                          $"{report.Skipped:N0} rows skipped (unnamed episodes and broadcast " +
-                         "timestamps, which match nothing anyone searches for).";
+                         "timestamps, which match nothing anyone searches for" +
+                         (report.OutsideYears > 0
+                             ? $", and {report.OutsideYears:N0} outside the year range you have set"
+                             : "") + ")." +
+                         $"\n{report.Types} title type(s) and {report.Genres} genre(s) were found " +
+                         "in the data and are held as numbers, with a table saying what each means." +
+                         (report.Episodes > 0
+                             ? $"\n{report.Episodes:N0} episode(s) recorded, so a season can be " +
+                               "checked against the number of episodes actually broadcast."
+                             : "\nThere is no episode data, so a season can only be checked up to " +
+                               "the highest episode you hold. Put title.episode.tsv.gz in the " +
+                               "program folder, or press Download beside it, to change that.");
             await EnsureImdbLoadedAsync(_cts.Token);
         }
         catch (OperationCanceledException)
@@ -3589,9 +3863,74 @@ public class MainViewModel : ObservableObject
             _cts?.Dispose();
             _cts = null;
             OnPropertyChanged(nameof(HasImdbData));
+            OnPropertyChanged(nameof(HasImdbEpisodeData));
             OnPropertyChanged(nameof(ImdbStatus));
         }
         return StatusText;
+    }
+
+    /// <summary>
+    /// Fetch <c>title.episode.tsv.gz</c> and re-extract, so the season lengths are known.
+    ///
+    /// The episode dataset is only useful alongside the titles — it is nothing but
+    /// identifiers — so this always ends in a full extraction rather than leaving the two
+    /// halves out of step with each other.
+    /// </summary>
+    public async Task<string> DownloadImdbEpisodesAsync()
+    {
+        if (IsScanning) return "Something else is running — wait for it to finish first.";
+        if (ImdbSourceFile == null)
+            return "The episode data is only useful with the titles it points at, and " +
+                   "title.basics.tsv is not here yet. Download that first.";
+
+        _cts = new CancellationTokenSource();
+        IsScanning = true;
+        BeginTiming();
+        ProgressValue = 0;
+        ProgressMax = 1000;
+
+        var progress = new Progress<ImdbDownloadProgress>(p =>
+        {
+            if (p.BytesTotal > 0)
+            {
+                ProgressValue = (int)Math.Min(1000, p.BytesRead * 1000 / p.BytesTotal);
+                UpdateEta(p.BytesRead, p.BytesTotal);
+                StatusText = $"Downloading IMDb episodes — {Format.Bytes(p.BytesRead)} of " +
+                             $"{Format.Bytes(p.BytesTotal)}";
+            }
+            else
+            {
+                StatusText = $"Downloading IMDb episodes — {Format.Bytes(p.BytesRead)} so far";
+            }
+        });
+
+        try
+        {
+            await ImdbDownloader.DownloadAsync(
+                _settings.EffectiveImdbEpisodeDownloadUrl, AppPaths.ImdbEpisodeSourceGzPath,
+                progress, _cts.Token);
+            StatusText = "IMDb episode download finished — extracting…";
+            OnPropertyChanged(nameof(ImdbEpisodeSourceFile));
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "IMDb episode download cancelled.";
+            return StatusText;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"IMDb episode download failed: {ex.Message}";
+            return StatusText;
+        }
+        finally
+        {
+            EndTiming();
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+        }
+
+        return await ExtractImdbDataAsync();
     }
 
     /// <summary>
@@ -3661,6 +4000,60 @@ public class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Look through the consolidated programmes for episodes that are not there.
+    ///
+    /// Two things are found, and they are worth telling apart. A hole in the middle of a
+    /// season — 1, 2, 3, 5 — needs nothing but the files to spot. The tail needs the IMDb
+    /// episode data: a folder holding episodes 1 to 12 looks complete from the inside, and
+    /// only knowing the season ran to thirteen says otherwise. Without that data the tail is
+    /// not checked and the report says so, rather than implying a clean bill of health it
+    /// cannot give.
+    ///
+    /// Episodes are given their own names along the way, since the season has been looked up
+    /// anyway and the names are sitting beside the numbers.
+    /// </summary>
+    public async Task<MissingEpisodeReport> ScanMissingEpisodesAsync(bool consolidatedOnly = true)
+    {
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        IsScanning = true;
+        ProgressValue = 0;
+        ProgressMax = 1;
+
+        try
+        {
+            await EnsureImdbLoadedAsync(ct);
+
+            var report = await MissingEpisodes.ScanAsync(
+                _catalog.Files, f => CategoryResolver.Effective(f, _settings),
+                _imdb, _imdbEpisodes, consolidatedOnly,
+                new Progress<string>(text => StatusText = text), ct);
+
+            // The scan fills in episode names as it goes, so what it learned is worth keeping.
+            if (report.Named > 0)
+            {
+                CatalogStore.Save(_catalog, _catalogPath);
+                RebuildRows();
+            }
+
+            StatusText = report.Describe().Split('\n')[0];
+            return report;
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Missing-episode scan cancelled.";
+            return new MissingEpisodeReport(
+                Array.Empty<ShowGaps>(), 0, 0, 0, _imdbEpisodes.IsAvailable);
+        }
+        finally
+        {
+            IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
+        }
+    }
+
+    /// <summary>
     /// Hold the extract in memory when the user has asked for that, so lookups don't
     /// re-read a large file. A no-op when the option is off or it is already loaded.
     /// </summary>
@@ -3687,8 +4080,11 @@ public class MainViewModel : ObservableObject
             StatusText = "Extracting IMDb titles (first run only)…";
             try
             {
-                await ImdbExtractor.ExtractAsync(ImdbSourceFile!, AppPaths.ImdbDataPath, null, ct);
+                await ImdbExtractor.ExtractAsync(
+                    ImdbSourceFile!, ImdbExtractor.Destinations.Default, _settings,
+                    ImdbEpisodeSourceFile, null, ct);
                 OnPropertyChanged(nameof(HasImdbData));
+                OnPropertyChanged(nameof(HasImdbEpisodeData));
             }
             catch (OperationCanceledException) { throw; }
             catch { /* carry on without it; TMDb still works */ }

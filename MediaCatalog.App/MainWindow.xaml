@@ -106,7 +106,7 @@
                               ToolTip="Exclude rows that match (e.g. Category not Audio)."/>
                     <!-- Editable, so open-ended columns (Name, Path, Title) are typed into
                          exactly as before, while the columns that hold a fixed few values
-                         (Dup, Kind, Filed, Category, Integrity, TMDb) offer them in the
+                         (Dup, Kind, Consolidated, Category, Integrity, TMDb) offer them in the
                          drop-down — including "(blank)", which is how you ask for the files
                          a column says nothing about. -->
                     <ComboBox x:Name="FilterValueBox" IsEditable="True" IsTextSearchEnabled="False"
@@ -129,6 +129,9 @@
                     <Button Content="Possible duplicates…" Click="OnShowTitleDuplicates" Padding="8,1" Margin="2,0"
                             VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
                             ToolTip="Files claiming the same title and year without being the same bytes — the same thing downloaded twice from two different releases, which a content hash cannot see."/>
+                    <Button Content="Missing episodes…" Click="OnMissingEpisodesClick" Padding="8,1" Margin="2,0"
+                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
+                            ToolTip="Look through the consolidated programmes for episodes that are not there. A gap in the middle of a season needs nothing but the files to find; the missing tail needs the IMDb episode data, since a folder holding episodes 1 to 12 looks complete from the inside."/>
                     <Button Content="Purge filed duplicates…" Click="OnPurgeConsolidatedDuplicatesClick" Padding="8,1" Margin="2,0"
                             VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
                             ToolTip="Delete every stray copy of a file that is already filed in the library. The library copy is kept; you choose the Recycle Bin or a permanent delete."/>
@@ -223,15 +226,17 @@
                                         ToolTipService.ToolTip="Audio or Video, decided by the file extension. Unknown means the extension is neither."/>
                     <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="90"
                                         ToolTipService.ToolTip="What the content is: Movie, TvShow, TvExtra or MovieExtra (specials and featurettes), Audio, Other or Unknown. Worked out automatically unless you have set it yourself, which always wins."/>
-                    <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="200"
-                                        ToolTipService.ToolTip="The programme or film name. A confirmed or hand-typed title if there is one, otherwise the best guess parsed from the file name and its folders. This is what decides where the file is consolidated to."/>
+                    <DataGridTextColumn Header="Primary title" Binding="{Binding Title}" Width="200"
+                                        ToolTipService.ToolTip="The programme or film name — the band's name, in time, for a track. A confirmed or hand-typed title if there is one, otherwise the best guess parsed from the file name and its folders. This is what decides where the file is consolidated to."/>
+                    <DataGridTextColumn Header="Secondary title" Binding="{Binding SecondaryTitle}" Width="200"
+                                        ToolTipService.ToolTip="The second name a file has, when it has one: an episode's own title under the programme's ('Go Get Mommy's Bra'), a film's tag line under its name ('Lost in New York'). Blank for anything with only one name. It never decides where a file goes."/>
                     <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="56"
                                         ToolTipService.ToolTip="Year of release, taken from the file name or looked up in the IMDb data. Part of a film's library folder name, e.g. 'Blade Runner (1982)'. A trailing ? means the title has been used more than once — a remake, a reboot, a series and the film it came from — so the most recent was taken and it could be the wrong one. The 'UncertainYear' view lists them; setting the year yourself clears the mark."/>
                     <DataGridTextColumn Header="S/E" Binding="{Binding SeasonEpisode}" Width="56"
                                         ToolTipService.ToolTip="Season and episode, as S01E02. Read from the file name (S01E02, 1x02, 123 = S01E23, 1102 = S11E02); a 'Season NN' folder supplies the season only when the name does not state one, so the file name always wins. Blank means it could not be worked out — a catalogue refresh will try again with the current rules."/>
                     <DataGridTextColumn Header="TMDb" Binding="{Binding TmdbFlag}" Width="46"
                                         ToolTipService.ToolTip="Where the title came from. ✓ = confirmed against the local IMDb data or TMDb. ✎ = you typed it. Blank = still only a guess from the file name, and a candidate for the next Verify titles run."/>
-                    <DataGridTextColumn Header="Filed" Binding="{Binding FiledFlag}" Width="46"
+                    <DataGridTextColumn Header="Consolidated" Binding="{Binding ConsolidatedFlag}" Width="86"
                                         SortMemberPath="Model.Consolidated"
                                         ToolTipService.ToolTip="Ticked once the file is in its consolidation location — the structured library folder its category points at."/>
                     <!-- Sorted on the raw byte count, so 900 MB comes before 1.2 GB. -->
@@ -244,6 +249,8 @@
                     <DataGridTextColumn Header="Quality" Binding="{Binding Quality}" Width="76"
                                         SortMemberPath="QualityValue"
                                         ToolTipService.ToolTip="Picture height for video (720p, 1080p, 2160p) and bitrate for audio (320 kbps) — the one number that means something for each kind. Filled in alongside the length."/>
+                    <DataGridTextColumn Header="Genres" Binding="{Binding Genres}" Width="150"
+                                        ToolTipService.ToolTip="What sort of thing it is, as IMDb records it — Comedy, Drama, Documentary. Filled in by 'Verify titles' from the local IMDb data; blank until something has looked. Filter on it to see one genre at a time."/>
                     <DataGridTextColumn Header="Integrity" Binding="{Binding Integrity}" Width="110"
                                         ToolTipService.ToolTip="Ok = passed the checks run so far. IncompleteDownload = a .part/.crdownload-style file still arriving. Corrupt = zero bytes, or a deep check failed to decode it. NotChecked = no deep check has been run on it."/>
                     <DataGridTextColumn Header="Path" Binding="{Binding FullPath}" Width="380"

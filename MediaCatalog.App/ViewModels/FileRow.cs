@@ -29,6 +29,15 @@ public class FileRow : ObservableObject
     public string Title => Model.EffectiveTitle;
 
     /// <summary>
+    /// The second name the file has, when it has one — an episode's own title under the
+    /// programme's, a film's tag line under its name. Blank for most files.
+    /// </summary>
+    public string SecondaryTitle => Model.SecondaryTitle;
+
+    /// <summary>What sort of thing it is, as IMDb records it. Blank until something looked.</summary>
+    public string Genres => Model.Genres;
+
+    /// <summary>
     /// The year, with a "?" after it when it came from a title that has been used more than
     /// once. The most recent was taken, which is the better bet without being a certainty —
     /// and a figure that might be wrong is worth marking rather than presenting as fact.
@@ -69,7 +78,7 @@ public class FileRow : ObservableObject
         Model.TitleManuallySet ? "✎" : Model.TitleVerified ? "✓" : "";
 
     /// <summary>Whether the file has been filed into its consolidation location.</summary>
-    public string FiledFlag => Model.Consolidated ? "✓" : "";
+    public string ConsolidatedFlag => Model.Consolidated ? "✓" : "";
 
     /// <summary>Value of a named column, for wildcard column filtering.</summary>
     public string ColumnValue(string column) => column switch
@@ -77,7 +86,9 @@ public class FileRow : ObservableObject
         "Name" => FileName,
         "Kind" => Kind,
         "Category" => Category,
-        "Title" => Title,
+        "Primary title" => Title,
+        "Secondary title" => SecondaryTitle,
+        "Genres" => Genres,
         "Year" => Year,
         "S/E" => SeasonEpisode,
         "Size" => SizeDisplay,
@@ -87,7 +98,7 @@ public class FileRow : ObservableObject
         "Path" => FullPath,
         "Dup" => DuplicateFlag,
         "TMDb" => TmdbFlag,
-        "Filed" => Model.Consolidated ? "yes" : "no",
+        "Consolidated" => Model.Consolidated ? "yes" : "no",
         _ => ""
     };
 
@@ -130,8 +141,10 @@ public class FileRow : ObservableObject
         OnPropertyChanged(nameof(Length));
         OnPropertyChanged(nameof(Quality));
         OnPropertyChanged(nameof(Title));
+        OnPropertyChanged(nameof(SecondaryTitle));
+        OnPropertyChanged(nameof(Genres));
         OnPropertyChanged(nameof(TmdbFlag));
-        OnPropertyChanged(nameof(FiledFlag));
+        OnPropertyChanged(nameof(ConsolidatedFlag));
         OnPropertyChanged(nameof(SeasonEpisode));
     }
 }
