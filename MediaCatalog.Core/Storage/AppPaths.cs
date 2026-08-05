@@ -28,6 +28,29 @@ public static class AppPaths
     /// <summary>The gzipped form, accepted as-is so the download needn't be unpacked first.</summary>
     public static string ImdbSourceGzPath => Path.Combine(DataDirectory, "title.basics.tsv.gz");
 
-    /// <summary>Our own two-column extract: primary title and year, tab separated.</summary>
+    /// <summary>
+    /// IMDb's raw <c>title.episode.tsv</c>, which says which episode of which programme each
+    /// identifier is. Optional: without it the program simply cannot know how many episodes
+    /// a season is supposed to have.
+    /// </summary>
+    public static string ImdbEpisodeSourcePath => Path.Combine(DataDirectory, "title.episode.tsv");
+
+    /// <summary>The gzipped form, accepted as-is so the download needn't be unpacked first.</summary>
+    public static string ImdbEpisodeSourceGzPath =>
+        Path.Combine(DataDirectory, "title.episode.tsv.gz");
+
+    /// <summary>
+    /// Our own title extract: identifier, type, primary title, years and genres, with the
+    /// type and the genres held as numbers explained by the two tables below.
+    /// </summary>
     public static string ImdbDataPath => Path.Combine(DataDirectory, "IMDBData.tsv");
+
+    /// <summary>What each title-type number in the extract stands for.</summary>
+    public static string ImdbTypesPath => Path.Combine(DataDirectory, "IMDBTypes.tsv");
+
+    /// <summary>What each genre number in the extract stands for.</summary>
+    public static string ImdbGenresPath => Path.Combine(DataDirectory, "IMDBGenres.tsv");
+
+    /// <summary>Which episode of which programme each identifier is.</summary>
+    public static string ImdbEpisodesPath => Path.Combine(DataDirectory, "IMDBEpisodes.tsv");
 }

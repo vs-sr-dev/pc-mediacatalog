@@ -28,7 +28,8 @@ public static class ConsolidationNaming
     /// <summary>Every field a pattern may use, with what it stands for — shown in Settings.</summary>
     public static readonly (string Field, string Means)[] Fields =
     {
-        ("{title}", "the programme or film title"),
+        ("{title}", "the primary title — the programme's or the film's name"),
+        ("{secondarytitle}", "the second name, when there is one: the episode's own title, or a film's tag line"),
         ("{year}", "year of release, blank when unknown"),
         ("{season}", "season number — {season:00} pads it to two digits"),
         ("{episode}", "episode number — {episode:00} pads it to two digits"),
@@ -58,6 +59,7 @@ public static class ConsolidationNaming
     private static string Value(MediaFile file, string name, string? format) => name switch
     {
         "title" => file.EffectiveTitle.Trim(),
+        "secondarytitle" => file.SecondaryTitle.Trim(),
         "year" => Number(file.Year, format),
         "season" => Number(file.Season, format),
         "episode" => Number(file.Episode, format),

@@ -26,7 +26,31 @@ public class MediaFile
     public string Sha256 { get; set; } = string.Empty;
 
     // --- Parsed metadata (filename-only for now; enriched in later phases) ---
+    /// <summary>
+    /// The primary title as read out of the file name: the programme's name for an episode,
+    /// the film's for a film, the band's for a track. Superseded by <see cref="TmdbName"/>
+    /// once something has confirmed it — see <see cref="PrimaryTitle"/>.
+    /// </summary>
     public string ParsedTitle { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The second name a piece of media has, when it has one: the episode's own title
+    /// ("Go Get Mommy's Bra") under the programme's, a film's tag line or extended name
+    /// ("Lost in New York" under "Home Alone 2"), and in due course a track's name under the
+    /// band's.
+    ///
+    /// Empty for anything that has only one name, which is most files. It never decides where
+    /// a file is filed — that is the primary title's job — so a wrong one costs nothing but
+    /// a wrong word on the screen.
+    /// </summary>
+    public string SecondaryTitle { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The genres recorded against the title, comma separated, as IMDb spells them —
+    /// "Comedy, Romance". Empty until a title verification has looked them up.
+    /// </summary>
+    public string Genres { get; set; } = string.Empty;
+
     public int? Year { get; set; }
     public int? Season { get; set; }
     public int? Episode { get; set; }
@@ -152,6 +176,20 @@ public class MediaFile
     [XmlIgnore]
     public string EffectiveTitle =>
         !string.IsNullOrWhiteSpace(TmdbName) ? TmdbName : ParsedTitle;
+
+    /// <summary>
+    /// The primary title — the same thing as <see cref="EffectiveTitle"/>, under the name the
+    /// catalogue now uses for it, since a file may have a second title as well.
+    /// </summary>
+    [XmlIgnore]
+    public string PrimaryTitle => EffectiveTitle;
+
+    /// <summary>The genres as a list, or empty when nothing has looked them up.</summary>
+    [XmlIgnore]
+    public IReadOnlyList<string> GenreList =>
+        string.IsNullOrWhiteSpace(Genres)
+            ? Array.Empty<string>()
+            : Genres.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>
     /// The numbering as it reads: "S01E02", or "S06E11-E12" for a double episode. Blank

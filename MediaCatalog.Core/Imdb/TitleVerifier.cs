@@ -14,12 +14,15 @@ public record VerifyProgress(int Done, int Total, string Current, string Phase);
 /// recent was taken; these are the ones worth a second look, and they are flagged on the
 /// files themselves so they can be found again later.
 /// </param>
+/// <param name="GenresFilled">Files that gained the genres recorded against their title.</param>
 public record VerifyReport(
-    int ImdbVerified, int TmdbVerified, int YearsFilled, int Unresolved, int YearsUncertain = 0)
+    int ImdbVerified, int TmdbVerified, int YearsFilled, int Unresolved, int YearsUncertain = 0,
+    int GenresFilled = 0)
 {
     public string Describe() =>
         $"{ImdbVerified} title(s) confirmed from IMDb, {TmdbVerified} from TMDb, " +
         $"{YearsFilled} year(s) filled in, {Unresolved} still unidentified." +
+        (GenresFilled > 0 ? $"\n{GenresFilled} file(s) gained their genres." : "") +
         (YearsUncertain > 0
             ? $"\n{YearsUncertain} of those year(s) came from a title that has been used more " +
               "than once — the most recent was taken, and they are marked with a ? in the Year " +
@@ -64,9 +67,15 @@ public class TitleVerifier
         file.Year is null &&
         !string.IsNullOrWhiteSpace(file.EffectiveTitle);
 
+    /// <summary>Video files that have a title but nothing yet saying what sort of thing it is.</summary>
+    public static bool NeedsGenres(MediaFile file) =>
+        file.Kind == MediaKind.Video &&
+        string.IsNullOrWhiteSpace(file.Genres) &&
+        !string.IsNullOrWhiteSpace(file.EffectiveTitle);
+
     /// <summary>
-    /// Verify <paramref name="targets"/> and fill in their missing years. Both jobs share
-    /// one IMDb pass, since they ask the same kind of question.
+    /// Verify <paramref name="targets"/>, fill in their missing years and record their
+    /// genres. All three share one IMDb pass, since they ask the same kind of question.
     /// </summary>
     public async Task<VerifyReport> VerifyAsync(
         IReadOnlyList<MediaFile> targets,
@@ -75,7 +84,8 @@ public class TitleVerifier
     {
         var toVerify = targets.Where(NeedsVerification).ToList();
         var toYear = targets.Where(NeedsYear).ToList();
-        if (toVerify.Count == 0 && toYear.Count == 0)
+        var toGenre = targets.Where(NeedsGenres).ToList();
+        if (toVerify.Count == 0 && toYear.Count == 0 && toGenre.Count == 0)
             return new VerifyReport(0, 0, 0, 0);
 
         // Everything we might ask IMDb about, asked once.
@@ -89,6 +99,7 @@ public class TitleVerifier
             foreach (var c in candidates) questions.Add(c);
         }
         foreach (var file in toYear) questions.Add(file.EffectiveTitle);
+        foreach (var file in toGenre) questions.Add(file.EffectiveTitle);
 
         progress?.Report(new VerifyProgress(0, toVerify.Count, string.Empty,
             _imdb.IsLoaded ? "Checking IMDb titles" : "Reading IMDBData.tsv"));
@@ -117,6 +128,7 @@ public class TitleVerifier
 
             file.TmdbName = hit.Title;
             file.ImdbVerified = true;
+            ApplyGenres(file, hit);
             imdbVerified++;
         }
 
@@ -178,9 +190,36 @@ public class TitleVerifier
             yearsFilled++;
         }
 
+        // --- Genres ---
+        // Asked of everything that has a title, not only of what was verified above: a file
+        // whose title was already confirmed by an earlier run has no genres against it yet,
+        // and this is the pass that fills them in. Nothing extra is read to do it — the
+        // answers are the ones already in hand.
+        var genresFilled = 0;
+        foreach (var file in targets)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!string.IsNullOrWhiteSpace(file.Genres)) continue;
+            if (Ask(file.EffectiveTitle) is { } genreMatch && ApplyGenres(file, genreMatch))
+                genresFilled++;
+        }
+
         progress?.Report(new VerifyProgress(toVerify.Count, toVerify.Count, string.Empty, "Done"));
         return new VerifyReport(
-            imdbVerified, tmdbVerified, yearsFilled, unresolved.Count, yearsUncertain);
+            imdbVerified, tmdbVerified, yearsFilled, unresolved.Count, yearsUncertain, genresFilled);
+    }
+
+    /// <summary>
+    /// Record the genres IMDb has against a title, if it has any and the file has none.
+    /// A genre already on the file is left alone: it may have been corrected by hand.
+    /// </summary>
+    private static bool ApplyGenres(Models.MediaFile file, ImdbMatch match)
+    {
+        if (!string.IsNullOrWhiteSpace(file.Genres)) return false;
+        if (match.GenreNames.Count == 0) return false;
+
+        file.Genres = string.Join(", ", match.GenreNames);
+        return true;
     }
 
     /// <summary>

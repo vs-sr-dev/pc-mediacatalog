@@ -57,6 +57,23 @@ public class LeftoverThreshold
     public long Bytes { get; set; }
 }
 
+/// <summary>
+/// How far two copies of one thing may disagree about their length and still be treated as
+/// the same thing, for one category.
+///
+/// The figure has to be per category because a minute means opposite things in each: sixty
+/// seconds between two rips of a film is the credits, or a distributor's ident, and nobody
+/// cares which copy has them. Sixty seconds between two copies of a song is a different
+/// recording.
+/// </summary>
+public class DurationTolerance
+{
+    public string Category { get; set; } = string.Empty;
+
+    /// <summary>Seconds. 0 means the lengths have to agree exactly.</summary>
+    public int Seconds { get; set; }
+}
+
 /// <summary>Remembered width/visibility of a results-grid column.</summary>
 public class ColumnLayout
 {
@@ -208,6 +225,45 @@ public class AppSettings
     /// <summary>IMDb's published location for the titles dataset.</summary>
     public const string DefaultImdbDownloadUrl = "https://datasets.imdbws.com/title.basics.tsv.gz";
 
+    /// <summary>Where <c>title.episode.tsv.gz</c> is fetched from; blank uses the default.</summary>
+    public string ImdbEpisodeDownloadUrl { get; set; } = DefaultImdbEpisodeDownloadUrl;
+
+    /// <summary>IMDb's published location for the episode dataset.</summary>
+    public const string DefaultImdbEpisodeDownloadUrl =
+        "https://datasets.imdbws.com/title.episode.tsv.gz";
+
+    /// <summary>The episode download address to use, falling back to the built-in one.</summary>
+    [XmlIgnore]
+    public string EffectiveImdbEpisodeDownloadUrl =>
+        string.IsNullOrWhiteSpace(ImdbEpisodeDownloadUrl)
+            ? DefaultImdbEpisodeDownloadUrl
+            : ImdbEpisodeDownloadUrl.Trim();
+
+    /// <summary>
+    /// The earliest release year worth extracting, or null for "every year there is".
+    ///
+    /// 1950 by default. The dataset reaches back to the 1890s and most of what is in there
+    /// is of no use to anybody cataloguing their own films: the extract is smaller, loads
+    /// faster and answers quicker for leaving it out. A row with no year at all is kept
+    /// whatever this says — a missing date is not a date outside the range.
+    /// </summary>
+    public int? ExtractStartYear { get; set; } = 1950;
+
+    /// <summary>
+    /// The latest release year worth extracting, or null (the default) for "everything from
+    /// the start year onwards", which is what almost everybody wants.
+    /// </summary>
+    public int? ExtractEndYear { get; set; }
+
+    /// <summary>True when a title of this year belongs in the extract.</summary>
+    public bool IsYearExtracted(int? year)
+    {
+        if (year is not { } y) return true;              // no year is not a year out of range
+        if (ExtractStartYear is { } from && y < from) return false;
+        if (ExtractEndYear is { } to && y > to) return false;
+        return true;
+    }
+
     /// <summary>The download address to actually use, falling back to the built-in one.</summary>
     [XmlIgnore]
     public string EffectiveImdbDownloadUrl =>
@@ -260,6 +316,68 @@ public class AppSettings
 
     /// <summary>Set once the defaults below have been seeded, so a cleared list stays cleared.</summary>
     public bool LeftoverThresholdsInitialised { get; set; }
+
+    /// <summary>
+    /// Take the folders a consolidation has emptied away without asking. On by default: what
+    /// goes has already been judged to be nothing — an empty folder, or one holding less than
+    /// the size limit for its category, with no catalogued file in it waiting to be filed —
+    /// and a question whose answer is always yes is not a question worth asking.
+    /// </summary>
+    public bool RemoveEmptyFoldersAutomatically { get; set; } = true;
+
+    /// <summary>
+    /// How far two copies of one thing may disagree about their length, per category, and
+    /// still be consolidated automatically rather than put to the user.
+    /// </summary>
+    [XmlArray("DurationTolerances"), XmlArrayItem("Tolerance")]
+    public List<DurationTolerance> DurationTolerances { get; set; } = new();
+
+    /// <summary>Set once the defaults below have been seeded, so a zeroed list stays zeroed.</summary>
+    public bool DurationTolerancesInitialised { get; set; }
+
+    /// <summary>
+    /// The length tolerance for a category, in seconds. Extras follow the show or film they
+    /// belong to; anything unlisted has to match exactly.
+    /// </summary>
+    public int DurationToleranceFor(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return 0;
+
+        var match = DurationTolerances.FirstOrDefault(t =>
+            string.Equals(t.Category, category, StringComparison.OrdinalIgnoreCase));
+        if (match != null) return Math.Max(0, match.Seconds);
+
+        if (string.Equals(category, "TvExtra", StringComparison.OrdinalIgnoreCase))
+            return DurationToleranceFor("TvShow");
+        if (string.Equals(category, "MovieExtra", StringComparison.OrdinalIgnoreCase))
+            return DurationToleranceFor("Movie");
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The figures a new install starts with. A minute either way on a film or an episode is
+    /// the credits or an ident and decides nothing; two seconds on a track is already the
+    /// difference between a single edit and an album version.
+    /// </summary>
+    private static readonly (string Category, int Seconds)[] DefaultDurationTolerances =
+    {
+        ("TvShow", 60),
+        ("Movie", 60),
+        ("Audio", 2)
+    };
+
+    /// <summary>Seed the defaults once, so a list the user has zeroed is not helpfully refilled.</summary>
+    public void NormaliseDurationTolerances()
+    {
+        if (DurationTolerancesInitialised) return;
+        DurationTolerancesInitialised = true;
+
+        foreach (var (category, seconds) in DefaultDurationTolerances)
+            if (!DurationTolerances.Any(t =>
+                    string.Equals(t.Category, category, StringComparison.OrdinalIgnoreCase)))
+                DurationTolerances.Add(new DurationTolerance { Category = category, Seconds = seconds });
+    }
 
     /// <summary>
     /// Bring subtitles along when their video is consolidated or moved. Off, they are
@@ -788,6 +906,8 @@ public class AppSettings
             var settings = (AppSettings?)Serializer.Deserialize(reader) ?? new AppSettings();
             settings.NormaliseCategoryFolders();
             settings.NormaliseLeftoverThresholds();
+            settings.NormaliseDurationTolerances();
+            settings.NormaliseColumnNames();
             return settings;
         }
         catch { return Fresh(); }
@@ -798,7 +918,42 @@ public class AppSettings
     {
         var settings = new AppSettings();
         settings.NormaliseLeftoverThresholds();
+        settings.NormaliseDurationTolerances();
         return settings;
+    }
+
+    /// <summary>
+    /// Columns that have been renamed since a settings file was written, so a remembered
+    /// width and a saved filter survive the rename rather than quietly pointing at a column
+    /// that no longer exists.
+    /// </summary>
+    private static readonly (string Was, string Is)[] RenamedColumns =
+    {
+        ("Filed", "Consolidated"),
+        ("Title", "Primary title")
+    };
+
+    /// <summary>Put remembered column widths and filters onto the current column names.</summary>
+    public void NormaliseColumnNames()
+    {
+        foreach (var (was, now) in RenamedColumns)
+        {
+            foreach (var column in ColumnLayouts)
+                if (string.Equals(column.Header, was, StringComparison.OrdinalIgnoreCase))
+                    column.Header = now;
+
+            foreach (var filter in SavedFilters)
+                if (string.Equals(filter.Column, was, StringComparison.OrdinalIgnoreCase))
+                    filter.Column = now;
+
+            if (string.Equals(LastFilterColumn, was, StringComparison.OrdinalIgnoreCase))
+                LastFilterColumn = now;
+        }
+
+        // A rename can leave two entries for one column — the old name migrated on top of a
+        // new one already written. The first wins; the rest would only fight over the width.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        ColumnLayouts.RemoveAll(c => !seen.Add(c.Header));
     }
 
     public void Save(string path)

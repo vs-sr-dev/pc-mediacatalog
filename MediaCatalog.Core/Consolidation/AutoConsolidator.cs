@@ -238,9 +238,18 @@ public static class AutoConsolidator
     }
 
     /// <summary>
-    /// The order to try genuinely different copies in: best picture first, and among copies
-    /// of the same quality the smallest, since at one resolution a bigger file is padding
-    /// rather than detail — and the smaller one is the cheaper thing to be wrong about.
+    /// The order to try genuinely different copies in.
+    ///
+    /// Best picture first. Then, among copies of the same quality, the <em>longest</em>: two
+    /// copies of one film that differ in length differ by the credits, an ident or a scene,
+    /// and the longer one is the copy that has them — it holds everything the shorter one
+    /// holds and something besides. That only applies at equal quality, which is why it comes
+    /// second: a longer copy at a worse resolution is not the better copy, it is a worse copy
+    /// with more of itself.
+    ///
+    /// Then, among copies of the same quality <em>and</em> the same length, the smallest: at
+    /// one resolution and one running time the extra bytes are padding rather than detail, and
+    /// the smaller one is the cheaper thing to be wrong about.
     ///
     /// Anything a deep check has already condemned goes to the back rather than being
     /// dropped: if every copy is damaged the user still needs to be shown something.
@@ -249,9 +258,18 @@ public static class AutoConsolidator
         copies
             .OrderBy(f => f.Integrity == IntegrityStatus.Corrupt ? 1 : 0)
             .ThenByDescending(QualityOf)
+            .ThenByDescending(LengthRank)
             .ThenBy(f => f.SizeBytes)
             .ThenBy(f => f.FullPath, StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+    /// <summary>
+    /// A file's length in whole seconds, for ordering. Rounded so that two copies which are
+    /// the same length to the second are not separated by a rounding difference, which would
+    /// take the choice away from the size rule below it for no reason.
+    /// </summary>
+    private static long LengthRank(MediaFile file) =>
+        file.DurationSeconds > 0 ? (long)Math.Round(file.DurationSeconds) : 0;
 
     /// <summary>
     /// A file's picture quality: the height ffprobe measured when something has looked, and
