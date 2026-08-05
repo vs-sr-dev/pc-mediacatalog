@@ -42,7 +42,8 @@ dotnet run --project MediaCatalog.App
    which drives and folders to walk, what to pick up. On a first run it opens by itself,
    since an empty catalogue is the one state the app can't do anything useful with.
 2. The grid fills with every audio/video file found. Use the **View** dropdown to filter
-   (All / Video / Audio / Movies / TV / Duplicates / Problems).
+   (All / Video / Audio / Movies / TV / Duplicates / Problems), and the filter bar to narrow
+   it by any column — name, path, either title, genre, year, season and episode.
 3. Files that are exact duplicates are flagged **DUP**; the status bar shows how much
    space you could reclaim.
 4. To move files: select one or more rows, click **Relocate…**, pick a
@@ -111,6 +112,93 @@ application restart:
 
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
+
+## New in v2.4
+
+**Knowing what you are missing**
+- ✅ **Missing episodes.** *Missing episodes…* looks through the consolidated programmes and
+  says what is not there. Two different holes, and they are worth telling apart: a gap in the
+  middle of a season — 1, 2, 3, 5 — needs nothing but the files to find, and the **missing
+  tail** needs knowing how long the season actually ran. A folder holding episodes 1 to 12
+  looks complete from the inside, and only IMDb's episode data can say that there were
+  thirteen. Without that data the tail is not checked and the report **says so** rather than
+  implying a clean bill of health it cannot give. Each missing episode is listed by **name**
+  where there is one to give, so the list is something you can go and act on
+- ✅ **Seasons you have none of are listed separately** from the gaps. Owning one season of a
+  programme is a perfectly ordinary thing to do, and it is not the same kind of news as being
+  one episode short
+
+**Two titles, not one**
+- ✅ **A primary title and a secondary title.** The primary title is the old *Title* under a
+  clearer name — the programme's name, the film's — and is still what decides where a file is
+  filed. The secondary title is the name underneath it: *Go Get Mommy's Bra* under *Two and a
+  Half Men*, *Lost in New York* under *Home Alone 2*, and in time the track under the band.
+  Existing catalogues carry straight over: nothing about the data changed, only what it is
+  called. Episode names are **filled in for you** by the missing-episode scan, since it has
+  looked the season up anyway and the names are sitting beside the numbers
+- ✅ **`{secondarytitle}` in the naming patterns**, so a library can file
+  `04 - Go Get Mommy's Bra.mkv` if that is how you read it
+
+**Genres**
+- ✅ **Genres in the catalogue, and a column and a filter for them.** Filled in by *Verify
+  titles* from the local IMDb data, alongside the titles and years it already fills in — the
+  answers were in the same rows all along. The filter offers the genres your data actually
+  holds, since nobody remembers whether IMDb writes *Sci-Fi* or *Science Fiction*
+
+**The IMDb extract, rebuilt**
+- ✅ **Far smaller, and it now knows about episodes.** The download is mostly repetition, and
+  none of it was being thrown away: every identifier written as `tt0369179` where the number
+  would do, every row spelling out `tvEpisode` in full, every row spelling out its genres,
+  every title written twice as *primaryTitle* and *originalTitle*, and three columns nothing
+  here reads. Now the identifiers keep their number, the type and the genres become numbers
+  with a small table saying what each means — **built from the data on every extraction**, so
+  a genre IMDb adds next year is picked up rather than quietly filed as unknown — and
+  *originalTitle*, *isAdult* and *runtimeMinutes* are dropped. The running time in particular
+  is better read from your own file than believed from a database
+- ✅ **`title.episode.tsv` is read too**, into a table of which episode of which programme each
+  identifier is. That is what makes a missing last episode findable at all. *Download
+  episodes* on **Settings… → Data sources** fetches it; it is optional and everything else
+  works without it
+- ✅ **A year window on the extraction, 1950 by default.** The dataset reaches back to the
+  1890s and hardly anybody is cataloguing that. Clear the box to keep every year there is, or
+  set an end year as well. A title with **no** year is kept whichever way it is set: a missing
+  date is not a date outside the range
+
+**Consolidating**
+- ✅ **Copies of different lengths are compared properly at last.** A video fingerprint is
+  sixteen frames spread across the whole file, which is what makes it comparable between two
+  encodings — and is also why it fell apart the moment two files were of different lengths:
+  put a minute of credits on one and every sample lands at a different moment, so two
+  complete copies of one film looked like nothing alike. They are now compared **over the
+  stretch they have in common**, which puts every sample back on the same moment. It costs
+  sixteen frames of decoding, and only where the ordinary comparison has already failed and
+  the lengths explain why
+- ✅ **The longer copy wins, at equal or better quality.** A copy with the credits on it holds
+  everything the shorter one holds and something besides. Quality still comes first — a
+  longer copy at a worse resolution is a worse copy with more of itself — and among copies of
+  one quality *and* one length the smallest still wins, since there the extra bytes are
+  padding
+- ✅ **A length tolerance per category.** Within it, two copies are the same thing and are
+  settled by the ordinary rules; beyond it they come to you, because at some point a longer
+  copy is a different cut. Per category because a minute means opposite things in each: sixty
+  seconds between two rips of a film is the credits and decides nothing, sixty seconds between
+  two copies of a song is a different recording. Video starts at 60 seconds and audio at 2
+- ✅ **You are only asked when the rules genuinely cannot choose.** An episode already in the
+  library under a different name used to be put to you every time; most of those pairs answer
+  themselves — same content or not, better copy or not — and are now settled the same way an
+  automatic run settles any other pair of rivals. The same goes for the same-title twins
+  before a manual consolidation: what can be decided is decided, and only the sets that
+  cannot are put in front of you
+- ✅ **Emptied folders simply go.** Every folder in that list is either empty or holds less
+  than the size set for its category; none holds a catalogued file you have not filed yet, and
+  none is a folder you have named in the settings. Those three tests *are* the judgement, and
+  they have already been made — a question whose answer is always yes is not a question. Turn
+  it off on **Settings… → General** to be shown the list and asked first
+
+**Smaller things**
+- ✅ **The *Filed* column is called *Consolidated***, which is what everything else in the
+  program calls it. Remembered widths and saved filters follow the rename rather than
+  silently pointing at a column that no longer exists
 
 ## New in v2.3
 
@@ -367,9 +455,11 @@ full completion — a pause never deletes anything.
   **suggestions** view (current → new location, collisions, duplicates)
 - ✅ **Editable categories** — per-file / per-folder / parent-folder overrides, custom
   categories, each with its own consolidation folder
-- ✅ **Local IMDb title data** — `title.basics.tsv` boiled down to a title/year extract that
-  validates films *and* programmes with no rate limit, no API key and no network; TMDb is
-  only asked what IMDb cannot answer
+- ✅ **Local IMDb title data** — `title.basics.tsv` boiled down to a compact extract of
+  identifiers, titles, years, types and genres that validates films *and* programmes with no
+  rate limit, no API key and no network; TMDb is only asked what IMDb cannot answer
+- ✅ **Local IMDb episode data** — `title.episode.tsv` boiled down the same way, so a season
+  can be checked against the number of episodes actually broadcast
 - ✅ **TMDb validation** of TV names — v4 Read Token *or* v3 API Key — rate-limited, cached,
   with folder-name fallback
 - ✅ **Audio-only / video-only scans** that accumulate into one catalogue
@@ -465,9 +555,22 @@ added later joins the bottom of the list rather than disappearing from it.
 > (A rule whose folder has not been scanned yet is kept, since dropping it would lose the
 > instruction.) Folder rules are on their way out and may go entirely in a later release.
 
+**Titles come in two.** The **primary title** is the programme's name or the film's — the
+field that used to be called simply *Title*, under a name that says what it is now that there
+is a second one. It is still what decides where a file is filed. The **secondary title** is
+the name underneath it: an episode's own title (*Go Get Mommy's Bra* under *Two and a Half
+Men*), a film's tag line or extended name (*Lost in New York* under *Home Alone 2*), and in
+time a track's name under the band's. Most files have only the first, and the second decides
+nothing — so a wrong one costs a wrong word on the screen and nothing else. Existing
+catalogues carry straight over: only the name of the field changed.
+
+**Genres** are recorded against a file by *Verify titles*, from the same IMDb rows that
+supply the titles and years — the answers were already in hand. They have a column of their
+own and can be filtered on. A genre you type in by hand is left alone by later runs.
+
 **Edit details** — right-click → *Edit details…* opens every field of an entry at once:
-title, year, season, episode, *to episode* (for a double episode), category, file name,
-**modified date**, integrity and kind.
+primary title, secondary title, genres, year, season, episode, *to episode* (for a double
+episode), category, file name, **modified date**, integrity and kind.
 What the content *is* (title, year, numbering, category) is written to every byte-identical
 copy, because they are the same thing; what the *file* is (its name, its date, what a decode
 made of it) belongs to that one file. A corrected date is written to the file on disk as
@@ -612,13 +715,48 @@ The rules are the ones a careful person would follow, in that order:
    Every other copy is deleted once the survivor is safely in place.
 4. **Genuinely different copies of one thing** — a real question, settled by looking. One file
    stands for each distinct set of bytes; each is **fingerprinted and compared**, allowing for
-   one starting a second or two after another. If they really are the same content, they are
-   ranked **best picture first, and among equals the smallest** — at one resolution the extra
-   bytes are padding rather than detail, and the smaller one is the cheaper thing to be wrong
-   about. The best is then **decoded end to end**; if it is damaged it and its byte-identical
-   twins are removed — the same bytes cannot be sound in one place and broken in another — and
-   the next best is tried, until one survives or none is left. If the fingerprints *disagree*,
-   nothing is touched: one of the two is mislabelled, and only you can say which.
+   one starting a second or two after another and for the two running to different lengths
+   (see below). If they really are the same content, they are ranked **best picture first,
+   then the longest, then the smallest**: a copy with the credits on it holds everything the
+   shorter one holds and something besides, and among copies of one quality *and* one length
+   the extra bytes are padding rather than detail. The best is then **decoded end to end**; if
+   it is damaged it and its byte-identical twins are removed — the same bytes cannot be sound
+   in one place and broken in another — and the next best is tried, until one survives or none
+   is left. If the fingerprints *disagree*, nothing is touched: one of the two is mislabelled,
+   and only you can say which.
+
+**Copies of different lengths.** A video fingerprint is sixteen frames spread evenly across
+the whole file, which is exactly what makes it comparable between two encodings of one film —
+and exactly why it fell apart the moment the two files were of different lengths. Put a
+minute of credits on the end of one and every one of its sixteen samples lands at a different
+moment, so two complete copies of one film looked like nothing alike. That is why they were
+never consolidated automatically: not because anything had decided they were different, but
+because nothing could tell.
+
+They are now compared **over the stretch they have in common** — fingerprinting both as
+though each were only as long as the shorter one, which puts every sample back on the same
+moment. It costs sixteen frames of decoding per file, and it is only paid where the ordinary
+comparison has already failed and the lengths explain why. Audio needs none of it: an
+acoustic fingerprint is taken from the first two minutes by the clock, so how long the file
+runs makes no difference to it.
+
+Whether two copies of different lengths are the same *cut* is a separate question, and you
+answer it in advance with a **length tolerance per category** on **Settings… → Library**.
+Within it they are the same thing and are settled by the rules above; beyond it they come to
+you, because at some point a longer copy is a different cut rather than the same one. The
+figure is per category because a minute means opposite things in each: sixty seconds between
+two rips of a film is the credits and nobody cares which copy has them, while sixty seconds
+between two copies of a song is a different recording. Video starts at **60 seconds** and
+audio at **2**; zero means the lengths have to match exactly.
+
+**You are only asked when the rules cannot choose.** An episode already in the library under a
+different name used to be put in front of you every time, which is the wrong instinct — most
+of those pairs answer themselves. They are the same content or they are not; one is a better
+copy or it is not. Both are questions the program can answer by looking, and it now does,
+using the same rules as any other pair of rivals. The same applies to same-title twins before
+a manual consolidation: what can be decided is decided, and only the sets that genuinely
+cannot — copies that do not look alike, copies too far apart in length to be the same cut, or
+no external tools with which to tell — are put to you.
 
 **Nothing is deleted until the copy replacing it has actually arrived in the library.** A run
 that fails or is stopped part-way leaves everything it had not yet reached exactly where it
@@ -666,12 +804,20 @@ Folders that do go are **deleted outright** rather than sent to the Recycle Bin,
 in a way that deleting a *file* permanently is not: what goes has already been judged to be
 nothing. Turn that off on **Settings… → General** if you would rather they were recoverable.
 
+**They go without being asked about.** Every folder in that list is either empty or holds less
+than the size set for its category; none holds a catalogued file waiting to be filed, and none
+is a folder named anywhere in the settings. Those three tests *are* the judgement, and they
+have already been made — so a dialog listing the folders and asking whether they should go is
+a question whose answer is always yes. Turn *Take away the folders a consolidation empties
+without asking* off on **Settings… → General** to be shown the list first.
+
 **Custom file names.** Each consolidation folder has a *named* box under it. Leave it empty
 for the built-in naming, or write a pattern:
 
 | Field | Means |
 | --- | --- |
-| `{title}` | the programme or film title |
+| `{title}` | the primary title — the programme's or the film's name |
+| `{secondarytitle}` | the second name, when there is one: the episode's own title, a film's tag line |
 | `{year}` | year of release, blank when unknown |
 | `{season}` | season number — `{season:00}` pads it to two digits |
 | `{episode}` | episode number — `{episode:00}` pads it |
@@ -765,11 +911,13 @@ by path and then by Season/Episode: every clause has to match for a row to be sh
 column each is on, and each can be negated on its own. They are listed under the bar as
 *All of: …*, and clicking one takes it off. The grid scrolls horizontally.
 
-Columns that hold a fixed set of values — **Dup**, **Kind**, **Filed**, **Category**,
-**Integrity** and **TMDb** — offer them in the box's drop-down rather than asking you to
-remember how `~dup` is spelled, and **(blank)** is one of the choices. That is what makes
-"every file that is *not* a duplicate" a filter you can actually write: *Dup ~ (blank)*.
-Open-ended columns — Name, Path, Title — are typed into exactly as before.
+Columns that hold a fixed set of values — **Dup**, **Kind**, **Consolidated**, **Category**,
+**Integrity**, **Genres** and **TMDb** — offer them in the box's drop-down rather than asking
+you to remember how `~dup` is spelled, and **(blank)** is one of the choices. That is what
+makes "every file that is *not* a duplicate" a filter you can actually write: *Dup ~ (blank)*.
+The genres offered are the ones your own data holds, since nobody remembers whether IMDb
+writes *Sci-Fi* or *Science Fiction*. Open-ended columns — Name, Path, the two titles — are
+typed into exactly as before.
 
 The **view, the filter box and every stacked filter are remembered**, written out as they
 change rather than only at exit, so they come back whatever happened to the app. Turn it
@@ -895,9 +1043,38 @@ refreshes size and hash for all of them in one go — duplicate detection depend
 without re-walking whole drives. Nothing outside it is touched or pruned, and the folder is
 remembered: it is watched along with the drives and listed in Settings.
 
-**Filed** — the grid's *Filed* column ticks once a file lives in its consolidation
-location, and the **View** dropdown can show just what is *Consolidated* or *Not
-consolidated*, so it is easy to see what is left to sort out.
+**Consolidated** — the grid's *Consolidated* column ticks once a file lives in its
+consolidation location, and the **View** dropdown can show just what is *Consolidated* or
+*Not consolidated*, so it is easy to see what is left to sort out. (It was called *Filed*
+before v2.4; remembered column widths and saved filters were carried over to the new name.)
+
+### Missing episodes
+
+**Missing episodes…** looks through the consolidated programmes and says which episodes are
+not there. Consolidated ones only, and deliberately: files still scattered around a download
+folder are half-finished by definition, and telling somebody that a season they have not
+filed yet is incomplete is telling them what they already know.
+
+Two kinds of hole are found, and the difference between them matters:
+
+- **A gap in the middle of a season** — 1, 2, 3, 5 — needs nothing but the files. It is found
+  whatever data you have.
+- **A missing tail** needs knowing how long the season actually ran. A folder holding
+  episodes 1 to 12 looks complete from the inside, and nothing in it says the season went to
+  thirteen. Only the IMDb episode data can say that, and **without it the tail is not checked
+  at all** — the report says as much rather than implying a clean bill of health it has no
+  right to give.
+
+Each missing episode is listed **by name** where the data has one, so the result is a list
+you can act on rather than a column of numbers. **Copy the list** puts the whole report on
+the clipboard.
+
+**Seasons you have none of are listed apart from the gaps.** Owning one season of a programme
+is a perfectly ordinary thing to do, and it is not the same kind of news as being one episode
+short of a season you are collecting.
+
+The same pass **fills in each held episode's own name** as its secondary title, since it has
+looked the season up anyway.
 
 **Progress and ETA** — long jobs (consolidating, moving, deep checking, re-hashing) show a
 progress bar with an estimated time remaining in the status bar. For copies and deep checks
@@ -1035,7 +1212,7 @@ button afterwards.
 
 ### IMDb title data (local, free, no rate limit)
 IMDb publish their catalogue as a gzipped TSV. If neither the extract nor the raw download
-is present, **Verify titles** offers to fetch it — or press *Download now* on
+is present, **Verify titles** offers to fetch it — or press *Download titles* on
 **Settings… → Data sources**. The address is a setting (defaulting to
 [`title.basics.tsv.gz`](https://datasets.imdbws.com/title.basics.tsv.gz)) so a move on
 IMDb's side can be corrected there rather than waiting for a new build. The download
@@ -1046,15 +1223,52 @@ successful one.
 You can equally drop the file in the program folder yourself — gzipped or unpacked, either
 is read as-is.
 
-The first time titles are verified, the file is boiled down to **`IMDBData.tsv`**, keeping
-only the two columns that matter: **primary title** and **year**. The source is over a
-gigabyte, so it is streamed a line at a time and never loaded into memory. IMDb's
-placeholder rows for untitled episodes — `Episode #1.4`, `Episode dated 3 May 1999`,
+The first time titles are verified, the file is boiled down to **`IMDBData.tsv`** and two
+small tables beside it. The source is over a gigabyte, so it is streamed a line at a time and
+never loaded into memory.
+
+Most of that gigabyte is repetition, and none of it was being thrown away:
+
+| What IMDb writes | What the extract keeps |
+| --- | --- |
+| `tt0369179` | `369179` — the "tt" and the leading zeros are on every row of both files |
+| `titleType` as `tvEpisode` | a number, with **`IMDBTypes.tsv`** saying what each number means |
+| `genres` as `Comedy,Romance` | numbers, with **`IMDBGenres.tsv`** saying what each means |
+| `primaryTitle` **and** `originalTitle` | the primary title alone — the second repeats it on all but a handful of rows |
+| `isAdult` | dropped |
+| `runtimeMinutes` | dropped: your own file is a better authority on how long it runs than a database is |
+| `startYear`, `endYear` | kept as they are |
+
+The type and genre tables are **built from the data on every extraction** rather than fixed
+in this program, because IMDb may add either at any time and a fixed list would quietly file
+the new one as unknown.
+
+IMDb's placeholder rows for untitled episodes — `Episode #1.4`, `Episode dated 3 May 1999`,
 `Episode 12` — are dropped, since they would only ever match by accident. So are the
 **broadcast timestamps** some feeds leave in the title column — rows reading
 `22. sep. 2016 kl. 07:30` — which are a transmission slot rather than the name of anything,
 are numerous, and match nothing anyone will ever search for. If `IMDBData.tsv` is already
 there the raw file is left alone.
+
+**A year window, 1950 by default.** The dataset reaches back to the 1890s, and the number of
+people cataloguing media from every year there has been one is very small indeed; most
+libraries are the last twenty or thirty years. Titles released outside the window are left
+out, which makes the extract smaller, faster to load and quicker to answer for the rest of
+its life. Clear the *from* box on **Settings… → Data sources** to keep every year there is,
+and set the *to* box only if you want an upper limit — it is empty by default, which means
+everything from the start year onwards. **A title with no year at all is kept whichever way
+they are set**: a missing date is not a date outside the range.
+
+**The episode data** — `title.episode.tsv`, which says which episode of which programme each
+identifier is — is optional and is fetched by *Download episodes* on the same tab. It becomes
+**`IMDBEpisodes.tsv`**, four numbers a row, and only for episodes the title extraction kept:
+a row pointing at a title that is not there answers nothing. Rows that name neither a season
+nor an episode are left out for the same reason — every chat-show instalment IMDb has never
+been told the numbering of. This is the file that makes *Missing episodes* work.
+
+An extract written by an earlier version is still read, so an existing install keeps working
+until the day it is re-extracted. It simply has no genres and no episode links, because
+neither is in the file; **Settings… → Data sources** says so.
 
 **Verify titles** then confirms film and programme names against it and fills in any
 **missing years**. A name that cannot be identified from the file itself is looked up under
@@ -1099,8 +1313,8 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.3` for
-v2.3 — with the product version kept as the number people talk about (`2.3`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.4` for
+v2.4 — with the product version kept as the number people talk about (`2.4`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
@@ -1114,8 +1328,12 @@ to the program icon.
   do not yet.
 - Removing TMDb entirely, now that the local IMDb extract supersedes it.
 - Retiring folder rules altogether, once existing catalogues have migrated off them.
-- Letting auto-consolidate settle the fingerprint disagreements it currently hands back —
-  at the moment two copies whose fingerprints do not match are always a question for you.
+- Letting auto-consolidate settle the fingerprint disagreements it still hands back. Copies of
+  different lengths are now compared properly and no longer land here, but two copies that
+  genuinely do not look alike remain a question for you.
+- Secondary titles for music — the band as the primary title and the track as the second — and
+  the naming patterns to go with it. The catalogue already carries both fields.
+- Filling in film tag lines as secondary titles, as episode names are filled in now.
 - A unit-test project. The engine has no UI dependency precisely so that it can be tested
   in isolation, and there is now a good deal in it worth pinning down.
 
