@@ -157,6 +157,17 @@ public class MainViewModel : ObservableObject
     /// </summary>
     private List<TitleDuplicateGroup> _titleDuplicates = new();
 
+    private readonly string _consolidationSessionPath = ConsolidationSession.DefaultPath;
+
+    /// <summary>
+    /// The consolidation that is running, or the one that stopped part-way and can be picked
+    /// up again. Loaded at start-up, so a job survives the application being closed.
+    /// </summary>
+    private ConsolidationSession _consolidationSession;
+
+    /// <summary>Set by Pause: the files still to come are left where they are, and recorded.</summary>
+    private bool _pausingConsolidation;
+
     private CancellationTokenSource? _cts;
     private bool _isPausing;
     private int _lastDone;
@@ -181,6 +192,7 @@ public class MainViewModel : ObservableObject
         _settings = AppSettings.Load(_settingsPath);
         _tools = ExternalTools.Resolve(_toolSettings);
         _session = ScanSession.Load(_sessionPath);
+        _consolidationSession = ConsolidationSession.Load(_consolidationSessionPath);
         _tmdbCache = TmdbCache.Load(_tmdbCachePath);
         UpdateToolStatus();
 
@@ -189,8 +201,14 @@ public class MainViewModel : ObservableObject
         ScanCommand = new RelayCommand(() => ScanRequested?.Invoke(), () => !IsScanning);
         ResumeCommand = new RelayCommand(() => ResumeRequested?.Invoke(),
             () => !IsScanning && CanResume);
-        PauseCommand = new RelayCommand(() => { _isPausing = true; _cts?.Cancel(); }, () => IsScanning);
-        CancelCommand = new RelayCommand(() => { _isPausing = false; _cts?.Cancel(); }, () => IsScanning);
+        PauseCommand = new RelayCommand(PauseWhateverIsRunning, () => IsScanning);
+        CancelCommand = new RelayCommand(() =>
+        {
+            _isPausing = false;
+            _pausingConsolidation = false;
+            _cts?.Cancel();
+            if (_consolidationSession.IsResumable) ForgetConsolidationSession();
+        }, () => IsScanning || CanResumeConsolidation);
 
         RestoreFilters();
         RefreshFilterValues();
@@ -201,6 +219,17 @@ public class MainViewModel : ObservableObject
             var how = _session.Status == ScanSessionStatus.Paused ? "Paused" : "Interrupted";
             StatusText = $"{how} scan can be resumed: {_session.LastDone}/{_session.LastTotal} done " +
                          $"on {_session.Roots.Count} drive(s). Click Resume to continue.";
+        }
+        else if (_consolidationSession.IsResumable)
+        {
+            // A consolidation that was paused, or that the program was closed in the middle
+            // of. Said at the start of the next run because otherwise nothing would: the
+            // files are half filed and only this knows which half.
+            var how = _consolidationSession.Status == ConsolidationSessionStatus.Paused
+                ? "Paused"
+                : "Interrupted";
+            StatusText = $"{how} consolidation can be resumed: {_consolidationSession.Describe()}. " +
+                         "Scan → Resume consolidation continues it.";
         }
         else
         {
@@ -908,6 +937,14 @@ public class MainViewModel : ObservableObject
     /// <summary>Rebuild the display rows from the catalogue and mark duplicates.</summary>
     private void RebuildRows()
     {
+        // Where each file is, before anything is said about it. A rename or a move writes the
+        // new path onto the entry and nothing else — which used to leave the catalogue's
+        // by-path index pointing at a name that is no longer on disk, so everything that
+        // looks an entry up by path (a collision, a folder tidy-up, the next scan) was
+        // answering from a link to a file that had gone. Every operation that changes a path
+        // ends here, so this is the one place that has to be right.
+        _catalog.RebuildIndex();
+
         _allRows.Clear();
         var rowByPath = new Dictionary<string, FileRow>(StringComparer.OrdinalIgnoreCase);
         var unnumbered = 0;
@@ -1058,8 +1095,17 @@ public class MainViewModel : ObservableObject
             {
                 foreach (var p in proposals)
                 {
+                    var was = p.File.FullPath;
+                    var known = _catalog.ByPath.TryGetValue(was, out var held) &&
+                                ReferenceEquals(held, p.File);
                     var result = RenameService.Apply(p);
-                    if (result.Success) ok++; else failed++;
+                    if (!result.Success) { failed++; continue; }
+
+                    ok++;
+                    // Only entries the catalogue already holds: a repair run over a folder
+                    // reaches files that were never catalogued, and those have no business
+                    // appearing in the index on the strength of having been renamed.
+                    if (known) _catalog.Note(p.File, was);
                 }
             });
             CatalogStore.Save(_catalog, _catalogPath);
@@ -1299,6 +1345,62 @@ public class MainViewModel : ObservableObject
         return await AnalyzeModelsAsync(targets, deepCheck: true);
     }
 
+    /// <summary>
+    /// Look through a folder for episodes whose name carries its number twice — the
+    /// "01 - 01 - Wheel Of Fortune.mkv" a consolidation used to be able to produce — and
+    /// propose the name each would go back to.
+    ///
+    /// The folder is read from disk rather than from the catalogue, deliberately: the files
+    /// this went wrong for are as likely to be in a library that was filed before they were
+    /// catalogued as in one that was not, and a repair that can only reach what the
+    /// catalogue happens to know about is a repair that leaves half the mess behind.
+    /// Catalogued files are matched to their entries, so putting the name right puts the
+    /// catalogue right with it.
+    /// </summary>
+    public async Task<List<RenameProposal>> FindDoubledEpisodeNamesAsync(string folder)
+    {
+        var proposals = new List<RenameProposal>();
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return proposals;
+
+        IsScanning = true;
+        StatusText = $"Looking for doubled episode numbers under {folder}…";
+        List<string> paths;
+        try
+        {
+            paths = await Task.Run(() => DriveScanner.EnumerateMediaFiles(
+                new[] { folder }, CancellationToken.None,
+                excludeDescent: _settings.IsDescentBlocked,
+                ignoreExtension: _settings.IsExtensionIgnored).ToList());
+        }
+        finally { IsScanning = false; }
+
+        foreach (var path in paths)
+        {
+            var name = Path.GetFileName(path);
+            var corrected = EpisodePrefixes.Collapse(name);
+            if (string.Equals(corrected, name, StringComparison.Ordinal)) continue;
+
+            var directory = Path.GetDirectoryName(path) ?? string.Empty;
+            proposals.Add(new RenameProposal
+            {
+                File = EntryAt(path) ?? new MediaFile
+                {
+                    FullPath = path,
+                    FileName = name,
+                    Extension = Path.GetExtension(path)
+                },
+                CurrentName = name,
+                ProposedName = corrected,
+                ProposedPath = Path.Combine(directory, corrected)
+            });
+        }
+
+        StatusText = proposals.Count == 0
+            ? "No doubled episode numbers found."
+            : $"{proposals.Count} file(s) carry their episode number twice.";
+        return proposals;
+    }
+
     // --- Categories -------------------------------------------------------
 
     /// <summary>
@@ -1435,9 +1537,8 @@ public class MainViewModel : ObservableObject
         {
             if (!File.Exists(file.FullPath)) continue;
 
-            var proposal = RenameService.BuildProposal(file, CategoryResolver.Effective(file, _settings))
-                           ?? RenameService.BuildTitleSwap(
-                               file, previousTitleOf?.Invoke(file), file.EffectiveTitle);
+            var proposal = RenameService.BuildAnyProposal(
+                file, CategoryResolver.Effective(file, _settings), previousTitleOf?.Invoke(file));
             if (proposal is not { WillChange: true }) continue;
 
             var previousPath = file.FullPath;
@@ -1977,12 +2078,90 @@ public class MainViewModel : ObservableObject
     /// </summary>
     public Func<EpisodeConflict, Task<CollisionResolution>>? EpisodeConflictResolver { get; set; }
 
+    // --- Pausing and resuming a consolidation ------------------------------
+
+    /// <summary>True when a consolidation stopped part-way and can be picked up again.</summary>
+    public bool CanResumeConsolidation => _consolidationSession.IsResumable;
+
+    /// <summary>How far the unfinished consolidation got, for the prompt that offers it.</summary>
+    public string ConsolidationProgress => _consolidationSession.Describe();
+
+    /// <summary>
+    /// Pause whichever job is running. A scan is stopped through its cancellation token; a
+    /// consolidation is not, because a copy half-way through a file has to be allowed to
+    /// finish or rolled back, and finishing it is both quicker and safer.
+    /// </summary>
+    private void PauseWhateverIsRunning()
+    {
+        if (_consolidationSession.Status == ConsolidationSessionStatus.Running)
+        {
+            _pausingConsolidation = true;
+            StatusText = "Pausing — the file being moved is finished first.";
+            return;
+        }
+
+        _isPausing = true;
+        _cts?.Cancel();
+    }
+
+    /// <summary>Continue the consolidation that was paused or interrupted.</summary>
+    public async Task<ConsolidationOutcome> ResumeConsolidationAsync()
+    {
+        if (!_consolidationSession.IsResumable)
+            return new ConsolidationOutcome(0, 0, 0, new List<MediaFile>(),
+                "There is no unfinished consolidation to continue.");
+
+        var byId = new Dictionary<string, MediaFile>(StringComparer.Ordinal);
+        foreach (var file in _catalog.Files) byId[file.Id] = file;
+
+        // Entries that have since been deleted are simply no longer part of the job.
+        var files = _consolidationSession.PendingIds
+            .Select(id => byId.TryGetValue(id, out var f) ? f : null)
+            .Where(f => f != null)
+            .Select(f => f!)
+            .ToList();
+
+        if (files.Count == 0)
+        {
+            ForgetConsolidationSession();
+            return new ConsolidationOutcome(0, 0, 0, new List<MediaFile>(),
+                "Nothing is left of that consolidation — the files it had still to do are no " +
+                "longer in the catalogue.");
+        }
+
+        return await ConsolidateModelsAsync(files, _consolidationSession.DeleteOriginal, resuming: true);
+    }
+
+    /// <summary>Give up on an unfinished consolidation: the files already filed stay filed.</summary>
+    public void ForgetConsolidationSession()
+    {
+        _consolidationSession = new ConsolidationSession();
+        ConsolidationSession.Clear(_consolidationSessionPath);
+        OnPropertyChanged(nameof(CanResumeConsolidation));
+        RaiseCommandStates();
+    }
+
+    /// <summary>
+    /// Write down what is left of the job. Called as it goes as well as at the end: a
+    /// session that is only written when the run finishes tidily is no use to the run that
+    /// was stopped by the power going off.
+    /// </summary>
+    private void RecordConsolidationProgress(IReadOnlyCollection<string> handled)
+    {
+        _consolidationSession.PendingIds.RemoveAll(handled.Contains);
+        _consolidationSession.Save(_consolidationSessionPath);
+    }
+
     /// <summary>
     /// Consolidate specific catalogue entries: each goes to the folder its category
     /// dictates, under its planned name, with progress and an ETA.
     /// </summary>
+    /// <param name="resuming">
+    /// True when this is the rest of a job that was paused or interrupted, so the tally it
+    /// reports carries on from where that one stopped rather than starting again at nothing.
+    /// </param>
     public async Task<ConsolidationOutcome> ConsolidateModelsAsync(
-        IReadOnlyList<MediaFile> files, bool deleteOriginal)
+        IReadOnlyList<MediaFile> files, bool deleteOriginal, bool resuming = false)
     {
         // A file already sitting at the exact path the layout gives it has nothing to do:
         // consolidating it again is how a second copy of it gets made. It is reported as
@@ -2001,10 +2180,17 @@ public class MainViewModel : ObservableObject
         var toFile = new List<MediaFile>();
         foreach (var file in files)
         {
-            if (ConsolidationPlanner.IsAtPlannedPath(file, CategoryResolver.Effective(file, _settings), _settings))
-                alreadyConsolidated.Add(file);
-            else
-                toFile.Add(file);
+            var category = CategoryResolver.Effective(file, _settings);
+
+            // An extra gets the wider test: a featurette in the season's Extras folder and
+            // one in the show's are both where they belong, and moving it from one to the
+            // other is work for nothing — done to a file the run should simply mark as filed.
+            var filed = ConsolidationPlanner.IsAtPlannedPath(file, category, _settings) ||
+                        (CategoryResolver.IsExtra(category) &&
+                         ConsolidationPlanner.IsCorrectlyFiled(file, category, _settings));
+
+            if (filed) alreadyConsolidated.Add(file);
+            else toFile.Add(file);
         }
 
         // An episode already in the library under a different name is not a name collision
@@ -2020,12 +2206,42 @@ public class MainViewModel : ObservableObject
         var run = new CollisionRun("consolidated");
         if (episodes.Cancelled) run.Cancelled = true;
 
+        // What the job is, written down before a byte moves. A consolidation of a whole
+        // library runs for hours; being able to stop one — or have the machine stop it for
+        // you — and pick it up tomorrow is the difference between a feature somebody uses
+        // and one they start once.
+        var startedWith = resuming && _consolidationSession.Total > 0
+            ? _consolidationSession.Total
+            : toFile.Count;
+        _pausingConsolidation = false;
+        _consolidationSession = new ConsolidationSession
+        {
+            Status = ConsolidationSessionStatus.Running,
+            DeleteOriginal = deleteOriginal,
+            Total = startedWith,
+            PendingIds = toFile.Select(f => f.Id).ToList()
+        };
+        _consolidationSession.Save(_consolidationSessionPath);
+        OnPropertyChanged(nameof(CanResumeConsolidation));
+
+        // Everything the run has finished with, whatever became of it. A file it declined to
+        // file is still a file it has dealt with: resuming would decline it again.
+        var handled = new List<string>();
+
         var report = toFile.Count == 0
             ? new OperationReport(0, 0, new List<MediaFile>())
             : await RunFileOperationAsync(toFile, "Consolidating", async (file, bytes) =>
             {
+                // Paused: everything still to come stays exactly where it is, and stays on
+                // the list of what is left to do.
+                if (_pausingConsolidation)
+                    return new RelocationResult(false, "Paused.", file.FullPath);
+
                 if (run.Cancelled)
                     return new RelocationResult(false, "Cancelled.", file.FullPath);
+
+                handled.Add(file.Id);
+                if (handled.Count % 25 == 0) RecordConsolidationProgress(handled);
 
                 var category = CategoryResolver.Effective(file, _settings);
                 var destDir = ConsolidationPlanner.PlanDirectory(file, category, _settings);
@@ -2040,6 +2256,17 @@ public class MainViewModel : ObservableObject
                 var name = ConsolidationPlanner.PlanFileName(file, category, _settings);
                 return await FileInLibraryAsync(file, destDir, name, deleteOriginal, run, bytes);
             });
+
+        var paused = _pausingConsolidation && !run.Cancelled;
+        RecordConsolidationProgress(handled);
+        if (paused && _consolidationSession.PendingIds.Count > 0)
+        {
+            _consolidationSession.Status = ConsolidationSessionStatus.Paused;
+            _consolidationSession.Save(_consolidationSessionPath);
+        }
+        else ForgetConsolidationSession();
+        _pausingConsolidation = false;
+        OnPropertyChanged(nameof(CanResumeConsolidation));
 
         var tidied = await FinishCollisionRunAsync(run) + episodes.Removed;
         var skipped = unfiled + run.Skipped + episodes.Skipped;
@@ -2059,8 +2286,11 @@ public class MainViewModel : ObservableObject
         // litter from an operation the user asked for.
         var emptied = FindLeftovers(origins);
 
-        var failed = Math.Max(0, report.Failed - unfiled - run.Skipped);
+        // Files a pause left untouched are not failures — they are the rest of the job.
+        var leftForLater = paused ? _consolidationSession.PendingIds.Count : 0;
+        var failed = Math.Max(0, report.Failed - unfiled - run.Skipped - leftForLater);
         var parts = new List<string> { $"{report.Succeeded} moved" };
+        if (leftForLater > 0) parts.Add($"{leftForLater} left for later");
         if (folderMoves.Count > 0) parts.Add($"{folderMoves.Count} folder(s) put right in place");
         if (episodes.KeptInLibrary > 0)
             parts.Add($"{episodes.KeptInLibrary} already in the library as the same episode");
@@ -2071,7 +2301,11 @@ public class MainViewModel : ObservableObject
         if (failed > 0) parts.Add($"{failed} failed");
 
         var msg = "Consolidation: " + string.Join(", ", parts) +
-                  (run.Cancelled ? " (cancelled part-way)." : ".");
+                  (run.Cancelled ? " (cancelled part-way)." : ".") +
+                  (paused
+                      ? "\n\nPaused. The rest is remembered — including if you close the " +
+                        "program — and Scan → Resume consolidation picks it up where it stopped."
+                      : "");
         if (folderMoves.Count > 0)
             msg += "\n\n" + string.Join("\n", folderMoves.Take(10).Select(m => "    " + m.Describe()));
         if (episodes.Notes.Count > 0)
@@ -2855,6 +3089,13 @@ public class MainViewModel : ObservableObject
             .Select(set => AutoConsolidator.PreferLibraryCopy(set, destination, _settings))
             .ToList();
 
+        // Rules the user has written for this category replace the built-in judgement
+        // outright. Somebody who has said "the longer one, and if they run the same the
+        // better picture" has answered the question this method exists to ask, and answering
+        // it again our own way would be overruling them.
+        if (_settings.RulesFor(job.Category) is { Count: > 0 } rules)
+            return await SettleByRulesAsync(job, candidates, rules, review, ct);
+
         if (!CanAnalyze)
         {
             review.Add(new AutoReview(candidates[0],
@@ -2957,6 +3198,73 @@ public class MainViewModel : ObservableObject
         review.Add(new AutoReview(job.Files[0],
             "every copy of this failed its decode, so there is nothing sound left to file"));
         return (null, corrupt);
+    }
+
+    /// <summary>
+    /// Settle a set of rival copies with the steps the user wrote for the category.
+    ///
+    /// Whatever the steps need measuring is measured first — there is no point choosing on a
+    /// length nothing has read — and then the steps are applied in order, the first that can
+    /// tell the copies apart deciding. A set the steps cannot separate goes to the user with
+    /// the reason, exactly as one the built-in rules cannot separate does: a rule set that
+    /// runs out is not a licence to pick one at random.
+    /// </summary>
+    private async Task<(AutoDecision? Decision, int Corrupt)?> SettleByRulesAsync(
+        AutoJob job, List<MediaFile> candidates, IReadOnlyList<ConsolidationRule> rules,
+        List<AutoReview> review, CancellationToken ct)
+    {
+        await MeasureForRulesAsync(job.Category, candidates, rules, ct);
+
+        var verdict = ConsolidationRules.Choose(candidates, rules);
+        if (verdict.Winner is not { } keeper)
+        {
+            review.Add(new AutoReview(candidates[0],
+                $"the consolidation rules set for '{job.Category}' cannot choose between " +
+                $"{job.Distinct.Count} copies of this — {verdict.Why}"));
+            return null;
+        }
+
+        var doomed = job.Files
+            .Where(f => !ReferenceEquals(f, keeper) && File.Exists(f.FullPath))
+            .ToList();
+
+        return (new AutoDecision(keeper, doomed,
+            $"{job.Display}: kept {keeper.FileName} — {verdict.Why}."), 0);
+    }
+
+    /// <summary>
+    /// Read whatever the rules are about to ask for and nothing else: the length and quality
+    /// when a step compares them, a full decode when a step is about integrity or the
+    /// category asks for one, fingerprints when it asks for those.
+    ///
+    /// Doing only what is needed is the whole point. A deep check is minutes a file, and
+    /// running one to settle a rule set that never mentions integrity is minutes spent to
+    /// learn nothing.
+    /// </summary>
+    private async Task MeasureForRulesAsync(
+        string category, IReadOnlyList<MediaFile> candidates,
+        IReadOnlyList<ConsolidationRule> rules, CancellationToken ct)
+    {
+        if (!CanAnalyze) return;
+
+        var wantsProbe = rules.Any(r =>
+            r.Field is ConsolidationField.Length or ConsolidationField.Quality);
+        var wantsDeepCheck = _settings.DeepCheckFor(category) ||
+                             rules.Any(r => r.Field == ConsolidationField.Integrity);
+        var wantsFingerprint = _settings.FingerprintFor(category);
+
+        var unmeasured = candidates.Where(c =>
+            (wantsProbe && MediaProbe.NeedsProbe(c)) ||
+            (wantsFingerprint && NeedsFingerprint(c)) ||
+            (wantsDeepCheck && c.Integrity == IntegrityStatus.NotChecked)).ToList();
+        if (unmeasured.Count == 0) return;
+
+        StatusText = ProgressLine(
+            wantsDeepCheck ? "Deep checking the copies" : "Measuring the copies",
+            0, 0, unmeasured[0].FileName);
+
+        var engine = new ContentAnalysisEngine(_tools);
+        await engine.AnalyzeAsync(unmeasured, wantsFingerprint, wantsDeepCheck, null, ct);
     }
 
     /// <summary>What settling the same-title twins on our own came to.</summary>
@@ -3648,7 +3956,13 @@ public class MainViewModel : ObservableObject
                     UpdateEta(doneBytes, totalBytes);
                 });
 
+                var was = file.FullPath;
                 var result = await operation(file, bytes);
+
+                // Wherever it ended up, the catalogue's index says so before the next file
+                // is looked at: the one after this may collide with it, or share the folder
+                // it has just left.
+                _catalog.Note(file, was);
 
                 // Keep the tally honest whatever happened to this file.
                 doneBytes = fileStart + file.SizeBytes;
@@ -3659,11 +3973,12 @@ public class MainViewModel : ObservableObject
                 else
                 {
                     failed++;
-                    // "Cancelled." and "Skipped." are answers, not failures — the user
-                    // already knows what happened to those.
+                    // "Cancelled.", "Skipped." and "Paused." are answers, not failures — the
+                    // user already knows what happened to those.
                     if (result.Message is { Length: > 0 } why &&
                         !why.StartsWith("Cancelled", StringComparison.OrdinalIgnoreCase) &&
-                        !why.StartsWith("Skipped", StringComparison.OrdinalIgnoreCase))
+                        !why.StartsWith("Skipped", StringComparison.OrdinalIgnoreCase) &&
+                        !why.StartsWith("Paused", StringComparison.OrdinalIgnoreCase))
                         failures.Add(why);
                 }
             }
@@ -4122,12 +4437,25 @@ public class MainViewModel : ObservableObject
     public bool TmdbSupersededByImdb => HasImdbData;
 
     /// <summary>
-    /// Confirm titles and fill in missing years for the given rows (or the whole
-    /// catalogue when nothing is selected), IMDb first and TMDb only as a fallback.
+    /// Read the selected files again from scratch: the season and episode the current rules
+    /// make of the name and its folders, and then the title, confirmed against IMDb first and
+    /// TMDb only for what IMDb cannot answer.
+    ///
+    /// Re-deriving the numbering is the point of it being called Re-check rather than Verify
+    /// titles. The parsing rules gain cases with every release, and a file catalogued before
+    /// the rule that would have understood it existed keeps its blank Season/Episode for ever
+    /// otherwise — the whole-catalogue refresh only revisits entries that predate the current
+    /// build, and a file scanned by this one does not. This is how a user who can see that a
+    /// name plainly says S01E01 gets the program to look at it again.
+    ///
+    /// Numbering typed in by hand is left exactly as it was entered: see
+    /// <see cref="MediaClassifier.Classify"/>. A correction is not a guess to be made again.
     /// </summary>
     public async Task<string> VerifyTitlesAsync(IReadOnlyList<FileRow> rows)
     {
         var targets = (rows.Count > 0 ? rows.Select(r => r.Model) : _catalog.Files).ToList();
+
+        var renumbered = RederiveNumbering(targets);
 
         _cts = new CancellationTokenSource();
         IsScanning = true;
@@ -4149,7 +4477,7 @@ public class MainViewModel : ObservableObject
             var report = await verifier.VerifyAsync(targets, progress, _cts.Token);
             _tmdbCache.Save(_tmdbCachePath);
             CatalogStore.Save(_catalog, _catalogPath);
-            StatusText = report.Describe();
+            StatusText = report.Describe() + DescribeRenumbering(renumbered);
         }
         catch (OperationCanceledException)
         {
@@ -4170,6 +4498,52 @@ public class MainViewModel : ObservableObject
             RebuildRows();
         }
         return StatusText;
+    }
+
+    /// <summary>
+    /// Read the name and the folders of each file again with the current rules, and hand
+    /// back the ones whose season/episode changed — including the ones that had none and now
+    /// have one, which is the case this exists for.
+    /// </summary>
+    private List<(MediaFile File, string Was, string Now)> RederiveNumbering(
+        IReadOnlyList<MediaFile> targets)
+    {
+        var changed = new List<(MediaFile, string, string)>();
+
+        foreach (var file in targets)
+        {
+            var was = file.NumberingDisplay;
+            var wasCategory = file.VideoCategory;
+
+            MediaClassifier.Classify(file, _settings);
+            file.FeatureVersion = CatalogRefresher.CurrentFeatureVersion;
+
+            var now = file.NumberingDisplay;
+            if (!string.Equals(was, now, StringComparison.Ordinal) || wasCategory != file.VideoCategory)
+                changed.Add((file, was, now));
+        }
+
+        // A number read out of a name means one thing on a programme and nothing at all on
+        // anything else, so the same tidy-up the catalogue refresh does applies here.
+        MetadataNormaliser.StripNonTvNumbering(targets, f => CategoryResolver.Effective(f, _settings));
+        ExtraLinker.Link(_catalog.Files);
+        return changed;
+    }
+
+    /// <summary>What the re-derivation found, in a line, or nothing when it found nothing.</summary>
+    private static string DescribeRenumbering(IReadOnlyList<(MediaFile File, string Was, string Now)> changed)
+    {
+        var numbered = changed.Where(c => c.Now.Length > 0 && c.Was.Length == 0).ToList();
+        if (changed.Count == 0) return "\n\nNothing was read differently by the current rules.";
+
+        var lines = changed.Take(10)
+            .Select(c => $"    {c.File.FileName} — {(c.Was.Length == 0 ? "nothing" : c.Was)} → " +
+                         $"{(c.Now.Length == 0 ? "nothing" : c.Now)}");
+
+        return $"\n\n{changed.Count} file(s) read differently by the current rules" +
+               (numbered.Count > 0 ? $", {numbered.Count} of them numbered for the first time" : "") +
+               ":\n\n" + string.Join("\n", lines) +
+               (changed.Count > 10 ? $"\n    …and {changed.Count - 10} more" : "");
     }
 
     // --- TMDb validation --------------------------------------------------

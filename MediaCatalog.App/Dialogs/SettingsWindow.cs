@@ -55,6 +55,15 @@ public class SettingsWindow : Window
         public required TextBox Folder { get; init; }
         public required TextBox NameTemplate { get; init; }
         public required FrameworkElement Container { get; init; }
+
+        /// <summary>Whether this category's files are sorted into A–Z folders.</summary>
+        public required CheckBox Letters { get; init; }
+
+        /// <summary>
+        /// The steps that choose between two copies, as the wizard left them. Held on the row
+        /// rather than written straight back, so Cancel on the settings window means Cancel.
+        /// </summary>
+        public ConsolidationRuleSet Rules { get; set; } = new();
     }
 
     private readonly AppSettings _incoming;
@@ -122,6 +131,29 @@ public class SettingsWindow : Window
     {
         Content = "Automatically exclude system directories (Windows, Program Files, $Recycle.Bin, …)"
     };
+    private readonly CheckBox _explainEverything = new()
+    {
+        Content = "Explain everything",
+        Margin = new Thickness(2, 0, 0, 8),
+        ToolTip = "Show the full explanation under every setting. With this off, each group " +
+                  "can still be opened on its own with its Why? button, and hovering any " +
+                  "setting shows a line about it."
+    };
+
+    /// <summary>
+    /// Whether the TMDb credentials are on show. Off by default: the local IMDb extract
+    /// answers everything TMDb would be asked, in one pass rather than one query every two
+    /// seconds, so for almost everybody these are two boxes that will never be filled in.
+    /// </summary>
+    private readonly CheckBox _showTmdb = new()
+    {
+        Content = "Show the TMDb settings, and the Validate TV (TMDb) command (deprecated)",
+        ToolTip = "Brings back the TMDb credentials here and the Validate TV (TMDb) command " +
+                  "on the Tools menu. Only worth it if you have no local IMDb data."
+    };
+
+    private GroupBox? _tmdbGroup;
+
     private readonly ComboBox _redundantRules = new() { Width = 260 };
 
     // --- Deleting ---
@@ -257,9 +289,21 @@ public class SettingsWindow : Window
         _tabs.Items.Add(Tab("Categories", CategoriesTab()));
         _tabs.Items.Add(Tab("External tools", ToolsTab()));
         _tabs.Items.Add(Tab("Data sources", DataTab()));
+
+        // The one switch for the prose, above the tabs where it governs all of them. Every
+        // group can still be opened on its own with its "Why?" button, and hovering any
+        // setting says the short form whatever this is set to.
+        _explainEverything.IsChecked = settings.ShowSettingsExplanations;
+        _explainEverything.Checked += (_, _) => ShowAllHints(true);
+        _explainEverything.Unchecked += (_, _) => ShowAllHints(false);
+        DockPanel.SetDock(_explainEverything, Dock.Top);
+        root.Children.Add(_explainEverything);
+
         root.Children.Add(_tabs);
 
         Content = root;
+
+        if (settings.ShowSettingsExplanations) ShowAllHints(true);
 
         // Esc closes, as it would for a modal dialog.
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
@@ -312,6 +356,7 @@ public class SettingsWindow : Window
         _capitaliseTitles.IsChecked = settings.CapitaliseTitles;
         _articleLast.IsChecked = settings.SortLeadingArticleLast;
         _probeDuringScan.IsChecked = settings.ProbeDuringScan;
+        _showTmdb.IsChecked = settings.ShowTmdbSettings;
 
         _scanFilter.ItemsSource = Enum.GetValues(typeof(ScanMediaFilter));
         _scanFilter.SelectedItem = settings.ScanMediaFilter;
@@ -836,7 +881,11 @@ public class SettingsWindow : Window
                  "and only this can say the season ran to thirteen."),
             ExtractYearEditor()));
 
-        panel.Children.Add(Group("themoviedb.org — the online fallback (deprecated)",
+        // TMDb is on its way out, so it is out of the way: one tick-box, and the credentials
+        // only for somebody who says they want them. Nothing is lost by hiding it — a key
+        // already entered goes on working, and ticking the box brings both the boxes and the
+        // Validate TV command back.
+        _tmdbGroup = Group("themoviedb.org — the online fallback (deprecated)",
             Warning("Only used when IMDBData.tsv does not exist. TMDb answers one query every two " +
                     "seconds, so a library of any size spends hours there to reach an answer the " +
                     "local extract gives in a single pass — which makes \"use both\" a choice nobody " +
@@ -845,7 +894,19 @@ public class SettingsWindow : Window
             Labeled("API key (v3):", _apiKey, 110),
             Labeled("Read token (v4):", _readToken, 110),
             Hint("Get free credentials at themoviedb.org → account settings → API. Either the v4 " +
-                 "Read Access Token or the v3 API Key works (the token is preferred).")));
+                 "Read Access Token or the v3 API Key works (the token is preferred)."));
+
+        _tmdbGroup.Visibility = _showTmdb.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        _showTmdb.Checked += (_, _) => _tmdbGroup.Visibility = Visibility.Visible;
+        _showTmdb.Unchecked += (_, _) => _tmdbGroup.Visibility = Visibility.Collapsed;
+
+        panel.Children.Add(Group("themoviedb.org", _showTmdb,
+            Hint("The online fallback, kept for the few libraries that have no local IMDb data. " +
+                 "Hidden by default because for everybody else it is two boxes that will never be " +
+                 "filled in and a command that would take hours to reach an answer the local " +
+                 "extract gives in one pass. Tick this to enter credentials and to bring the " +
+                 "Validate TV (TMDb) command back onto the Tools menu.")));
+        panel.Children.Add(_tmdbGroup);
 
         return panel;
     }
@@ -853,24 +914,69 @@ public class SettingsWindow : Window
     // --- Layout helpers ---------------------------------------------------
 
     /// <summary>
-    /// One titled box of related settings. Boxes rather than bold headings because these
-    /// tabs have grown long enough that a heading alone no longer says where one group of
-    /// options stops and the next begins.
+    /// One titled box of related settings, with a way in to whatever the box has to explain.
+    ///
+    /// The explanations are worth having and there are a great many of them, which is exactly
+    /// the difficulty: a tab that says four hundred words at somebody who came to tick one box
+    /// is a tab nobody reads. So each box keeps its own prose folded away behind a "Why?"
+    /// button, and the setting it belongs to carries the first sentence of it as a tooltip —
+    /// enough to answer the question while the pointer is already there.
     /// </summary>
-    private static GroupBox Group(string header, params UIElement[] children)
+    private GroupBox Group(string header, params UIElement[] children)
     {
         var panel = new StackPanel();
+        var hints = new List<TextBlock>();
+        UIElement? previous = null;
+
         foreach (var child in children)
         {
             // Even spacing for the tick-boxes, without flattening an indent a caller has
             // deliberately given one ("…and start hidden" hanging off the option above it).
             if (child is CheckBox cb) cb.Margin = new Thickness(cb.Margin.Left, 3, 0, 3);
+
+            if (child is TextBlock { Tag: HintTag } hint)
+            {
+                hints.Add(hint);
+                // The control the hint is about is the one above it. Hovering that is the
+                // other half of the bargain: the long form is folded away, so the short form
+                // has to be where the pointer already is.
+                if (previous is FrameworkElement { ToolTip: null } target)
+                    target.ToolTip = FirstSentence(hint.Text);
+            }
+            else previous = child;
+
             panel.Children.Add(child);
+        }
+
+        var title = new StackPanel { Orientation = Orientation.Horizontal };
+        title.Children.Add(new TextBlock { Text = header, VerticalAlignment = VerticalAlignment.Center });
+
+        if (hints.Count > 0)
+        {
+            var why = new Button
+            {
+                Content = "Why?",
+                Padding = new Thickness(6, 0, 6, 0),
+                Margin = new Thickness(8, 0, 0, 0),
+                FontSize = 10,
+                ToolTip = "Show what these settings are for, in full."
+            };
+
+            void Apply(bool showing)
+            {
+                foreach (var h in hints)
+                    h.Visibility = showing ? Visibility.Visible : Visibility.Collapsed;
+                why.Content = showing ? "Hide" : "Why?";
+            }
+
+            why.Click += (_, _) => Apply(hints[0].Visibility != Visibility.Visible);
+            _hintToggles.Add(Apply);
+            title.Children.Add(why);
         }
 
         return new GroupBox
         {
-            Header = header,
+            Header = title,
             Margin = new Thickness(0, 0, 0, 10),
             Padding = new Thickness(8, 4, 8, 8),
             Content = panel
@@ -884,11 +990,41 @@ public class SettingsWindow : Window
         TextWrapping = TextWrapping.Wrap, Margin = new Thickness(20, 2, 0, 4)
     };
 
+    /// <summary>Marks a text block as an explanation, so <see cref="Group"/> can fold it away.</summary>
+    private const string HintTag = "hint";
+
+    /// <summary>
+    /// One switch per group, so the "Explain everything" tick-box can open the lot and leave
+    /// each group's own button saying the right thing.
+    /// </summary>
+    private readonly List<Action<bool>> _hintToggles = new();
+
     private static TextBlock Hint(string text) => new()
     {
         Text = text, Foreground = System.Windows.Media.Brushes.Gray,
-        TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0)
+        TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0),
+        Tag = HintTag, Visibility = Visibility.Collapsed
     };
+
+    /// <summary>
+    /// As much of an explanation as belongs in a tooltip: the first sentence of it. A tooltip
+    /// holding six paragraphs is a tooltip that covers the window it is explaining.
+    /// </summary>
+    private static string FirstSentence(string text)
+    {
+        var trimmed = (text ?? string.Empty).Trim();
+        if (trimmed.Length == 0) return string.Empty;
+
+        var stop = trimmed.IndexOf(". ", StringComparison.Ordinal);
+        var sentence = stop > 0 ? trimmed[..(stop + 1)] : trimmed;
+        return sentence.Length <= 240 ? sentence : sentence[..237].TrimEnd() + "…";
+    }
+
+    /// <summary>Show or hide every explanation on every tab at once.</summary>
+    private void ShowAllHints(bool show)
+    {
+        foreach (var toggle in _hintToggles) toggle(show);
+    }
 
     private static FrameworkElement Labeled(string label, FrameworkElement control, double labelWidth = 90)
     {
@@ -1387,7 +1523,18 @@ public class SettingsWindow : Window
         wrap.Children.Add(_catFolderPanel);
 
         foreach (var cf in settings.CategoryFolders)
-            AddCategoryFolderRow(cf.Category, cf.Folder, cf.NameTemplate);
+            AddCategoryFolderRow(cf.Category, cf.Folder, cf.NameTemplate,
+                cf.UseLetterFolders ?? AppSettings.IsBucketedByDefault(cf.Category),
+                new ConsolidationRuleSet
+                {
+                    MatchBy = cf.MatchBy,
+                    Rules = cf.Rules.Select(r => new ConsolidationRule
+                    {
+                        Field = r.Field, Prefer = r.Prefer, Tolerance = r.Tolerance
+                    }).ToList(),
+                    DeepCheck = cf.DeepCheckBeforeConsolidating,
+                    Fingerprint = cf.FingerprintBeforeConsolidating
+                });
         if (_catFolders.Count == 0)
         {
             // A fresh install starts with the two categories everyone consolidates — and
@@ -1396,8 +1543,8 @@ public class SettingsWindow : Window
             // install: filling the box in for a library that has already been filed under
             // the built-in naming would quietly rename everything the next time it was
             // consolidated, which is not a thing to do to somebody on their behalf.
-            AddCategoryFolderRow("TvShow", settings.TvConsolidationDir, SuggestedTemplate("TvShow"));
-            AddCategoryFolderRow("Movie", settings.FilmConsolidationDir, SuggestedTemplate("Movie"));
+            AddCategoryFolderRow("TvShow", settings.TvConsolidationDir, SuggestedTemplate("TvShow"), true);
+            AddCategoryFolderRow("Movie", settings.FilmConsolidationDir, SuggestedTemplate("Movie"), true);
         }
 
         var add = new Button
@@ -1405,12 +1552,14 @@ public class SettingsWindow : Window
             Content = "Add category folder", Width = 150,
             HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0)
         };
-        add.Click += (_, _) => AddCategoryFolderRow("", "", "");
+        add.Click += (_, _) => AddCategoryFolderRow("", "", "", false);
         wrap.Children.Add(add);
         return wrap;
     }
 
-    private void AddCategoryFolderRow(string category, string folder, string nameTemplate)
+    private void AddCategoryFolderRow(
+        string category, string folder, string nameTemplate,
+        bool letterFolders, ConsolidationRuleSet? rules = null)
     {
         var rows = new StackPanel { Margin = new Thickness(0, 4, 0, 6) };
         var dp = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
@@ -1490,10 +1639,66 @@ public class SettingsWindow : Window
         nameBox.TextChanged += (_, _) => ShowPreview();
         ShowPreview();
 
+        // The third line: how the folder is laid out inside, and how this category chooses
+        // between two copies of one thing.
+        var options = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(136, 2, 0, 2)
+        };
+
+        var letters = new CheckBox
+        {
+            Content = "sorted A–Z",
+            IsChecked = letterFolders,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 12, 0),
+            ToolTip = "File into a first-letter subfolder — A to Z, or # for a title beginning " +
+                      "with a digit — inside the folder above. This is what films and " +
+                      "programmes have always done; any category can do it, and either of " +
+                      "them can be told to stop."
+        };
+        options.Children.Add(letters);
+
         var row = new CatFolderRow
         {
-            Category = combo, Folder = box, NameTemplate = nameBox, Container = rows
+            Category = combo, Folder = box, NameTemplate = nameBox, Container = rows,
+            Letters = letters,
+            Rules = rules ?? new ConsolidationRuleSet()
         };
+
+        var summary = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = System.Windows.Media.Brushes.Gray,
+            Margin = new Thickness(8, 0, 0, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 260
+        };
+        void ShowRules() => summary.Text = row.Rules.Summarise();
+
+        var rulesButton = new Button
+        {
+            Content = "Rules…",
+            Padding = new Thickness(10, 2, 10, 2),
+            ToolTip = "Build the steps that decide which of two copies of one thing this " +
+                      "category keeps — with a worked example that says which of two sample " +
+                      "files your steps would file."
+        };
+        rulesButton.Click += (_, _) =>
+        {
+            var name = combo.Text.Trim();
+            var wizard = new ConsolidationRulesWizard(
+                name.Length == 0 ? "this category" : name, row.Rules)
+            { Owner = this };
+            if (wizard.ShowDialog() != true || wizard.Result == null) return;
+            row.Rules = wizard.Result;
+            ShowRules();
+        };
+        options.Children.Add(rulesButton);
+        options.Children.Add(summary);
+        ShowRules();
+
         remove.Click += (_, _) =>
         {
             _catFolders.Remove(row);
@@ -1502,6 +1707,7 @@ public class SettingsWindow : Window
 
         rows.Children.Add(dp);
         rows.Children.Add(namePanel);
+        rows.Children.Add(options);
         _catFolders.Add(row);
         _catFolderPanel.Children.Add(rows);
     }
@@ -1731,7 +1937,14 @@ public class SettingsWindow : Window
             folders.RemoveAll(f => string.Equals(f.Category, category, StringComparison.OrdinalIgnoreCase));
             folders.Add(new CategoryConsolidation
             {
-                Category = category, Folder = folder, NameTemplate = row.NameTemplate.Text.Trim()
+                Category = category,
+                Folder = folder,
+                NameTemplate = row.NameTemplate.Text.Trim(),
+                UseLetterFolders = row.Letters.IsChecked == true,
+                MatchBy = row.Rules.MatchBy,
+                Rules = row.Rules.Rules,
+                DeepCheckBeforeConsolidating = row.Rules.DeepCheck,
+                FingerprintBeforeConsolidating = row.Rules.Fingerprint
             });
         }
 
@@ -1790,7 +2003,10 @@ public class SettingsWindow : Window
             FolderCategoryRules = _incoming.FolderCategoryRules, // preserved
             FolderTitleRules = _incoming.FolderTitleRules,
             ScanDrives = _incoming.ScanDrives,                   // owned by the scan wizard
-            ScanWizardCompleted = _incoming.ScanWizardCompleted
+            ScanWizardCompleted = _incoming.ScanWizardCompleted,
+            ShowSettingsExplanations = _explainEverything.IsChecked == true,
+            ShowTmdbSettings = _showTmdb.IsChecked == true,
+            ShowRedundantCommands = _incoming.ShowRedundantCommands  // owned by the menu
         };
         result.SyncLegacyFolders();
 

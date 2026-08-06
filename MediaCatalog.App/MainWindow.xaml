@@ -21,71 +21,101 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Toolbar -->
-        <ToolBarTray Grid.Row="0">
-            <ToolBar>
-                <Button Content="Scan…" Command="{Binding ScanCommand}" Padding="12,2" FontWeight="Bold"
-                        ToolTip="Open the scan wizard: which drives and folders to walk, what to pick up, and whether to add to the catalogue or start again."/>
-                <Button Content="Pause" Command="{Binding PauseCommand}" Padding="8,2"
-                        ToolTip="Stop the scan but keep all progress; resume later."/>
-                <Button Content="Resume" Command="{Binding ResumeCommand}" Padding="8,2"
-                        ToolTip="Continue a previously paused scan from where it stopped."/>
-                <Button Content="Cancel" Command="{Binding CancelCommand}" Padding="8,2"
-                        ToolTip="Stop the scan and discard the resumable session."/>
+        <!-- The menu.
+
+             This was a toolbar of twenty-odd buttons, which is a row nobody reads: the
+             headline features sat between "Re-hash pending" and "Deep check folder", and the
+             overflow chevron swallowed whichever of them the window was too narrow for. Four
+             menus say the same thing in the shape people already know — everything about
+             scanning under Scan, everything that acts on the library under Library, the
+             measuring tools under Tools — and leave the window to the results.
+
+             What is on its way out is not deleted: it is gathered under Tools → Redundant,
+             where each command says, on hover, why it is expected to go. -->
+        <Menu Grid.Row="0" x:Name="MainMenu">
+            <MenuItem Header="_Scan">
+                <MenuItem Header="Scan…" Command="{Binding ScanCommand}" FontWeight="Bold"
+                          ToolTip="Open the scan wizard: which drives and folders to walk, what to pick up, and whether to add to the catalogue or start again."/>
+                <MenuItem Header="Scan a folder…" Click="OnScanFolderClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Add one folder to the catalogue without re-scanning whole drives."/>
                 <Separator/>
-                <TextBlock Text="View:" VerticalAlignment="Center" Margin="4,0"/>
-                <ComboBox ItemsSource="{Binding FilterModes}"
-                          SelectedItem="{Binding SelectedFilter}"
-                          Width="120" VerticalAlignment="Center"/>
-                <Button x:Name="ScanFolderButton" Content="Scan folder…"
-                        Click="OnScanFolderClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Add one folder to the catalogue without re-scanning whole drives."/>
+                <MenuItem Header="Pause" Command="{Binding PauseCommand}"
+                          ToolTip="Stop what is running but keep all progress. A scan can be resumed from where it stopped; so can a consolidation, including after the program has been closed."/>
+                <MenuItem Header="Resume scan" Command="{Binding ResumeCommand}"
+                          ToolTip="Continue a previously paused scan from where it stopped."/>
+                <MenuItem Header="Resume consolidation" Click="OnResumeConsolidationClick"
+                          IsEnabled="{Binding CanResumeConsolidation}"
+                          ToolTip="Continue filing the library where the last run left off. A consolidation that was paused — or interrupted by the program closing — remembers what it still had to do."/>
+                <MenuItem Header="Cancel" Command="{Binding CancelCommand}"
+                          ToolTip="Stop, and forget the resumable session. What has already been done stays done."/>
                 <Separator/>
-                <Button x:Name="UndoButton" Content="Undo" Click="OnUndoClick" Padding="8,2"
-                        IsEnabled="{Binding IsIdle}"
-                        ToolTip="Reverse the last operation (up to ten are remembered)."/>
+                <MenuItem Header="Refresh catalogue" Click="OnRefreshCatalogClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Re-derive metadata for entries that predate the current features. Entries already up to date are skipped — nothing is re-scanned or re-hashed."/>
+                <MenuItem Header="Re-hash pending" Click="OnRehashClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Re-hash files that were catalogued while they may still have been downloading."/>
+            </MenuItem>
+
+            <MenuItem Header="_Library">
+                <MenuItem Header="Consolidate selected…" Click="OnConsolidateClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Move the selected TV and films into the structured library folders."/>
+                <MenuItem Header="Auto-consolidate…" Click="OnAutoConsolidateClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="File everything that can be decided without you, and list what cannot. Files with no other copy are simply filed; identical copies keep one and delete the rest; genuinely different copies of one thing are fingerprinted, ranked by quality and deep-checked, and the sound one is kept."/>
                 <Separator/>
-                <Button x:Name="RelocateButton" Content="Relocate…"
-                        Click="OnRelocateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
-                <CheckBox x:Name="DeleteOriginalCheck" Content="Delete after verify"
-                          VerticalAlignment="Center" Margin="6,0"
-                          ToolTip="Applies to Relocate: with this ticked the original is deleted once the copy has been verified, making it a move rather than a copy. Consolidating is always a move — it exists to leave one copy, in the library."/>
-                <Button x:Name="RenameButton" Content="Rename…"
-                        Click="OnRenameClick" Padding="8,2" IsEnabled="{Binding IsIdle}"/>
-                <Button x:Name="ConsolidateButton" Content="Consolidate…"
-                        Click="OnConsolidateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolBar.OverflowMode="Never"
-                        ToolTip="Move selected TV/films into the structured library folders."/>
-                <!-- Pinned beside its manual twin: a headline feature that hides in the
-                     overflow chevron is a feature nobody finds. -->
-                <Button x:Name="AutoConsolidateButton" Content="Auto-consolidate…"
-                        Click="OnAutoConsolidateClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolBar.OverflowMode="Never"
-                        ToolTip="File everything that can be decided without you, and list what cannot. Files with no other copy are simply filed; identical copies keep one and delete the rest; genuinely different copies of one thing are fingerprinted, ranked by quality and deep-checked, and the sound one is kept."/>
+                <MenuItem Header="Rename to match the catalogue…" Click="OnRenameClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Rename the selected files — or everything in view — to the names their titles and numbering imply. Every proposal is shown before anything happens."/>
+                <MenuItem Header="Fix doubled episode numbers in a folder…" Click="OnFixNamesClick"
+                          IsEnabled="{Binding IsIdle}"
+                          ToolTip="Look through a folder for episodes whose name carries its number twice — '01 - 01 - Wheel Of Fortune.mkv' — and put them back to one. Reaches files whether or not they are catalogued."/>
+                <MenuItem Header="Undo" x:Name="UndoMenuItem" Click="OnUndoClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Reverse the last operation (up to ten are remembered)."/>
                 <Separator/>
-                <Button x:Name="AnalyzeButton" Content="Fingerprint"
-                        Click="OnAnalyzeClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Compute audio/video fingerprints to find the same content across encodings."/>
-                <Button x:Name="DeepCheckButton" Content="Deep check"
-                        Click="OnDeepCheckClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Fully decode files with FFmpeg to detect corruption (slow)."/>
-                <Button x:Name="DeepCheckFolderButton" Content="Deep check folder…"
-                        Click="OnDeepCheckFolderClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Deep check every media file in a folder and its subfolders, catalogued or not."/>
-                <Button x:Name="VerifyTitlesButton" Content="Verify titles"
-                        Click="OnVerifyTitlesClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Confirm film and programme titles, and fill in missing years, against the local IMDb data — falling back to TMDb only for what IMDb cannot answer."/>
-                <Button x:Name="ValidateTvButton" Content="Validate TV (TMDb)"
-                        Click="OnValidateTvClick" Padding="8,2" IsEnabled="{Binding IsIdle}"
-                        ToolTip="Validate TV show names against themoviedb.org only."/>
+                <MenuItem Header="Possible duplicates…" Click="OnShowTitleDuplicates" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Files claiming the same title and year without being the same bytes — the same thing downloaded twice from two different releases, which a content hash cannot see."/>
+                <MenuItem Header="Purge filed duplicates…" Click="OnPurgeConsolidatedDuplicatesClick"
+                          IsEnabled="{Binding IsIdle}"
+                          ToolTip="Delete every stray copy of a file that is already filed in the library. The library copy is kept; you choose the Recycle Bin or a permanent delete."/>
+                <MenuItem Header="Missing episodes…" Click="OnMissingEpisodesClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Look through the consolidated programmes for episodes that are not there. A gap in the middle of a season needs nothing but the files to find; the missing tail needs the IMDb episode data, since a folder holding episodes 1 to 12 looks complete from the inside."/>
                 <Separator/>
-                <!-- Pinned: these must never disappear into the toolbar's overflow arrow. -->
-                <Button x:Name="SettingsButton" Content="Settings…" Click="OnSettingsClick" Padding="8,2"
-                        ToolBar.OverflowMode="Never"/>
-                <Button x:Name="AboutButton" Content="About" Click="OnAboutClick" Padding="8,2"
-                        ToolBar.OverflowMode="Never" ToolTip="Version and credits."/>
-            </ToolBar>
-        </ToolBarTray>
+                <MenuItem Header="Missing files…" Click="OnMissingFilesClick"
+                          Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
+                <MenuItem Header="Unhashed files…" Click="OnUnhashedFilesClick" IsEnabled="{Binding IsIdle}"
+                          Visibility="{Binding HasUnhashedFiles, Converter={StaticResource BoolToVis}}"
+                          ToolTip="Files the scan could not read to hash. Without a hash they are invisible to duplicate detection."/>
+            </MenuItem>
+
+            <MenuItem Header="_Tools">
+                <MenuItem Header="Re-check" Click="OnVerifyTitlesClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Read the selected files again from scratch: the season and episode the current rules make of the name and its folders, then the title and year against the local IMDb data. This is how a file catalogued before a parsing rule existed gets the benefit of it."/>
+                <MenuItem Header="Deep check…" Click="OnDeepCheckClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Fully decode the selected files with FFmpeg to detect corruption (slow)."/>
+                <MenuItem Header="Deep check a folder…" Click="OnDeepCheckFolderClick" IsEnabled="{Binding IsIdle}"
+                          ToolTip="Deep check every media file in a folder and its subfolders, catalogued or not."/>
+                <Separator/>
+                <MenuItem Header="Columns…" Click="OnColumnsClick"
+                          ToolTip="Choose which columns the results show."/>
+                <MenuItem Header="Settings…" Click="OnSettingsClick"/>
+                <Separator/>
+                <!-- Not deleted, and not in anybody's way either. Each of these does something
+                     another command now does better; hovering one says what and why. -->
+                <MenuItem Header="Redundant" x:Name="RedundantMenu"
+                          ToolTip="Commands that something else now does better, kept for the moment and expected to go in a later version. Hover any of them for the reason.">
+                    <MenuItem Header="Relocate…" Click="OnRelocateClick" IsEnabled="{Binding IsIdle}"
+                              ToolTip="Copy or move the selected files to a folder you choose.&#10;&#10;Why it is here: 'Move to folder…' on the right-click menu does the same thing and asks better questions — it offers to bring the rest of the folder along, and says what will be left behind. This one needed a separate tick-box on the toolbar to say whether it was a copy or a move."/>
+                    <MenuItem Header="Suggest consolidation…" Click="OnSuggestConsolidationClick" IsEnabled="{Binding IsIdle}"
+                              ToolTip="List the files that could be filed, and file the ones you tick.&#10;&#10;Why it is here: Auto-consolidate does the same analysis, then settles the copies it can and tells you plainly what it could not. This one can only suggest, so everything it finds still has to be decided one row at a time."/>
+                    <MenuItem Header="Fingerprint everything" Click="OnAnalyzeClick" IsEnabled="{Binding IsIdle}"
+                              ToolTip="Compute audio and video fingerprints across the catalogue.&#10;&#10;Why it is here: consolidation fingerprints what it needs at the moment it needs it. Doing the whole library up front is hours of decoding spent answering a question nobody has asked yet."/>
+                    <MenuItem Header="Validate TV (TMDb)" x:Name="ValidateTvMenuItem"
+                              Click="OnValidateTvClick" IsEnabled="{Binding IsIdle}"
+                              ToolTip="Confirm TV titles against themoviedb.org.&#10;&#10;Why it is here: the local IMDb extract answers the same question in one pass, where TMDb allows one query every two seconds — hours for a library of any size. It is hidden unless you turn on Settings → Data sources → Show the TMDb settings."/>
+                </MenuItem>
+            </MenuItem>
+
+            <MenuItem Header="_Help">
+                <MenuItem Header="About" Click="OnAboutClick" ToolTip="Version and credits."/>
+            </MenuItem>
+        </Menu>
 
         <!-- Filter bar. A ToolBar rather than a horizontal StackPanel: a StackPanel gives
              every child the width it asks for and then clips at the window edge, so the
@@ -123,30 +153,27 @@
                             ToolTip="Stack this as an additional filter. Filters on different columns all apply at once — year and then name, path and then Season/Episode — and several on one column narrow it further. Enter in the box does the same."/>
                     <Button Content="Clear all" Click="OnClearFilter" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
                     <Separator/>
-                    <Button Content="Columns…" Click="OnColumnsClick" Padding="8,1" Margin="2,0" VerticalAlignment="Center"/>
-                    <Button Content="Suggest consolidation…" Click="OnSuggestConsolidationClick" Padding="8,1" Margin="2,0"
-                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"/>
-                    <Button Content="Possible duplicates…" Click="OnShowTitleDuplicates" Padding="8,1" Margin="2,0"
+                    <!-- The view selector belongs with the filters and nowhere else: it is a
+                         filter, and the only reason it used to sit on the toolbar is that
+                         the toolbar was where everything sat. -->
+                    <TextBlock Text="View:" VerticalAlignment="Center" Margin="4,0"
+                               ToolBar.OverflowMode="Never"/>
+                    <ComboBox ItemsSource="{Binding FilterModes}"
+                              SelectedItem="{Binding SelectedFilter}"
+                              Width="130" VerticalAlignment="Center" Margin="2,0"
+                              ToolBar.OverflowMode="Never"
+                              ToolTip="Narrow the results to one sort of file — video, films, programmes, extras, duplicates, or the ones something is still missing from."/>
+                    <Separator/>
+                    <!-- The two headline actions, and only those: everything else moved to
+                         the menu above. These are what a session is spent doing. -->
+                    <Button Content="Consolidate…" Click="OnConsolidateClick" Padding="10,1" Margin="2,0"
                             VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                            ToolTip="Files claiming the same title and year without being the same bytes — the same thing downloaded twice from two different releases, which a content hash cannot see."/>
-                    <Button Content="Missing episodes…" Click="OnMissingEpisodesClick" Padding="8,1" Margin="2,0"
+                            FontWeight="Bold" ToolBar.OverflowMode="Never"
+                            ToolTip="Move the selected TV and films into the structured library folders."/>
+                    <Button Content="Auto-consolidate…" Click="OnAutoConsolidateClick" Padding="10,1" Margin="2,0"
                             VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                            ToolTip="Look through the consolidated programmes for episodes that are not there. A gap in the middle of a season needs nothing but the files to find; the missing tail needs the IMDb episode data, since a folder holding episodes 1 to 12 looks complete from the inside."/>
-                    <Button Content="Purge filed duplicates…" Click="OnPurgeConsolidatedDuplicatesClick" Padding="8,1" Margin="2,0"
-                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                            ToolTip="Delete every stray copy of a file that is already filed in the library. The library copy is kept; you choose the Recycle Bin or a permanent delete."/>
-                    <Button x:Name="RefreshCatalogButton" Content="Refresh catalogue" Click="OnRefreshCatalogClick"
-                            Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                            ToolTip="Re-derive metadata for entries that predate the current features. Entries already up to date are skipped — nothing is re-scanned or re-hashed."/>
-                    <Button x:Name="RehashButton" Content="Re-hash pending" Click="OnRehashClick"
-                            Padding="8,1" Margin="2,0" VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                            ToolTip="Re-hash files that were catalogued while they may still have been downloading."/>
-                    <Button Content="Missing files…" Click="OnMissingFilesClick" Padding="8,1" Margin="8,0"
-                            VerticalAlignment="Center" Visibility="{Binding HasMissingFiles, Converter={StaticResource BoolToVis}}"/>
-                    <Button Content="Unhashed files…" Click="OnUnhashedFilesClick" Padding="8,1" Margin="2,0"
-                            VerticalAlignment="Center" IsEnabled="{Binding IsIdle}"
-                            Visibility="{Binding HasUnhashedFiles, Converter={StaticResource BoolToVis}}"
-                            ToolTip="Files the scan could not read to hash. Without a hash they are invisible to duplicate detection."/>
+                            ToolBar.OverflowMode="Never"
+                            ToolTip="File everything that can be decided without you, and list what cannot."/>
                 </ToolBar>
             </ToolBarTray>
             <!-- The filters in force, all at once. Several columns can be stacked — year and
@@ -209,7 +236,10 @@
                                   ToolTip="Read the container header of the selected files for their length, quality and health. Quick — unlike a deep check, which decodes the whole file."/>
                         <MenuItem Header="Show duplicates of this file…" Click="OnShowDuplicates"/>
                         <MenuItem Header="Consolidate selected…" Click="OnConsolidateClick"/>
-                        <MenuItem Header="Validate TV name (TMDb)" Click="OnValidateTvSelected"/>
+                        <MenuItem Header="Re-check (title, season and episode)" Click="OnVerifyTitlesClick"
+                                  ToolTip="Read these files again from scratch with the current rules — the season and episode from the name and its folders, then the title against the local IMDb data."/>
+                        <MenuItem Header="Validate TV name (TMDb)" x:Name="ValidateTvContextItem"
+                                  Click="OnValidateTvSelected"/>
                         <Separator/>
                         <MenuItem Header="Exclude this folder from results…" Click="OnExcludeFolder"/>
                         <MenuItem Header="Ignore this file type (removes + skips future scans)" Click="OnIgnoreExtension"/>

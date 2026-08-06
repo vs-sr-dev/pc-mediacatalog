@@ -57,6 +57,7 @@ public partial class MainWindow : Window
 
         BuildColumnHeaderMenu();
         ApplySavedColumnLayout();
+        ApplyTmdbVisibility();
 
         // Closing the window hides it while the app is watching for new files; quitting is
         // then an explicit choice from the tray menu.
@@ -144,10 +145,23 @@ public partial class MainWindow : Window
     private void UpdateUndoButton()
     {
         var next = _vm.Undo.NextDescription;
-        UndoButton.IsEnabled = _vm.Undo.CanUndo;
-        UndoButton.ToolTip = next == null
+        UndoMenuItem.IsEnabled = _vm.Undo.CanUndo;
+        UndoMenuItem.Header = next == null ? "Undo" : $"Undo {next}";
+        UndoMenuItem.ToolTip = next == null
             ? "Nothing to undo."
             : $"Undo {next} (up to ten operations are remembered).";
+    }
+
+    /// <summary>
+    /// TMDb is hidden unless the user has asked for it. Not disabled and not removed —
+    /// somebody with no local IMDb data still needs it, and a key already entered goes on
+    /// working — but off the menu, where it stops being one more thing to read past.
+    /// </summary>
+    private void ApplyTmdbVisibility()
+    {
+        var show = _vm.Settings.ShowTmdbSettings;
+        ValidateTvMenuItem.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        ValidateTvContextItem.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void OnUndoClick(object sender, RoutedEventArgs e)
@@ -187,14 +201,17 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true)
             return;
 
-        var deleteOriginal = DeleteOriginalCheck.IsChecked == true;
-        var verb = deleteOriginal ? "MOVE (copy, verify, then delete original)" : "COPY (verify)";
-        var confirm = MessageBox.Show(this,
-            $"{verb}\n\n{rows.Count} file(s)\n→ {dialog.FolderName}\n\nProceed?",
-            "Confirm relocation", MessageBoxButton.OKCancel, MessageBoxImage.Question);
-        if (confirm != MessageBoxResult.OK)
-            return;
+        // Copy or move, asked here rather than by a tick-box somebody had to have noticed on
+        // the toolbar before pressing the button.
+        var how = MessageBox.Show(this,
+            $"{rows.Count} file(s)\n→ {dialog.FolderName}\n\n" +
+            "Yes — move them: copy, verify the copy against the original, then delete the original.\n" +
+            "No — copy them, and leave the originals where they are.\n" +
+            "Cancel — do nothing.",
+            "Relocate", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (how == MessageBoxResult.Cancel) return;
 
+        var deleteOriginal = how == MessageBoxResult.Yes;
         var result = await _vm.RelocateAsync(rows, dialog.FolderName, deleteOriginal);
         MessageBox.Show(this, result, "Relocation", MessageBoxButton.OK, MessageBoxImage.Information);
     }
@@ -222,6 +239,77 @@ public partial class MainWindow : Window
         var chosen = preview.SelectedRows.Select(r => r.Proposal).ToList();
         var result = await _vm.ApplyRenamesAsync(chosen);
         MessageBox.Show(this, result, "Rename", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// Pick up a consolidation that was paused, or that the program was closed in the middle
+    /// of. What it still had to do was written down as it went, so this is the rest of the
+    /// job rather than the job again.
+    /// </summary>
+    private async void OnResumeConsolidationClick(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.CanResumeConsolidation)
+        {
+            MessageBox.Show(this, "There is no unfinished consolidation to continue.",
+                "Resume consolidation", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var carryOn = MessageBox.Show(this,
+            $"A consolidation stopped part-way: {_vm.ConsolidationProgress}.\n\n" +
+            "Yes — carry on filing where it left off.\n" +
+            "No — forget it. Everything already filed stays filed.\n" +
+            "Cancel — leave it as it is, and decide later.",
+            "Resume consolidation", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+        if (carryOn == MessageBoxResult.Cancel) return;
+        if (carryOn == MessageBoxResult.No)
+        {
+            _vm.ForgetConsolidationSession();
+            return;
+        }
+
+        var outcome = await _vm.ResumeConsolidationAsync();
+        UpdateUndoButton();
+        MessageBox.Show(this, outcome.Message, "Consolidate",
+            MessageBoxButton.OK, MessageBoxImage.Information);
+        await AfterConsolidationAsync(outcome);
+    }
+
+    /// <summary>
+    /// Put right the episodes whose name says their number twice — "01 - 01 - Name.mkv" —
+    /// which earlier versions could produce when a file that already led with its number was
+    /// consolidated. Every rename is shown before anything happens.
+    /// </summary>
+    private async void OnFixNamesClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Choose the folder to put right (subfolders are included)"
+        };
+
+        // The library is what this is usually aimed at, so start there when there is one.
+        if (_vm.Settings.TvConsolidationDir is { Length: > 0 } tv && Directory.Exists(tv))
+            dialog.InitialDirectory = tv;
+        if (dialog.ShowDialog(this) != true) return;
+
+        var proposals = await _vm.FindDoubledEpisodeNamesAsync(dialog.FolderName);
+        if (proposals.Count == 0)
+        {
+            MessageBox.Show(this,
+                "Nothing under that folder carries its episode number twice.",
+                "Fix names", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var preview = new RenamePreviewWindow(proposals.Select(p => new RenameRow(p))) { Owner = this };
+        if (preview.ShowDialog() != true) return;
+
+        var chosen = preview.SelectedRows.Select(r => r.Proposal).ToList();
+        if (chosen.Count == 0) return;
+
+        var result = await _vm.ApplyRenamesAsync(chosen);
+        MessageBox.Show(this, result, "Fix names", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private async void OnAnalyzeClick(object sender, RoutedEventArgs e)
@@ -341,7 +429,11 @@ public partial class MainWindow : Window
             _vm.CurrentToolSettings, () => _vm.DownloadImdbDataAsync(),
             () => _vm.DownloadImdbEpisodesAsync())
         { Owner = this };
-        dlg.Saved += settings => _vm.ApplyAppSettings(settings);
+        dlg.Saved += settings =>
+        {
+            _vm.ApplyAppSettings(settings);
+            ApplyTmdbVisibility();
+        };
         dlg.ToolsSaved += tools => _vm.ApplyToolSettings(tools);
         dlg.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow = dlg;
