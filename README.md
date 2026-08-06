@@ -34,6 +34,7 @@ bin are gone for good and are not offered.
 ## Build & run
 ```powershell
 dotnet build MediaCatalog.sln
+dotnet test MediaCatalog.Tests
 dotnet run --project MediaCatalog.App
 ```
 
@@ -112,6 +113,101 @@ application restart:
 
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
+
+## New in v2.5
+
+**A menu, instead of a wall of buttons**
+- ✅ **Four menus where there were twenty-odd toolbar buttons.** Everything about scanning is
+  under **Scan**, everything that acts on the library is under **Library**, the measuring
+  tools are under **Tools**. The headline features used to sit between *Re-hash pending* and
+  *Deep check folder*, and whichever of them the window was too narrow for disappeared into
+  an overflow chevron. Only *Consolidate…* and *Auto-consolidate…* stay on show, beside the
+  filters — those are what a session is spent doing
+- ✅ **A *Redundant* folder on the Tools menu** for the commands something else now does
+  better: *Relocate…*, *Suggest consolidation…*, *Fingerprint everything* and *Validate TV
+  (TMDb)*. Nothing is deleted, and hovering any of them says **why it is expected to go** —
+  which is a rather more useful thing to be told than finding it missing in a later version
+- ✅ **The settings explain themselves on request.** The explanations were worth having and
+  there were four hundred words of them on a tab somebody opened to tick one box, which meant
+  the paragraph that mattered got skipped with the rest. Each group now folds its prose away
+  behind a **Why?** button, hovering any setting gives you a line about it, and *Explain
+  everything* at the top opens the lot
+- ✅ **TMDb is out of the way.** It is deprecated, it is only consulted when the local IMDb
+  extract is missing, and it answers one query every two seconds. The credentials and the
+  *Validate TV* command are hidden until you ask for them on **Settings… → Data sources**. A
+  key already entered goes on working — hiding something is not switching it off
+
+**Consolidation rules of your own**
+- ✅ **You can say how a category chooses between two copies.** A wizard on **Settings… →
+  Library** builds the steps: *keep the greater length, ignoring differences under 60
+  seconds*, then *keep the greater quality*, then *keep the lesser size* — as few or as many
+  as you like, applied in order, the first that can tell the copies apart deciding. Length,
+  quality, size, date, integrity, whether a copy is already filed, even the length of the
+  name
+- ✅ **A worked example that is the wizard, not a decoration.** Two sample copies sit at the
+  bottom with figures you can change, and every edit says which of the two would be filed and
+  **which step decided it** — worked out by the same code the real run uses. Nobody can tell
+  from a rule list alone what will happen to the files on their disk
+- ✅ **What counts as two copies of one thing is yours too**: identical bytes only, the same
+  name wherever the files are, the same title and episode, or the built-in judgement
+- ✅ **Fingerprinting and a full decode can be made part of it**, per category, and only what
+  the steps actually ask for is measured — a decode is minutes a file, and running one to
+  settle rules that never mention integrity is minutes spent learning nothing
+- ✅ **Rules the steps cannot separate still come to you.** A rule set that runs out is not a
+  licence to pick one at random
+
+**Long jobs you can stop**
+- ✅ **Pause and resume a consolidation, and it survives the program closing.** Filing a
+  library of thousands is an hours-long job that moves real bytes, and until now the only way
+  to stop one was to cancel it and start again from the top. *Pause* on the **Scan** menu
+  finishes the file it is moving and writes down the rest; *Resume consolidation* picks it up
+  where it stopped, tomorrow if you like. What is remembered is the work **left**, so nothing
+  is examined twice
+- ✅ **An interrupted run is offered back to you at the next start.** A crash, a power cut or
+  somebody closing the window leaves the library half filed and only the job knows which half
+
+**Filing**
+- ✅ **A–Z folders for any category, and none for any category.** Films and programmes have
+  always been sorted into a first-letter folder — A to Z, or `#` for a title beginning with a
+  digit — and every other category went straight into its folder. Both are now a tick-box per
+  category, and an unset one goes on doing exactly what it always did
+- ✅ **An episode number is never added twice.** A file that already starts with `01` does not
+  become `01 - 01 - Wheel Of Fortune.mkv`, whether this program put the first number there or
+  the file arrived that way — and a naming pattern that numbers a name which numbers itself
+  now says it once
+- ✅ **…and the ones it happened to before can be put right.** *Library → Fix doubled episode
+  numbers in a folder…* looks through a folder for them and proposes the name each goes back
+  to. It reads the folder from disk rather than the catalogue, so it reaches a library that
+  was filed before it was catalogued
+- ✅ **A featurette in the season's Extras folder counts as filed.** Nothing about a
+  featurette says which season it belongs to, so the layout offers it two homes — the show's
+  Extras folder and the season's — and both are right. Insisting on the exact one the plan
+  named meant such a file was reported as unfiled for ever, and consolidating it shuffled it
+  from one correct place to another
+
+**Bugs**
+- ✅ **Anything can be renamed, whatever it is filed as.** A file filed as a featurette but
+  categorised *TvShow* by hand could not be renamed at all: the naming scheme has nothing to
+  say about either, so nothing was proposed and a corrected title never reached the disk. The
+  fallback puts the title in front of the name the file already has — *Behind The Scenes.mkv*
+  becomes *Burn Notice - Behind The Scenes.mkv* — and running it again does not add it twice
+- ✅ **A title typed onto an extra stays typed.** Linking an extra to the film or episode it
+  belongs to copied the owner's title over it, which quietly undid the correction before the
+  rename that should have followed could see it. A category you set by hand is now the last
+  word on what a file is, and a title you typed is never overwritten
+- ✅ **A rename reaches the catalogue.** The by-path index went stale after any rename or
+  move, so everything that looks an entry up by path — a collision, a folder tidy-up, the
+  next scan — was answering from a link to a file that had gone. Every operation that changes
+  a path now says so, as it goes, rather than at the end
+- ✅ **Three more ways of writing an episode number.** `Home Improvement 5-26 Games Flames And
+  Automobiles.avi` is S05E26; `Dexter (s8 – 1) A Beautiful Day.FLV` is S08E01 and
+  `Dexter (s8 – ep 3)` is S08E03 — including when the dash has been through an encoding that
+  could not carry it and comes back as `?`
+- ✅ **Re-check**, which is *Verify titles* under a name that says what it does. It re-derives
+  the **season and episode** from the name and its folders with the current rules before it
+  confirms the title, which is how a file catalogued before a parsing rule existed gets the
+  benefit of it — `The Dead Zone - 01 01 - Wheel Of Fortune.mkv` among them. Numbering you
+  typed yourself is left exactly as you entered it
 
 ## New in v2.4
 
@@ -564,7 +660,7 @@ time a track's name under the band's. Most files have only the first, and the se
 nothing — so a wrong one costs a wrong word on the screen and nothing else. Existing
 catalogues carry straight over: only the name of the field changed.
 
-**Genres** are recorded against a file by *Verify titles*, from the same IMDb rows that
+**Genres** are recorded against a file by *Re-check*, from the same IMDb rows that
 supply the titles and years — the answers were already in hand. They have a column of their
 own and can be filtered on. A genre you type in by hand is left alone by later runs.
 
@@ -938,7 +1034,7 @@ order: *General* (startup, watching, behaviour) → *Scanning* → *Library* →
 *Categories* → *External tools* → *Data sources*. An API key is typed in on the day it is
 obtained and rarely looked at again, so it sits at the far end; which folders to watch is
 revisited regularly, so it comes first. The external-tool paths, which used to be a separate
-*Tools…* dialog on the toolbar, are a tab here now — the main window is for the catalogue,
+*Tools…* dialog of its own, are a tab here now — the main window is for the catalogue,
 not for configuration.
 
 **Moving or consolidating into a name that is taken** — when the destination name already
@@ -1212,7 +1308,7 @@ button afterwards.
 
 ### IMDb title data (local, free, no rate limit)
 IMDb publish their catalogue as a gzipped TSV. If neither the extract nor the raw download
-is present, **Verify titles** offers to fetch it — or press *Download titles* on
+is present, **Re-check** offers to fetch it — or press *Download titles* on
 **Settings… → Data sources**. The address is a setting (defaulting to
 [`title.basics.tsv.gz`](https://datasets.imdbws.com/title.basics.tsv.gz)) so a move on
 IMDb's side can be corrected there rather than waiting for a new build. The download
@@ -1270,7 +1366,7 @@ An extract written by an earlier version is still read, so an existing install k
 until the day it is re-extracted. It simply has no genres and no episode links, because
 neither is in the file; **Settings… → Data sources** says so.
 
-**Verify titles** then confirms film and programme names against it and fills in any
+**Re-check** then confirms film and programme names against it and fills in any
 **missing years**. A name that cannot be identified from the file itself is looked up under
 **the folder the file sits in**, and then under each folder above it — which is usually the
 only place a film's name survives, a release called `xvid-grp.avi` sitting inside
@@ -1297,8 +1393,9 @@ per title.
 > expected to be removed in a future release.
 
 Enter a free TMDb **v4 Read Access Token** *or* **v3 API Key** on **Settings… → Data
-sources** (the token is preferred if both are given), then **Validate TV (TMDb)** confirms
-show names against TMDb. **Verify titles** also falls back to TMDb for anything the local
+sources** (the token is preferred if both are given) after ticking *Show the TMDb settings*,
+then **Tools → Redundant → Validate TV (TMDb)** confirms show names against TMDb.
+**Re-check** also falls back to TMDb for anything the local
 IMDb data could not identify — films against the film index, programmes against the
 programme one, since TMDb keeps them apart and *Fargo* is both. Lookups are **rate-limited to
 one every two seconds** and **cached** (`tmdb-cache.xml`) so names are never queried twice;
@@ -1313,13 +1410,13 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.4` for
-v2.4 — with the product version kept as the number people talk about (`2.4`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.5` for
+v2.5 — with the product version kept as the number people talk about (`2.5`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
 every project in the solution picks them up — bump them there once per release. The
-**title bar** carries the product version, and **About** in the toolbar shows both, next
+**title bar** carries the product version, and **About** on the Help menu shows both, next
 to the program icon.
 
 ## Roadmap / possible extensions
@@ -1342,6 +1439,9 @@ to the program icon.
   relocation, fingerprinting, integrity, XML persistence). No UI dependency, so the
   logic is unit-testable in isolation.
 - `MediaCatalog.App` — WPF front end (MVVM, no external packages).
+- `MediaCatalog.Tests` — xUnit tests over the engine: the episode-number parsing, the
+  consolidation rules and their round trip through the settings file, the rename fallbacks,
+  the extras linking, and the paused-job session. `dotnet test` runs them.
 
 ## How it works (the interesting bits)
 - **Exact duplicates** — streamed SHA-256 content hashes, grouped.
