@@ -4515,7 +4515,13 @@ public class MainViewModel : ObservableObject
             var was = file.NumberingDisplay;
             var wasCategory = file.VideoCategory;
 
+            // A year that came from somewhere better than the file name is not the file
+            // name's to take away. Re-reading the name yields no year for most episodes, and
+            // dropping a confirmed one here would undo a lookup to re-derive numbering.
+            var confirmedYear = file.TitleVerified ? file.Year : null;
+
             MediaClassifier.Classify(file, _settings);
+            file.Year ??= confirmedYear;
             file.FeatureVersion = CatalogRefresher.CurrentFeatureVersion;
 
             var now = file.NumberingDisplay;
