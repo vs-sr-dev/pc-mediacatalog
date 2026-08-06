@@ -1,4 +1,5 @@
 using System.Xml.Serialization;
+using MediaCatalog.Core.Consolidation;
 using MediaCatalog.Core.Models;
 
 namespace MediaCatalog.Core.Storage;
@@ -39,6 +40,40 @@ public class CategoryConsolidation
     /// which is what every existing catalogue has been using.
     /// </summary>
     public string NameTemplate { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this category's files are sorted into a first-letter folder — A–Z, or # for
+    /// a title beginning with a digit — inside its consolidation folder.
+    ///
+    /// Null means "whatever this category has always done", which is the only answer that
+    /// leaves an existing library where it is: films and programmes have been bucketed since
+    /// the beginning, and everything else has gone straight into its folder. Set it either
+    /// way and that is what happens, for any category.
+    ///
+    /// The consolidation rules the user builds are stored beside it — see
+    /// <see cref="ConsolidationRule"/> — because both are answers to the same question:
+    /// what this category's filing means.
+    /// </summary>
+    public bool? UseLetterFolders { get; set; }
+
+    /// <summary>
+    /// The steps that decide, for this category, which of two copies of one thing is kept.
+    /// Empty means the built-in judgement, which is what every existing catalogue uses.
+    /// </summary>
+    [XmlArray("Rules"), XmlArrayItem("Rule")]
+    public List<ConsolidationRule> Rules { get; set; } = new();
+
+    /// <summary>What counts as two copies of one thing for this category.</summary>
+    public DuplicateMatch MatchBy { get; set; } = DuplicateMatch.SameContentOrTitle;
+
+    /// <summary>
+    /// Facts about the copies that have to be measured before the rules can be applied:
+    /// their length and quality, their fingerprints, a full decode. Only what the rules
+    /// actually ask for is worth the time, so the user says.
+    /// </summary>
+    public bool DeepCheckBeforeConsolidating { get; set; }
+
+    public bool FingerprintBeforeConsolidating { get; set; }
 }
 
 /// <summary>
@@ -462,6 +497,32 @@ public class AppSettings
     public DoubleClickAction DoubleClickAction { get; set; } = DoubleClickAction.Play;
 
     /// <summary>
+    /// Show the full explanation under every setting rather than folding it away.
+    ///
+    /// Off by default. The explanations are worth having — but all of them at once, on a tab
+    /// somebody opened to tick one box, is a wall of prose that gets skipped, which means the
+    /// paragraph that mattered gets skipped with it. Each group opens on its own, and hovering
+    /// any setting says a line about it, so nothing is out of reach.
+    /// </summary>
+    public bool ShowSettingsExplanations { get; set; }
+
+    /// <summary>
+    /// Show the TMDb credentials in Settings, and the Validate TV (TMDb) command on the menu.
+    ///
+    /// Off by default: TMDb is deprecated, it is only consulted when the local IMDb extract
+    /// is missing, and it answers one query every two seconds. A key already entered goes on
+    /// working whatever this says — hiding something is not the same as switching it off.
+    /// </summary>
+    public bool ShowTmdbSettings { get; set; }
+
+    /// <summary>
+    /// Show the commands that are on their way out — the ones gathered under Redundant, each
+    /// with the reason it is expected to go. Off by default, which is the point of the folder:
+    /// a menu of thirty commands where six of them are historical is a menu nobody can read.
+    /// </summary>
+    public bool ShowRedundantCommands { get; set; }
+
+    /// <summary>
     /// Read each file's length and quality during a scan, using ffprobe. On by default,
     /// and near-free: it reads the container header rather than the file, and entries that
     /// already know are skipped. Without external tools it does nothing at all.
@@ -609,6 +670,60 @@ public class AppSettings
     }
 
     /// <summary>
+    /// The entry holding everything configured about a category's filing, or null when the
+    /// category has never been configured. Extras follow the show or film they belong to.
+    /// </summary>
+    public CategoryConsolidation? ConsolidationFor(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return null;
+
+        var match = CategoryFolders.FirstOrDefault(c =>
+            string.Equals(c.Category, category, StringComparison.OrdinalIgnoreCase));
+        if (match != null) return match;
+
+        if (string.Equals(category, "TvExtra", StringComparison.OrdinalIgnoreCase))
+            return ConsolidationFor("TvShow");
+        if (string.Equals(category, "MovieExtra", StringComparison.OrdinalIgnoreCase))
+            return ConsolidationFor("Movie");
+
+        return null;
+    }
+
+    /// <summary>
+    /// True when this category's files are sorted into a first-letter folder inside its
+    /// consolidation folder.
+    ///
+    /// Unset means what the category has always done, which is the only answer that leaves
+    /// an existing library standing: films and programmes have been bucketed from the start,
+    /// and every other category has gone straight into its folder.
+    /// </summary>
+    public bool UseLetterFoldersFor(string category) =>
+        ConsolidationFor(category)?.UseLetterFolders ?? IsBucketedByDefault(category);
+
+    /// <summary>The categories the built-in layout has always sorted A–Z.</summary>
+    public static bool IsBucketedByDefault(string category) =>
+        category is "TvShow" or "Movie" or "TvExtra" or "MovieExtra";
+
+    /// <summary>
+    /// The steps deciding which copy of a thing this category keeps, or an empty list when
+    /// the built-in judgement applies.
+    /// </summary>
+    public IReadOnlyList<Consolidation.ConsolidationRule> RulesFor(string category) =>
+        ConsolidationFor(category)?.Rules ?? new List<Consolidation.ConsolidationRule>();
+
+    /// <summary>What counts as two copies of one thing, for this category.</summary>
+    public Consolidation.DuplicateMatch MatchForCategory(string category) =>
+        ConsolidationFor(category)?.MatchBy ?? Consolidation.DuplicateMatch.SameContentOrTitle;
+
+    /// <summary>True when this category's rules need every copy decoded before they can run.</summary>
+    public bool DeepCheckFor(string category) =>
+        ConsolidationFor(category)?.DeepCheckBeforeConsolidating ?? false;
+
+    /// <summary>True when this category's rules need every copy fingerprinted first.</summary>
+    public bool FingerprintFor(string category) =>
+        ConsolidationFor(category)?.FingerprintBeforeConsolidating ?? false;
+
+    /// <summary>
     /// Fold the legacy TV/Film folder settings into <see cref="CategoryFolders"/> so the
     /// settings UI can present one uniform, unbounded list.
     /// </summary>
@@ -624,8 +739,18 @@ public class AppSettings
 
         Seed("TvShow", TvConsolidationDir);
         Seed("Movie", FilmConsolidationDir);
+        // A row with no category says nothing at all and goes. A row with no folder is
+        // kept if it carries anything else the user has set — the rules for choosing
+        // between copies belong to the category, not to the folder, and a category whose
+        // folder has not been chosen yet is a job half done rather than a mistake.
         CategoryFolders.RemoveAll(c => string.IsNullOrWhiteSpace(c.Category) ||
-                                       string.IsNullOrWhiteSpace(c.Folder));
+                                       (string.IsNullOrWhiteSpace(c.Folder) && SaysNothingElse(c)));
+
+        static bool SaysNothingElse(CategoryConsolidation c) =>
+            c.Rules.Count == 0 && c.UseLetterFolders is null &&
+            string.IsNullOrWhiteSpace(c.NameTemplate) &&
+            c.MatchBy == DuplicateMatch.SameContentOrTitle &&
+            !c.DeepCheckBeforeConsolidating && !c.FingerprintBeforeConsolidating;
         SyncLegacyFolders();
     }
 

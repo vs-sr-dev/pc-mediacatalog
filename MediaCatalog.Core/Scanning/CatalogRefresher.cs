@@ -46,9 +46,11 @@ public static class CatalogRefresher
     ///     have not happened yet passed over, titles capitalised, season/episode numbers
     ///     stripped off anything that is not a programme,
     /// 5 = double episodes — "S06E11E12", "S01E01-E02" — read as the two episodes they hold
-    ///     rather than as the first one alone.
+    ///     rather than as the first one alone,
+    /// 6 = a season and episode joined by a dash and nothing else ("Home Improvement 5-26"),
+    ///     and one written across a dash where the E would go ("Dexter (s8 – 1)").
     /// </summary>
-    public const int CurrentFeatureVersion = 5;
+    public const int CurrentFeatureVersion = 6;
 
     /// <summary>True when this entry predates the current feature set.</summary>
     public static bool NeedsRefresh(MediaFile file) =>
@@ -58,6 +60,12 @@ public static class CatalogRefresher
     /// A programme with no episode number is worth another go every time: the parsing
     /// rules gain cases release by release, and this is what makes a refresh pick them up
     /// without the user having to re-scan the drive.
+    ///
+    /// Only programmes, deliberately. A video the rules have never made anything of is not
+    /// re-read on every refresh — that would leave the catalogue permanently reporting work
+    /// outstanding that no amount of refreshing will ever finish. The version stamp above is
+    /// what brings those round when the rules change, and Re-check is what brings a
+    /// particular file round when the user has a reason to think they should.
     /// </summary>
     public static bool LacksNumbering(MediaFile file) =>
         file.Kind == MediaKind.Video &&

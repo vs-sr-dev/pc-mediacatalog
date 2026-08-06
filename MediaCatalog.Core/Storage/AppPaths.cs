@@ -13,6 +13,13 @@ public static class AppPaths
     public static string ToolSettingsPath => Path.Combine(DataDirectory, "tools.xml");
     public static string SettingsPath => Path.Combine(DataDirectory, "settings.xml");
     public static string ScanSessionPath => Path.Combine(DataDirectory, "scan-session.xml");
+
+    /// <summary>
+    /// A consolidation that was paused or interrupted, so a job of thousands of files
+    /// survives the application being closed.
+    /// </summary>
+    public static string ConsolidationSessionPath =>
+        Path.Combine(DataDirectory, "consolidation-session.xml");
     public static string TmdbCachePath => Path.Combine(DataDirectory, "tmdb-cache.xml");
 
     /// <summary>Cached file-enumeration snapshot, so a resume needn't re-walk the drives.</summary>

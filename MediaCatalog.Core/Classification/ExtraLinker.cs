@@ -21,10 +21,11 @@ public static class ExtraLinker
     {
         var all = files as IList<MediaFile> ?? files.ToList();
 
-        var mains = all.Where(f => f.Kind == MediaKind.Video && !f.IsExtra &&
-                                   f.VideoCategory is VideoCategory.TvShow or VideoCategory.Movie)
+        var mains = all.Where(f => f.Kind == MediaKind.Video && !CountsAsExtra(f) &&
+                                   (f.VideoCategory is VideoCategory.TvShow or VideoCategory.Movie ||
+                                    ClaimedAsMain(f)))
                        .ToList();
-        var extras = all.Where(f => f.IsExtra).ToList();
+        var extras = all.Where(CountsAsExtra).ToList();
         if (extras.Count == 0) return 0;
 
         // Index the main files under each of their ancestor directories, so an extra can
@@ -70,6 +71,23 @@ public static class ExtraLinker
         return null;
     }
 
+    /// <summary>
+    /// True when a file is bonus material as far as linking is concerned.
+    ///
+    /// A category the user set by hand is the last word on what a file is. Somebody who has
+    /// told the catalogue that a file filed as a featurette is in fact an episode is not
+    /// asking to have it quietly re-adopted as a featurette every time anything is linked —
+    /// which is what used to happen, and what made a title typed onto such a file vanish
+    /// again before the rename that was to follow it could see it.
+    /// </summary>
+    public static bool CountsAsExtra(MediaFile file) =>
+        file.IsExtra && !ClaimedAsMain(file);
+
+    /// <summary>True when the user's own category says this is a programme or a film.</summary>
+    private static bool ClaimedAsMain(MediaFile file) =>
+        string.Equals(file.CategoryOverride, CategoryResolver.TvShow, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(file.CategoryOverride, CategoryResolver.Movie, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Copy the owner's identity onto the extra so both file to the same place.</summary>
     private static void Adopt(MediaFile extra, MediaFile owner)
     {
@@ -78,13 +96,19 @@ public static class ExtraLinker
             ? VideoCategory.TvExtra
             : VideoCategory.MovieExtra;
 
-        if (!string.IsNullOrWhiteSpace(owner.ParsedTitle)) extra.ParsedTitle = owner.ParsedTitle;
-        if (!string.IsNullOrWhiteSpace(owner.TmdbName))
+        // A title the user typed is theirs, on an extra as much as on anything else. The
+        // owner's title is a sensible default for a featurette that has never been named;
+        // it is not a correction to be applied over somebody's own words.
+        if (!extra.TitleManuallySet)
         {
-            extra.TmdbName = owner.TmdbName;
-            extra.TmdbVerified = owner.TmdbVerified;
-            extra.ImdbVerified = owner.ImdbVerified;
-            extra.TitleManuallySet = owner.TitleManuallySet;
+            if (!string.IsNullOrWhiteSpace(owner.ParsedTitle)) extra.ParsedTitle = owner.ParsedTitle;
+            if (!string.IsNullOrWhiteSpace(owner.TmdbName))
+            {
+                extra.TmdbName = owner.TmdbName;
+                extra.TmdbVerified = owner.TmdbVerified;
+                extra.ImdbVerified = owner.ImdbVerified;
+                extra.TitleManuallySet = owner.TitleManuallySet;
+            }
         }
         extra.Year ??= owner.Year;
     }

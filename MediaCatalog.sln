@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MediaCatalog.Core", "MediaC
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MediaCatalog.App", "MediaCatalog.App\MediaCatalog.App.csproj", "{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MediaCatalog.Tests", "MediaCatalog.Tests\MediaCatalog.Tests.csproj", "{4D16793C-087B-448C-A0CA-8DFE3C0462FD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{13BDB4B5-E463-4969-9A55-3AC27F3EE9F8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4D16793C-087B-448C-A0CA-8DFE3C0462FD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4D16793C-087B-448C-A0CA-8DFE3C0462FD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4D16793C-087B-448C-A0CA-8DFE3C0462FD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4D16793C-087B-448C-A0CA-8DFE3C0462FD}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

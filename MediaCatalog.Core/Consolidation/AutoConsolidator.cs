@@ -95,7 +95,7 @@ public static class AutoConsolidator
                 continue;
             }
 
-            var key = ContentKey(file, category);
+            var key = ContentKey(file, category, settings.MatchForCategory(category));
             if (!byKey.TryGetValue(key, out var members))
             {
                 byKey[key] = members = new List<MediaFile>();
@@ -189,6 +189,27 @@ public static class AutoConsolidator
 
         return $"{category}|{title}|{file.Year}";
     }
+
+    /// <summary>
+    /// The same, under whatever the user has said counts as two copies of one thing for this
+    /// category. The built-in judgement — the title with its numbering — is the default and
+    /// what every catalogue used before there was anything to say.
+    /// </summary>
+    public static string ContentKey(MediaFile file, string category, DuplicateMatch match) =>
+        match switch
+        {
+            // Name alone, wherever the two files are. For somebody who files by hand and
+            // trusts their own naming, this is the whole of the question.
+            DuplicateMatch.SameName =>
+                $"name|{Path.GetFileNameWithoutExtension(file.FileName).ToLowerInvariant()}",
+
+            // The strictest reading: the same bytes and nothing else. A file nobody has
+            // hashed is not known to match anything, so it stands alone.
+            DuplicateMatch.SameContent =>
+                file.HasHash ? $"sha|{file.Sha256.ToLowerInvariant()}" : $"unhashed|{file.FullPath}",
+
+            _ => ContentKey(file, category)
+        };
 
     private static string Describe(MediaFile file)
     {

@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using MediaCatalog.Core.Classification;
 using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Naming;
 using MediaCatalog.Core.Storage;
 
 namespace MediaCatalog.Core.Consolidation;
@@ -32,10 +33,15 @@ public static class ConsolidationPlanner
 
         var title = SortName(Title(file), settings);
 
+        // Whether this category's files are sorted A–Z. Films and programmes always were;
+        // any category can be now, and either of them can be told to stop.
+        var buckets = settings.UseLetterFoldersFor(category);
+
         if (category is CategoryResolver.TvShow or CategoryResolver.TvExtra)
         {
             if (string.IsNullOrWhiteSpace(title)) return null;
-            var showFolder = FindExistingShowFolder(dir, title) ?? ShowFolder(dir, title);
+            var showFolder = FindExistingShowFolder(dir, title, buckets)
+                             ?? ShowFolder(dir, title, buckets);
 
             // Extras live beside the show — inside their season when one is known,
             // otherwise in a show-level "Extras" folder.
@@ -51,15 +57,28 @@ public static class ConsolidationPlanner
         {
             if (string.IsNullOrWhiteSpace(title)) return null;
             var folder = file.Year is { } y ? $"{title} ({y})" : title;
-            var movieFolder = Path.Combine(dir, Bucket(title), Sanitize(folder));
+            var movieFolder = Path.Combine(Under(dir, title, buckets), Sanitize(folder));
             return category == CategoryResolver.MovieExtra
                 ? Path.Combine(movieFolder, ExtrasFolder)
                 : movieFolder;
         }
 
-        // Custom category: files go straight into its consolidation folder.
-        return dir;
+        // Any other category: straight into its consolidation folder, unless the user has
+        // asked for the A–Z folders films and programmes have always had. Sorted on the
+        // title when there is one and on the file's own name when there is not, since a
+        // category with no titles is exactly the sort that fills one folder to bursting.
+        var sortOn = string.IsNullOrWhiteSpace(title)
+            ? Path.GetFileNameWithoutExtension(file.FileName)
+            : title;
+        return Under(dir, sortOn, buckets);
     }
+
+    /// <summary>
+    /// <paramref name="dir"/>, or its first-letter subfolder when the category is sorted
+    /// that way.
+    /// </summary>
+    private static string Under(string dir, string name, bool buckets) =>
+        buckets ? Path.Combine(dir, Bucket(name)) : dir;
 
     /// <summary>Where specials and featurettes are filed inside a show/film folder.</summary>
     public const string ExtrasFolder = "Extras";
@@ -103,7 +122,51 @@ public static class ConsolidationPlanner
         // Nothing to plan — no title yet, or a category filed straight into its folder —
         // means being under the root is the most that can be said about it.
         var planned = PlanPath(file, category, settings);
-        return planned == null || PathsEqual(planned, file.FullPath);
+        if (planned == null || PathsEqual(planned, file.FullPath)) return true;
+
+        return IsExtraAlreadyBeside(file, category, planned);
+    }
+
+    /// <summary>
+    /// True when a special or featurette is already sitting in an Extras folder belonging to
+    /// the show or film it is an extra of.
+    ///
+    /// Nothing about a featurette says which season it belongs to, so the layout offers it two
+    /// homes: the show's own Extras folder, and the Extras folder inside a season. Both are
+    /// right, and a file in either of them is filed. Insisting on the exact one the plan
+    /// happens to name meant an extra the user had put in the season's folder was reported as
+    /// unfiled for ever, and consolidating it shuffled it from one correct place to another.
+    /// </summary>
+    private static bool IsExtraAlreadyBeside(MediaFile file, string category, string planned)
+    {
+        if (!CategoryResolver.IsExtra(category)) return false;
+
+        var here = Path.GetDirectoryName(file.FullPath) ?? string.Empty;
+        var there = Path.GetDirectoryName(planned) ?? string.Empty;
+        if (here.Length == 0 || there.Length == 0) return false;
+
+        if (!string.Equals(Path.GetFileName(here), ExtrasFolder, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // Same name too: a featurette filed under the right show but called something else
+        // still wants renaming, and that is a different question from where it lives.
+        if (!string.Equals(Path.GetFileName(file.FullPath), Path.GetFileName(planned),
+                StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return PathsEqual(OwnerFolderOf(here), OwnerFolderOf(there));
+    }
+
+    /// <summary>
+    /// The show or film folder an Extras folder hangs off: one level up, or two when the
+    /// Extras folder is inside a season.
+    /// </summary>
+    private static string OwnerFolderOf(string extrasFolder)
+    {
+        var parent = Path.GetDirectoryName(extrasFolder) ?? extrasFolder;
+        return Classification.PathMetadata.IsSeasonFolder(Path.GetFileName(parent))
+            ? Path.GetDirectoryName(parent) ?? parent
+            : parent;
     }
 
     /// <summary>Same file, whatever the two paths look like as text.</summary>
@@ -131,11 +194,18 @@ public static class ConsolidationPlanner
     {
         if (settings != null &&
             ConsolidationNaming.Apply(file, settings.NameTemplateFor(category)) is { Length: > 0 } patterned)
-            return patterned;
+            // A pattern that opens with {episode} and goes on to {name} numbers a file that
+            // its name may already number. Written once is what was asked for.
+            return EpisodePrefixes.Collapse(patterned);
 
         if (category != CategoryResolver.TvShow || file.Episode is not { } episode || episode < 0)
             return file.FileName;
-        if (EpisodePrefix.IsMatch(file.FileName)) return file.FileName;
+
+        // Already numbered — by an earlier run, or by whoever named it in the first place.
+        // "01 - Name.mkv" does not want to become "01 - 01 - Name.mkv".
+        if (EpisodePrefix.IsMatch(file.FileName) ||
+            EpisodePrefixes.StartsWithEpisode(file.FileName, episode))
+            return file.FileName;
 
         var prefix = Pad(episode);
         if (file.EpisodeEnd is { } last && last > episode) prefix += "-" + Pad(last);
@@ -155,18 +225,18 @@ public static class ConsolidationPlanner
     private static readonly Regex EpisodePrefix = new(@"^\d{2,3}(-\d{2,3})?\s*-\s+", RegexOptions.Compiled);
 
     /// <summary>The canonical show folder: &lt;TvDir&gt;\&lt;bucket&gt;\&lt;Show&gt;.</summary>
-    public static string ShowFolder(string tvDir, string title) =>
-        Path.Combine(tvDir, Bucket(title), Sanitize(title));
+    public static string ShowFolder(string tvDir, string title, bool buckets = true) =>
+        Path.Combine(Under(tvDir, title, buckets), Sanitize(title));
 
     /// <summary>
     /// Look for an existing folder matching the show title (exact path first, then any
     /// case-insensitive match inside the bucket), so files join an existing library
     /// folder instead of creating a slightly different one. Returns null if none exists.
     /// </summary>
-    public static string? FindExistingShowFolder(string tvDir, string title)
+    public static string? FindExistingShowFolder(string tvDir, string title, bool buckets = true)
     {
         var clean = Sanitize(title);
-        var bucketDir = Path.Combine(tvDir, Bucket(title));
+        var bucketDir = Under(tvDir, title, buckets);
 
         var exact = Path.Combine(bucketDir, clean);
         if (Directory.Exists(exact)) return exact;

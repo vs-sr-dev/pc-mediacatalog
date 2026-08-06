@@ -13,19 +13,47 @@ namespace MediaCatalog.Core.Classification;
 /// </summary>
 public static class MediaClassifier
 {
+    /// <summary>
+    /// The characters that stand between a season and an episode when somebody writes the
+    /// two apart: a hyphen, either of the typographic dashes — and the replacement character,
+    /// which is what a dash comes back as once a name has been through an encoding that could
+    /// not carry it. "Dexter (s8 ? 1)" is not a file anybody meant to create; it is
+    /// "Dexter (s8 – 1)" after a round trip, and it still says season 8 episode 1.
+    /// </summary>
+    private const string Dashes = @"\-–—�";
+
     // Every way people write a season and episode together:
     //   S01E02, s1e2, S01.E02, S01 E02, "S04 E 01",
-    //   "Season 1 Episode 01", "Series 1 Episode 1", "S1 Episode 1", "Season 2 Ep 3".
+    //   "Season 1 Episode 01", "Series 1 Episode 1", "S1 Episode 1", "Season 2 Ep 3",
+    //   and the forms that leave the "E" out altogether: "(s8 – 1)", "(s8 – ep 3)".
     // The word forms are matched at a word boundary so "Friends 1 e 2" cannot look like
     // season 1 episode 2 on the strength of a trailing "s".
+    //
+    // Leaving out the episode marker is only allowed after a dash, and deliberately: "s8 1"
+    // is two numbers side by side and could be anything, while "s8 – 1" is somebody writing
+    // season 8, episode 1 with a dash where the E would go.
     //
     // A trailing second episode is picked up too: a file holding a double episode writes it
     // "S06E11E12" or "S01E01-E02", and calling that episode 11 alone loses half of what the
     // name says — and makes it look like a duplicate of the real episode 11.
     private static readonly Regex SeasonEpisode = new(
-        @"\b(?:s|se|season|series)\s*\.?\s*(?<s>\d{1,3})\s*[._\-]?\s*(?:e|ep|eps|episode|episodes|pt|part)\s*\.?\s*(?<e>\d{1,3})" +
+        @"\b(?:s|se|season|series)\s*\.?\s*(?<s>\d{1,3})\s*" +
+        $@"(?:[._{Dashes}]?\s*(?:e|ep|eps|episode|episodes|pt|part)|[{Dashes}]\s*(?:e|ep|eps|episode|episodes)?)" +
+        @"\s*\.?\s*(?<e>\d{1,3})" +
         @"(?:\s*[._\-]?\s*(?:e|ep|episode)?\s*\.?\s*(?<e2>\d{1,3}))?\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // "Home Improvement 5-26 Games Flames And Automobiles": the season and the episode
+    // joined by a dash, with nothing at all to mark either of them.
+    //
+    // On its own a pair of numbers around a dash is a range, a date or a track listing, so
+    // this only fires on the shape that means an episode code: a one- or two-digit season, a
+    // two-digit episode, and a word on each side of the pair. That last condition is what
+    // keeps it off the episode prefix consolidation writes — "11-12 - Name.mkv" opens with
+    // its numbering and so has no word in front of it.
+    private static readonly Regex DashedSeasonEpisode = new(
+        $@"(?<=[^\s\d][ ._])(?<s>\d{{1,2}})[{Dashes}](?<e>\d{{2}})(?=[ ._][^\s\d])",
+        RegexOptions.Compiled);
 
     // The same in words: "Season Three Episode One". Kept apart from the pattern above so
     // the common all-digits form stays cheap and unambiguous.
@@ -154,7 +182,8 @@ public static class MediaClassifier
         var se = SeasonEpisode.Match(name);
         if (!se.Success) se = SeasonEpisodeWords.Match(name);
         var xf = XFormat.Match(name);
-        var spaced = FirstOutsideNoise(SpacedSeasonEpisode, name, noise);
+        var spaced = FirstOutsideNoise(SpacedSeasonEpisode, name, noise)
+                     ?? FirstOutsideNoise(DashedSeasonEpisode, name, noise);
 
         if (file.Kind != MediaKind.Video)
         {
@@ -227,7 +256,7 @@ public static class MediaClassifier
         }
         else if (spaced is { Success: true })
         {
-            // "Show - 04 01 - Episode name".
+            // "Show - 04 01 - Episode name", or "Show 5-26 Episode name".
             file.VideoCategory = VideoCategory.TvShow;
             file.Season = ParseNumber(spaced.Groups["s"].Value);
             file.Episode = ParseNumber(spaced.Groups["e"].Value);

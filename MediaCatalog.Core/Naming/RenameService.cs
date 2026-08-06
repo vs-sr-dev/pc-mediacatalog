@@ -45,10 +45,66 @@ public static class RenameService
         var proposals = new List<RenameProposal>();
         foreach (var f in files)
         {
-            var proposal = BuildProposal(f, categoryOf?.Invoke(f));
+            var proposal = BuildAnyProposal(f, categoryOf?.Invoke(f));
             if (proposal != null) proposals.Add(proposal);
         }
         return proposals;
+    }
+
+    /// <summary>
+    /// The best rename this file can be offered, whatever it is filed as: the naming scheme
+    /// when it has something to say, and failing that a name built from the title in front of
+    /// what the file is already called.
+    ///
+    /// The fallback is the point. A featurette, a file still filed as Other, a programme with
+    /// no episode number — the scheme declines to name all of them, and until now that meant
+    /// correcting such a file's title changed the catalogue and left the name on disk saying
+    /// the old one. Anything can be renamed; nothing is beyond it for want of a category.
+    /// </summary>
+    /// <param name="previousTitle">
+    /// What the file went by before, when the caller knows. Given one, a title that appears
+    /// in the name is swapped for the new one in place, which keeps far more of what the file
+    /// was called than putting the new title in front of it would.
+    /// </param>
+    public static RenameProposal? BuildAnyProposal(
+        MediaFile file, string? category = null, string? previousTitle = null) =>
+        BuildProposal(file, category)
+        ?? BuildTitleSwap(file, previousTitle, file.EffectiveTitle)
+        ?? BuildTitledName(file);
+
+    /// <summary>
+    /// A name that puts the file's title in front of what it is already called:
+    /// "bts.mkv" under the title *Yes Minister* becomes "Yes Minister - bts.mkv".
+    ///
+    /// Null when there is no title to lead with, or when the name already opens with it —
+    /// which is what stops a second run adding the title a second time.
+    /// </summary>
+    public static RenameProposal? BuildTitledName(MediaFile file)
+    {
+        var title = Sanitize((file.EffectiveTitle ?? string.Empty).Trim());
+        if (title.Length == 0) return null;
+
+        var stem = Path.GetFileNameWithoutExtension(file.FileName);
+        if (stem.StartsWith(title, StringComparison.OrdinalIgnoreCase)) return null;
+
+        // Whatever the name says beyond the title — the featurette's own name, usually —
+        // with the title taken out of the middle of it if that is where it was.
+        var rest = stem;
+        var at = rest.IndexOf(title, StringComparison.OrdinalIgnoreCase);
+        if (at >= 0) rest = rest[..at] + rest[(at + title.Length)..];
+        rest = rest.Trim(' ', '-', '–', '—', '_', '.');
+
+        var proposed = Sanitize(rest.Length == 0 ? title : $"{title} - {rest}") +
+                       Path.GetExtension(file.FileName);
+
+        var dir = Path.GetDirectoryName(file.FullPath) ?? string.Empty;
+        return new RenameProposal
+        {
+            File = file,
+            CurrentName = file.FileName,
+            ProposedName = proposed,
+            ProposedPath = Path.Combine(dir, proposed)
+        };
     }
 
     /// <summary>
