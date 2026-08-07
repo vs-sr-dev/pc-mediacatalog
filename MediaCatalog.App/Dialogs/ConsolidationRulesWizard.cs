@@ -18,9 +18,21 @@ public class ConsolidationRuleSet
     public bool DeepCheck { get; set; }
     public bool Fingerprint { get; set; }
 
+    /// <summary>
+    /// Rules written in the little comparison language, for a category whose question the
+    /// ordered steps cannot put. Blank for every category that has not been given one — and
+    /// when it is not blank it is what runs, the steps standing by untouched.
+    /// </summary>
+    public string Script { get; set; } = string.Empty;
+
     /// <summary>The rules in a line, for the row in Settings that opened this.</summary>
     public string Summarise()
     {
+        if (!string.IsNullOrWhiteSpace(Script))
+        {
+            var lines = Script.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+            return lines == 1 ? "one rule of your own" : $"{lines} rules of your own";
+        }
         if (Rules.Count == 0) return "built-in judgement";
         var first = Rules[0].Describe().ToLowerInvariant();
         return Rules.Count == 1 ? first : $"{first}, then {Rules.Count - 1} more";
@@ -83,6 +95,9 @@ public class ConsolidationRulesWizard : Window
     private readonly ObservableCollection<ConsolidationRule> _rules = new();
     private readonly ObservableCollection<SampleCopy> _samples = new();
 
+    private readonly TabControl _how = new();
+    private readonly ConsolidationScriptEditor _script = new();
+
     private readonly ListBox _ruleList = new() { Height = 140 };
     private readonly ComboBox _field = new() { Width = 170 };
     private readonly ComboBox _prefer = new() { Width = 150 };
@@ -115,13 +130,14 @@ public class ConsolidationRulesWizard : Window
     public ConsolidationRulesWizard(string category, ConsolidationRuleSet existing)
     {
         Title = $"Consolidation rules for {category}";
-        Width = 720; Height = 700;
+        Width = 900; Height = 780;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         _incomingMatch = existing.MatchBy;
         foreach (var rule in existing.Rules) _rules.Add(Copy(rule));
         _deepCheck.IsChecked = existing.DeepCheck;
         _fingerprint.IsChecked = existing.Fingerprint;
+        _script.Script = existing.Script;
 
         SeedSamples(category);
 
@@ -133,7 +149,7 @@ public class ConsolidationRulesWizard : Window
         var body = new StackPanel();
         body.Children.Add(Intro(category));
         body.Children.Add(MatchingBox());
-        body.Children.Add(StepsBox());
+        body.Children.Add(HowBox());
         body.Children.Add(WorkBox());
         body.Children.Add(SampleBox());
 
@@ -197,7 +213,62 @@ public class ConsolidationRulesWizard : Window
         };
     }
 
-    private GroupBox StepsBox()
+    /// <summary>
+    /// The two ways of saying which copy to keep, side by side.
+    ///
+    /// The steps are the answer for almost everybody: an ordered list, first one that can tell
+    /// the copies apart wins, and no way to write it wrong. What they cannot say is anything
+    /// conditional — "the better picture, unless it fails a decode", "the longer one, but only
+    /// when they are more than a minute apart" — because a step compares one thing and knows
+    /// nothing about any other. That is what the second tab is for, and it is why it is a tab
+    /// rather than a replacement: reaching for it should be a decision, not the default.
+    /// </summary>
+    private GroupBox HowBox()
+    {
+        var steps = new TabItem { Header = "Steps, in order", Content = StepsPanel() };
+        var script = new TabItem { Header = "Rules of your own", Content = ScriptPanel() };
+
+        _how.Items.Add(steps);
+        _how.Items.Add(script);
+        _how.SelectedItem = string.IsNullOrWhiteSpace(_script.Script) ? steps : script;
+        _how.SelectionChanged += (_, e) =>
+        {
+            if (e.OriginalSource == _how) Recalculate();
+        };
+
+        return new GroupBox
+        {
+            Header = "How to choose",
+            Margin = new Thickness(0, 0, 0, 10),
+            Padding = new Thickness(8),
+            Content = _how
+        };
+    }
+
+    /// <summary>True when the user is building rules in the language rather than as steps.</summary>
+    private bool UsingScript => _how.SelectedIndex == 1;
+
+    private FrameworkElement ScriptPanel()
+    {
+        _script.Changed += Recalculate;
+
+        var panel = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Rules for the questions the steps cannot put. Two files are compared at a " +
+                   "time — File1 is the copy that has won so far, File2 the next one — and the " +
+                   "first rule that names a copy ends it. With more than two different copies " +
+                   "of one thing, the winner goes on to meet the next, until one is left. " +
+                   "Only unique copies are ever compared, and no file is decoded, fingerprinted " +
+                   "or measured twice however many rounds it survives.",
+            TextWrapping = TextWrapping.Wrap, Foreground = System.Windows.Media.Brushes.Gray,
+            Margin = new Thickness(0, 0, 0, 8)
+        });
+        panel.Children.Add(_script);
+        return panel;
+    }
+
+    private FrameworkElement StepsPanel()
     {
         // A rule writes itself out as its own sentence, so the list needs nothing but the
         // rules themselves.
@@ -245,20 +316,14 @@ public class ConsolidationRulesWizard : Window
         buttons.Children.Add(SmallButton("Remove", RemoveStep));
         buttons.Children.Add(SmallButton("Clear all", () => { _rules.Clear(); Recalculate(); }));
 
-        var panel = new StackPanel();
+        var panel = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
         panel.Children.Add(_ruleList);
         panel.Children.Add(buttons);
         panel.Children.Add(editor);
         panel.Children.Add(_fieldHelp);
         ShowFieldHelp();
 
-        return new GroupBox
-        {
-            Header = "The steps, in order",
-            Margin = new Thickness(0, 0, 0, 10),
-            Padding = new Thickness(8),
-            Content = panel
-        };
+        return panel;
     }
 
     private GroupBox WorkBox()
@@ -365,12 +430,25 @@ public class ConsolidationRulesWizard : Window
         };
         ok.Click += (_, _) =>
         {
+            // Rules that do not read are not saved. Silently keeping a script the run will
+            // refuse means a consolidation that quietly does nothing a week from now, with
+            // nothing on screen to say why.
+            if (UsingScript && _script.Problem is { Length: > 0 } problem)
+            {
+                MessageBox.Show(this, problem, "The rules do not read",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             Result = new ConsolidationRuleSet
             {
                 MatchBy = _match.SelectedItem is DuplicateMatch m ? m : DuplicateMatch.SameContentOrTitle,
                 Rules = _rules.Select(Copy).ToList(),
                 DeepCheck = _deepCheck.IsChecked == true,
-                Fingerprint = _fingerprint.IsChecked == true
+                Fingerprint = _fingerprint.IsChecked == true,
+                // The steps and the script are both kept; only the tab in front decides which
+                // of them runs, so backing out of a script leaves the steps where they were.
+                Script = UsingScript ? _script.Script.Trim() : string.Empty
             };
             DialogResult = true;
         };
@@ -455,10 +533,102 @@ public class ConsolidationRulesWizard : Window
         });
     }
 
+    /// <summary>
+    /// The same worked example for rules written in the language: the script is run over the
+    /// two made-up copies by the very code a consolidation would use.
+    ///
+    /// What it cannot do is decode or fingerprint a file that does not exist, so those stand
+    /// aside and are counted instead. Saying "it would have decoded both of these" is the
+    /// useful half of that answer anyway — a script nobody has priced is how an overnight
+    /// consolidation turns into a week of decoding.
+    /// </summary>
+    private void RecalculateScript(List<MediaFile> copies)
+    {
+        var script = _script.Script;
+
+        if (string.IsNullOrWhiteSpace(script))
+        {
+            _outcome.Text = "No rules of your own yet. Drag some pieces in above — or go back " +
+                            "to the steps, which is the right answer for most libraries.";
+            _outcome.Foreground = System.Windows.Media.Brushes.DimGray;
+            return;
+        }
+
+        if (!RuleScriptParser.TryParse(script, out var program, out var error))
+        {
+            _outcome.Text = $"These rules do not read: {error}";
+            _outcome.Foreground = System.Windows.Media.Brushes.Firebrick;
+            return;
+        }
+
+        var pretend = new PretendServices();
+        var session = new RuleScriptSession(program, pretend);
+        var verdict = session.ChooseAsync(copies).GetAwaiter().GetResult();
+
+        var cost = pretend.Describe();
+
+        if (verdict.Winner is not { } keeper)
+        {
+            _outcome.Text = $"Nothing would be filed: {verdict.Why}. These two copies would be " +
+                            "put to you to choose between." + cost;
+            _outcome.Foreground = System.Windows.Media.Brushes.Firebrick;
+            return;
+        }
+
+        var index = copies.IndexOf(keeper);
+        var doomed = copies.Where(c => !ReferenceEquals(c, keeper)).Select(c => c.FileName);
+
+        _outcome.Text = $"\"{_samples[index].Name}\" would be filed — {verdict.Why}. " +
+                        $"{string.Join(", ", doomed)} would be deleted once it is." + cost;
+        _outcome.Foreground = System.Windows.Media.Brushes.DarkGreen;
+    }
+
+    /// <summary>
+    /// Stands in for the external tools while the example is being worked. Nothing is
+    /// measured — there is nothing on disk to measure — but what would have been is counted,
+    /// so the wizard can say what the rules are going to cost.
+    /// </summary>
+    private sealed class PretendServices : IRuleScriptServices
+    {
+        private readonly HashSet<string> _scanned = new();
+        private readonly HashSet<string> _fingerprinted = new();
+
+        public Task ProbeAsync(MediaFile file, CancellationToken ct) => Task.CompletedTask;
+
+        public Task DeepScanAsync(MediaFile file, CancellationToken ct)
+        {
+            _scanned.Add(file.FullPath);
+            return Task.CompletedTask;
+        }
+
+        public Task FingerprintAsync(MediaFile file, CancellationToken ct)
+        {
+            _fingerprinted.Add(file.FullPath);
+            return Task.CompletedTask;
+        }
+
+        public string Describe()
+        {
+            var parts = new List<string>();
+            if (_scanned.Count > 0) parts.Add($"{_scanned.Count} file(s) decoded end to end");
+            if (_fingerprinted.Count > 0) parts.Add($"{_fingerprinted.Count} file(s) fingerprinted");
+            return parts.Count == 0
+                ? ""
+                : $" Getting there would have meant {string.Join(" and ", parts)}.";
+        }
+    }
+
     /// <summary>Run the rules over the samples and say, in words, what they decided.</summary>
     private void Recalculate()
     {
         var copies = _samples.Select(s => s.AsFile()).ToList();
+
+        if (UsingScript)
+        {
+            RecalculateScript(copies);
+            return;
+        }
+
         var verdict = ConsolidationRules.Choose(copies, _rules.ToList());
 
         if (_rules.Count == 0)

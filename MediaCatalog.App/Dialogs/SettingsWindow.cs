@@ -1533,7 +1533,8 @@ public class SettingsWindow : Window
                         Field = r.Field, Prefer = r.Prefer, Tolerance = r.Tolerance
                     }).ToList(),
                     DeepCheck = cf.DeepCheckBeforeConsolidating,
-                    Fingerprint = cf.FingerprintBeforeConsolidating
+                    Fingerprint = cf.FingerprintBeforeConsolidating,
+                    Script = cf.Script
                 });
         if (_catFolders.Count == 0)
         {
@@ -1944,7 +1945,8 @@ public class SettingsWindow : Window
                 MatchBy = row.Rules.MatchBy,
                 Rules = row.Rules.Rules,
                 DeepCheckBeforeConsolidating = row.Rules.DeepCheck,
-                FingerprintBeforeConsolidating = row.Rules.Fingerprint
+                FingerprintBeforeConsolidating = row.Rules.Fingerprint,
+                Script = row.Rules.Script
             });
         }
 

@@ -50,6 +50,7 @@ public class FileCollisionWindow : Window
 
     private readonly ObservableCollection<Row> _rows = new();
     private readonly ListBox _list;
+    private readonly Button _consolidate;
     private readonly Func<MediaFile, Task<string>> _deepCheck;
 
     private readonly CheckBox _deleteDuplicates = new()
@@ -94,7 +95,8 @@ public class FileCollisionWindow : Window
                   "content — the choice is really about which location to keep it in."
                 : "The two are different files that happen to share a name. Sizes, dates and " +
                   "integrity are below; a deep check will decode a file end to end and say " +
-                  "whether it is damaged.",
+                  "whether it is damaged. Picking a row and choosing \"Consolidate selected\" " +
+                  "files that copy — any of them, not only the two in the collision.",
             Foreground = System.Windows.Media.Brushes.Gray,
             TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8)
         };
@@ -116,6 +118,19 @@ public class FileCollisionWindow : Window
             "The arriving file is given a free name — \"name (1).ext\"."));
         buttons.Children.Add(Choice("Skip this file", CollisionChoice.Skip,
             "Leave both alone and carry on with the rest of the batch."));
+
+        // The list is not only the two files in the collision: it holds every other copy of
+        // either of them, and the best copy is often one of those. Picking a row says
+        // "this is the one" — it goes to the destination and the rest make way for it.
+        _consolidate = new Button
+        {
+            Content = "Consolidate selected", Padding = new Thickness(10, 3, 10, 3),
+            Margin = new Thickness(0, 0, 8, 6), IsEnabled = false,
+            ToolTip = "File the copy you have picked at the destination name, whichever of " +
+                      "the copies below it is. The one already there makes way for it."
+        };
+        _consolidate.Click += (_, _) => ConsolidateSelected();
+        buttons.Children.Add(_consolidate);
 
         var deep = new Button
         {
@@ -144,9 +159,33 @@ public class FileCollisionWindow : Window
             FontFamily = new System.Windows.Media.FontFamily("Consolas, Courier New, monospace"),
             HorizontalContentAlignment = HorizontalAlignment.Stretch
         };
+        // Consolidating is a choice about one copy, so it waits until exactly one is picked.
+        _list.SelectionChanged += (_, _) =>
+            _consolidate.IsEnabled = _list.SelectedItems.Count == 1;
+        _list.MouseDoubleClick += (_, _) =>
+        {
+            if (_list.SelectedItems.Count == 1) ConsolidateSelected();
+        };
         dock.Children.Add(_list);
 
         Content = dock;
+    }
+
+    /// <summary>
+    /// Keep the one copy the user picked out of the list. Everything else about the answer —
+    /// clearing away the other copies, reusing it for the rest of the batch — is left to the
+    /// caller, exactly as with the four straightforward choices.
+    /// </summary>
+    private void ConsolidateSelected()
+    {
+        if (_list.SelectedItems.OfType<Row>().SingleOrDefault() is not { } row) return;
+
+        Resolution = new CollisionResolution(
+            CollisionChoice.KeepSelected,
+            _deleteDuplicates.IsChecked == true,
+            ApplyToRemaining: false,
+            row.File);
+        DialogResult = true;
     }
 
     private void BuildRows(CollisionRequest request, string verb)

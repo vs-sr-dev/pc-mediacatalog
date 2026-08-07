@@ -1356,6 +1356,13 @@ public class MainViewModel : ObservableObject
     /// catalogue happens to know about is a repair that leaves half the mess behind.
     /// Catalogued files are matched to their entries, so putting the name right puts the
     /// catalogue right with it.
+    ///
+    /// Every folder underneath is walked, all the way down, and the scan settings are not
+    /// consulted on the way. A library is a tree — the programme, then the season, then the
+    /// episodes — so a repair that stopped at the folder it was pointed at would find nothing
+    /// at all in the usual case; and an exclusion is somebody saying what a *scan* should not
+    /// waste its time on, which is no reason to refuse to put right a folder they have just
+    /// picked out by hand.
     /// </summary>
     public async Task<List<RenameProposal>> FindDoubledEpisodeNamesAsync(string folder)
     {
@@ -1363,14 +1370,12 @@ public class MainViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return proposals;
 
         IsScanning = true;
-        StatusText = $"Looking for doubled episode numbers under {folder}…";
+        StatusText = $"Looking for doubled episode numbers under {folder} and every folder in it…";
         List<string> paths;
         try
         {
-            paths = await Task.Run(() => DriveScanner.EnumerateMediaFiles(
-                new[] { folder }, CancellationToken.None,
-                excludeDescent: _settings.IsDescentBlocked,
-                ignoreExtension: _settings.IsExtensionIgnored).ToList());
+            paths = await Task.Run(() =>
+                DriveScanner.EnumerateMediaFiles(new[] { folder }).ToList());
         }
         finally { IsScanning = false; }
 
@@ -1396,8 +1401,8 @@ public class MainViewModel : ObservableObject
         }
 
         StatusText = proposals.Count == 0
-            ? "No doubled episode numbers found."
-            : $"{proposals.Count} file(s) carry their episode number twice.";
+            ? $"No doubled episode numbers among the {paths.Count} file(s) under {folder}."
+            : $"{proposals.Count} of {paths.Count} file(s) carry their episode number twice.";
         return proposals;
     }
 
@@ -2203,7 +2208,7 @@ public class MainViewModel : ObservableObject
         // them is concerned but are not failures to report as such.
         var unfiled = 0;
         var origins = toFile.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
-        var run = new CollisionRun("consolidated");
+        var run = new CollisionRun("consolidated", ConsolidationSubtitlePolicy);
         if (episodes.Cancelled) run.Cancelled = true;
 
         // What the job is, written down before a byte moves. A consolidation of a whole
@@ -2844,7 +2849,7 @@ public class MainViewModel : ObservableObject
         var byFile = chosen.ToDictionary(s => s.File, s => s.ProposedPath);
         var files = chosen.Select(s => s.File).ToList();
         var origins = files.Select(f => (File: f, f.FullPath, f.FileName)).ToList();
-        var run = new CollisionRun("consolidated");
+        var run = new CollisionRun("consolidated", ConsolidationSubtitlePolicy);
 
         var report = await RunFileOperationAsync(files, "Consolidating", async (file, bytes) =>
         {
@@ -3093,6 +3098,12 @@ public class MainViewModel : ObservableObject
         // outright. Somebody who has said "the longer one, and if they run the same the
         // better picture" has answered the question this method exists to ask, and answering
         // it again our own way would be overruling them.
+        //
+        // A script says the same thing at greater length, and comes first: a category with
+        // both has one because its question could not be put as an ordered list of steps.
+        if (_settings.ScriptFor(job.Category) is { Length: > 0 } source)
+            return await SettleByScriptAsync(job, candidates, source, review, ct);
+
         if (_settings.RulesFor(job.Category) is { Count: > 0 } rules)
             return await SettleByRulesAsync(job, candidates, rules, review, ct);
 
@@ -3230,6 +3241,82 @@ public class MainViewModel : ObservableObject
 
         return (new AutoDecision(keeper, doomed,
             $"{job.Display}: kept {keeper.FileName} — {verdict.Why}."), 0);
+    }
+
+    /// <summary>
+    /// Settle a set of rival copies with the comparison script the user wrote for the category.
+    ///
+    /// Two at a time, and only the unique copies: the tournament in
+    /// <see cref="RuleScriptSession"/> plays them off against each other until one is left.
+    /// What it costs is the script's own business — a decode happens because the script asked
+    /// for one, on the file it named — and no file is ever decoded, fingerprinted or measured
+    /// twice however many comparisons it survives.
+    ///
+    /// A script that declines to choose is not a failure and not a licence to guess. It goes
+    /// to the user with the line that stood aside, which is the most useful thing anybody
+    /// could be told at that point: their own rule, saying why.
+    /// </summary>
+    private async Task<(AutoDecision? Decision, int Corrupt)?> SettleByScriptAsync(
+        AutoJob job, List<MediaFile> candidates, string source,
+        List<AutoReview> review, CancellationToken ct)
+    {
+        if (!RuleScriptParser.TryParse(source, out var program, out var error))
+        {
+            review.Add(new AutoReview(candidates[0],
+                $"the consolidation rules written for '{job.Category}' do not read — {error}"));
+            return null;
+        }
+
+        var session = new RuleScriptSession(program, new ScriptServices(this, ct));
+        var verdict = await session.ChooseAsync(candidates, ct);
+
+        if (verdict.Winner is not { } keeper)
+        {
+            review.Add(new AutoReview(candidates[0],
+                $"the consolidation rules for '{job.Category}' did not choose between " +
+                $"{job.Distinct.Count} copies of this — {verdict.Why}"));
+            return null;
+        }
+
+        var doomed = job.Files
+            .Where(f => !ReferenceEquals(f, keeper) && File.Exists(f.FullPath))
+            .ToList();
+
+        return (new AutoDecision(keeper, doomed,
+            $"{job.Display}: kept {keeper.FileName} — {verdict.Why}."), 0);
+    }
+
+    /// <summary>
+    /// The expensive things a comparison script can ask for, done with the same engine the
+    /// rest of the program measures files with — so a length a script reads is the same
+    /// length the grid shows, and stays read once the run is over.
+    /// </summary>
+    private sealed class ScriptServices : IRuleScriptServices
+    {
+        private readonly MainViewModel _owner;
+        private readonly CancellationToken _ct;
+
+        public ScriptServices(MainViewModel owner, CancellationToken ct)
+        {
+            _owner = owner;
+            _ct = ct;
+        }
+
+        public Task ProbeAsync(MediaFile file, CancellationToken ct) => RunAsync(file, false, false, ct);
+
+        public Task DeepScanAsync(MediaFile file, CancellationToken ct) => RunAsync(file, false, true, ct);
+
+        public Task FingerprintAsync(MediaFile file, CancellationToken ct) => RunAsync(file, true, false, ct);
+
+        public void Report(string what) => _owner.StatusText = what;
+
+        private async Task RunAsync(MediaFile file, bool fingerprint, bool deepCheck, CancellationToken ct)
+        {
+            if (!_owner.CanAnalyze) return;
+            var engine = new ContentAnalysisEngine(_owner._tools);
+            await engine.AnalyzeAsync(new[] { file }, fingerprint, deepCheck, null,
+                ct == default ? _ct : ct);
+        }
     }
 
     /// <summary>
@@ -3647,10 +3734,22 @@ public class MainViewModel : ObservableObject
     /// </summary>
     private sealed class CollisionRun
     {
-        public CollisionRun(string operation) => Operation = operation;
+        public CollisionRun(string operation, SubtitlePolicy subtitles = SubtitlePolicy.Follow)
+        {
+            Operation = operation;
+            Subtitles = subtitles;
+        }
 
         /// <summary>What the user started, as a past participle: "moved", "consolidated".</summary>
         public string Operation { get; }
+
+        /// <summary>
+        /// What happens to a subtitle beside a file this batch moves. Carried on the run
+        /// because resolving a collision can itself move a file — the copy the user picked
+        /// out of the list — and that move has to treat subtitles the way the rest of the
+        /// batch does rather than inventing its own answer.
+        /// </summary>
+        public SubtitlePolicy Subtitles { get; }
 
         public CollisionResolution? Standing { get; set; }
         public bool Cancelled { get; set; }
@@ -3683,13 +3782,18 @@ public class MainViewModel : ObservableObject
         var existing = EntryAt(desired);
         var resolution = run.Standing ??
                          await CollisionResolver(BuildCollisionRequest(file, desired, run.Operation));
-        if (resolution.ApplyToRemaining) run.Standing = resolution;
+
+        // A standing answer names a choice, and "keep this particular copy" is not one: the
+        // copy the user picked belongs to this collision and to no other.
+        if (resolution.ApplyToRemaining && resolution.Choice != CollisionChoice.KeepSelected)
+            run.Standing = resolution;
 
         // Gathered before anything is deleted: once the loser is gone from the catalogue
         // there is no longer any way to ask what its other copies were.
         if (resolution.DeleteDuplicates &&
             resolution.Choice is CollisionChoice.KeepExisting or
-                CollisionChoice.KeepIncoming or CollisionChoice.KeepBoth)
+                CollisionChoice.KeepIncoming or CollisionChoice.KeepBoth or
+                CollisionChoice.KeepSelected)
         {
             run.TidyUp.AddRange(CopiesOf(file).Select(c => c.FullPath));
             if (existing != null) run.TidyUp.AddRange(CopiesOf(existing).Select(c => c.FullPath));
@@ -3722,11 +3826,71 @@ public class MainViewModel : ObservableObject
                 run.Survivors.Add(file);
                 return (DuplicatePolicy.Rename, null);
 
+            case CollisionChoice.KeepSelected when resolution.Selected is { } chosen:
+                return await ConsolidateChosenCopyAsync(
+                    file, desired, existing, chosen, resolution.DeleteDuplicates, run);
+
             default: // KeepBoth — the arrival takes a free name and both are spared.
                 run.Survivors.Add(file);
                 if (existing != null) run.Survivors.Add(existing); else run.SurvivorPaths.Add(desired);
                 return (DuplicatePolicy.Rename, null);
         }
+    }
+
+    /// <summary>
+    /// File the copy the user picked out of the collision list at the contested name.
+    ///
+    /// When what they picked is one of the two files in front of them this is nothing new —
+    /// it is "keep the arrival" or "keep the one already there" said a different way, and is
+    /// handled as those. The case worth having is the third one: the copy they chose was
+    /// never in the collision at all, but sitting somewhere else in the catalogue, and it is
+    /// the good one. That copy is moved in, the file at the destination makes way for it, and
+    /// the file that started all this stays where it is — one of the redundant copies now,
+    /// and cleared away with the rest if that was asked for.
+    /// </summary>
+    private async Task<(DuplicatePolicy Policy, RelocationResult? Result)> ConsolidateChosenCopyAsync(
+        MediaFile file, string desired, MediaFile? existing, MediaFile chosen,
+        bool deleteDuplicates, CollisionRun run)
+    {
+        bool Is(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+        if (Is(chosen.FullPath, file.FullPath))
+        {
+            await DeleteQuietlyAsync(new[] { desired }, toRecycleBin: true);
+            run.Survivors.Add(file);
+            return (DuplicatePolicy.Rename, null);
+        }
+
+        if (Is(chosen.FullPath, desired))
+        {
+            if (existing != null) run.Survivors.Add(existing); else run.SurvivorPaths.Add(desired);
+            if (deleteDuplicates) run.TidyUp.Add(file.FullPath);
+            return (DuplicatePolicy.Skip, new RelocationResult(false,
+                "Kept the file already there.", desired, AlreadyPresent: true));
+        }
+
+        if (!File.Exists(chosen.FullPath))
+            return (DuplicatePolicy.Skip, new RelocationResult(
+                false, "The copy you picked is no longer there.", file.FullPath));
+
+        // Clear the contested name first, so the copy coming in can simply have it.
+        await DeleteQuietlyAsync(new[] { desired }, toRecycleBin: true);
+
+        var directory = Path.GetDirectoryName(desired) ?? string.Empty;
+        var moved = await FileRelocator.RelocateAsync(
+            chosen, directory, deleteOriginal: true, newFileName: Path.GetFileName(desired),
+            DuplicatePolicy.Rename, null, subtitles: run.Subtitles);
+
+        if (!moved.Success)
+            return (DuplicatePolicy.Skip, new RelocationResult(
+                false, $"Could not file the copy you picked: {moved.Message}", file.FullPath));
+
+        run.Survivors.Add(chosen);
+        if (deleteDuplicates) run.TidyUp.Add(file.FullPath);
+        PersistAndRefresh();
+
+        return (DuplicatePolicy.Skip, new RelocationResult(true,
+            $"Filed the copy you picked ({chosen.FileName}) instead.", moved.NewPath));
     }
 
     /// <summary>

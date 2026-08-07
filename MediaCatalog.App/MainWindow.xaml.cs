@@ -297,7 +297,8 @@ public partial class MainWindow : Window
         if (proposals.Count == 0)
         {
             MessageBox.Show(this,
-                "Nothing under that folder carries its episode number twice.",
+                "Nothing in that folder, or in any folder under it, carries its episode " +
+                "number twice.",
                 "Fix names", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
