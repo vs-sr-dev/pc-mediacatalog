@@ -30,6 +30,11 @@ public class ClassifierTests
     [InlineData(@"D:\x\The Dead Zone - 04 01 - Broken Circle.mkv", 4, 1)]
     [InlineData(@"D:\x\Show S01E02 Thing.mkv", 1, 2)]
     [InlineData(@"D:\x\Show 1x02 Thing.mkv", 1, 2)]
+    [InlineData(@"D:\x\Sabrina, The Teenage Witch [01-01] Pilot [Dvdrip SAiNTS].avi", 1, 1)]
+    [InlineData(@"D:\x\Some Show (02-14) Title.mkv", 2, 14)]
+    [InlineData(@"D:\x\bull.2016.101.hdtv-lol[ettv].mkv", 1, 1)]
+    [InlineData(@"D:\x\01 - the.flash.2014.101.hdtv-lol.mp4", 1, 1)]
+    [InlineData(@"D:\x\some.show.2012.1102.hdtv-lol.mkv", 11, 2)]
     public void ReadsSeasonAndEpisode(string path, int season, int episode)
     {
         var file = Parse(path);
@@ -53,6 +58,10 @@ public class ClassifierTests
     [Theory]
     [InlineData(@"D:\x\Blade Runner 2049 (2017) 1080p.mkv")]
     [InlineData(@"D:\x\The Matrix 1999.mkv")]
+    [InlineData(@"D:\x\Blade.Runner.2049.2017.1080p.BluRay.x264.mkv")]
+    [InlineData(@"D:\x\Some.Film.2016.1080p.BluRay.x264-GROUP.mkv")]
+    [InlineData(@"D:\x\Some.Film.2016.720p.HDTV.x264.mkv")]
+    [InlineData(@"D:\x\Some Film (2009-2012 remaster).mkv")]
     public void DoesNotInventNumberingForFilms(string path)
     {
         var file = Parse(path);

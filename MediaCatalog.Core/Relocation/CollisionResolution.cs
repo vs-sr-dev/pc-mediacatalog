@@ -14,7 +14,15 @@ public enum CollisionChoice
     /// <summary>Keep both — the incoming file arrives under a free name.</summary>
     KeepBoth,
     /// <summary>Abandon the whole operation.</summary>
-    Cancel
+    Cancel,
+
+    /// <summary>
+    /// Keep the copy the user picked out of the list, whichever of the two sides it belongs
+    /// to — and that includes the copies sitting somewhere else entirely. Two files with one
+    /// name are rarely the only two in the picture, and the best of them is quite often
+    /// neither the one being moved nor the one already at the destination.
+    /// </summary>
+    KeepSelected
 }
 
 /// <summary>
@@ -46,10 +54,16 @@ public record CollisionRequest(
 /// that makes resolving a collision worth doing rather than just getting past it.
 /// </param>
 /// <param name="ApplyToRemaining">Answer the rest of the batch the same way, without asking again.</param>
+/// <param name="Selected">
+/// The copy the user picked, for <see cref="CollisionChoice.KeepSelected"/>. It is the file
+/// that ends up at the destination, whether it is one of the two in the collision or a copy
+/// that was sitting somewhere else all along.
+/// </param>
 public record CollisionResolution(
     CollisionChoice Choice,
     bool DeleteDuplicates = false,
-    bool ApplyToRemaining = false)
+    bool ApplyToRemaining = false,
+    MediaFile? Selected = null)
 {
     public static readonly CollisionResolution Cancelled = new(CollisionChoice.Cancel);
 

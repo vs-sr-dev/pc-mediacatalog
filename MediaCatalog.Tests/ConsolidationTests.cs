@@ -338,4 +338,40 @@ public class SettingsRoundTripTests
             if (File.Exists(path)) File.Delete(path);
         }
     }
+
+    /// <summary>
+    /// A script is several lines of text in an XML file, which is exactly the sort of thing
+    /// that comes back with its line endings rearranged and no longer parses.
+    /// </summary>
+    [Fact]
+    public void RulesOfYourOwnSurviveBeingSaved()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"mc-settings-{Guid.NewGuid():N}.xml");
+        try
+        {
+            var settings = new AppSettings();
+            settings.CategoryFolders.Add(new CategoryConsolidation
+            {
+                Category = "TvShow",
+                Folder = @"F:\TV",
+                Script = RuleScriptVocabulary.Example
+            });
+            settings.Save(path);
+
+            var loaded = AppSettings.Load(path);
+            var script = loaded.ScriptFor("TvShow");
+
+            Assert.True(RuleScriptParser.TryParse(script, out var program, out var error), error);
+            Assert.Equal(
+                RuleScriptParser.Parse(RuleScriptVocabulary.Example).Statements.Count,
+                program.Statements.Count);
+
+            // A category that has never been given one is not suddenly running a script.
+            Assert.Equal(string.Empty, loaded.ScriptFor("Movie"));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
 }

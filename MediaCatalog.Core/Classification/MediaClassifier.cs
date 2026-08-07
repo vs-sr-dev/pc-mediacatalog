@@ -55,6 +55,17 @@ public static class MediaClassifier
         $@"(?<=[^\s\d][ ._])(?<s>\d{{1,2}})[{Dashes}](?<e>\d{{2}})(?=[ ._][^\s\d])",
         RegexOptions.Compiled);
 
+    // "Sabrina, The Teenage Witch [01-01] Pilot": the season and the episode fenced off in
+    // brackets, with nothing at all to mark either of them.
+    //
+    // The brackets are what makes this safe where a bare pair of numbers would not be. A
+    // year range — "[2009-2012]" — cannot match, because the bracket has to be followed
+    // immediately by a one- or two-digit season; and a two-digit episode keeps "(1-2)", which
+    // is a part number rather than an episode code, out of it.
+    private static readonly Regex BracketedSeasonEpisode = new(
+        $@"[\[(]\s*(?<s>\d{{1,2}})\s*[{Dashes}]\s*(?<e>\d{{2,3}})\s*[\])]",
+        RegexOptions.Compiled);
+
     // The same in words: "Season Three Episode One". Kept apart from the pattern above so
     // the common all-digits form stays cheap and unambiguous.
     private static readonly Regex SeasonEpisodeWords = new(
@@ -97,6 +108,23 @@ public static class MediaClassifier
     private static readonly Regex SeasonWord = new(
         $@"\b(?:season|series)\s*[._\-]?\s*(?<s>{NumberWords.NumberPattern})\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// "bull.2016.101.hdtv-lol": the year a programme started, and then the episode code, with
+    /// nothing but a separator between them. The scene writes a series this way when its name
+    /// alone would not say which series it is, and the year in front is exactly what stops the
+    /// rest of this class from reading the code at all — a year with no episode markers is the
+    /// signature of a film.
+    ///
+    /// The code has to sit *immediately* after the year, and that is the whole of what makes
+    /// this safe: a 3-digit number loose in a release name is a bitrate or a channel count as
+    /// often as it is an episode, but a 3-digit number the year is holding hands with is an
+    /// episode. The season is read greedily, so "101" is season 1 episode 01 and "1102" is
+    /// season 11 episode 02.
+    /// </summary>
+    private static readonly Regex YearThenCompactEpisode = new(
+        @"(?<![0-9])(?:19|20)\d{2}[ ._\-](?<s>[1-9][0-9]?)(?<e>[0-9]{2})(?![0-9])",
+        RegexOptions.Compiled);
 
     // A bare 3-digit number: "123" => season 1, episode 23 (a common compact scheme).
     private static readonly Regex ThreeDigit = new(
@@ -183,7 +211,8 @@ public static class MediaClassifier
         if (!se.Success) se = SeasonEpisodeWords.Match(name);
         var xf = XFormat.Match(name);
         var spaced = FirstOutsideNoise(SpacedSeasonEpisode, name, noise)
-                     ?? FirstOutsideNoise(DashedSeasonEpisode, name, noise);
+                     ?? FirstOutsideNoise(DashedSeasonEpisode, name, noise)
+                     ?? FirstOutsideNoise(BracketedSeasonEpisode, name, noise);
 
         if (file.Kind != MediaKind.Video)
         {
@@ -282,6 +311,17 @@ public static class MediaClassifier
             file.VideoCategory = VideoCategory.TvShow;
             file.Season = NumberWords.Parse(sw.Groups["s"].Value);
             titleCut = sw.Index;
+        }
+        else if (TryYearThenEpisode(name, noise, out var ySeason, out var yEpisode, out var yIndex))
+        {
+            // "bull.2016.101.hdtv-lol": the year names the programme rather than dating a
+            // film, and what follows it is the episode. Checked before the year rule below
+            // for exactly that reason — left to that rule this is filed as a 2016 film and
+            // its numbering is thrown away.
+            file.VideoCategory = VideoCategory.TvShow;
+            file.Season = ySeason;
+            file.Episode = yEpisode;
+            titleCut = yearMatch is { } m && m.Index <= yIndex ? m.Index : yIndex;
         }
         else if (file.Year.HasValue)
         {
@@ -423,6 +463,45 @@ public static class MediaClassifier
         if (TryDigits(FourDigit, ResolutionNumbers4, name, noise, out season, out episode, out index))
             return true;
         return TryDigits(ThreeDigit, ResolutionNumbers, name, noise, out season, out episode, out index);
+    }
+
+    /// <summary>
+    /// Find the episode code that follows a year — the 101 in "bull.2016.101.hdtv-lol" — or
+    /// return false when the name has nothing of the sort.
+    ///
+    /// Two things are turned away. A code that is itself a plausible year, because
+    /// "Blade.Runner.2049.2017" is two years side by side and not season 20 episode 17; and a
+    /// code that is a resolution or sits inside an encoding token, because the 1080 in
+    /// "Film.2016.1080p" describes the picture rather than the programme.
+    /// </summary>
+    private static bool TryYearThenEpisode(
+        string name, IReadOnlyList<(int Start, int End)> noise,
+        out int season, out int episode, out int index)
+    {
+        season = episode = 0; index = -1;
+
+        foreach (Match m in YearThenCompactEpisode.Matches(name))
+        {
+            if (Overlaps(m, noise)) continue;
+
+            var code = m.Groups["s"].Value + m.Groups["e"].Value;
+            var value = int.Parse(code);
+            if (code.Length == 4)
+            {
+                if (ResolutionNumbers4.Contains(value)) continue;
+                if (value is >= 1900 and <= 2099) continue; // a second year, not an episode
+            }
+            else if (ResolutionNumbers.Contains(value)) continue;
+
+            var e = int.Parse(m.Groups["e"].Value);
+            if (e == 0) continue;
+
+            season = int.Parse(m.Groups["s"].Value);
+            episode = e;
+            index = m.Index;
+            return true;
+        }
+        return false;
     }
 
     private static bool TryDigits(

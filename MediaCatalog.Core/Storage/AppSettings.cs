@@ -63,6 +63,18 @@ public class CategoryConsolidation
     [XmlArray("Rules"), XmlArrayItem("Rule")]
     public List<ConsolidationRule> Rules { get; set; } = new();
 
+    /// <summary>
+    /// The comparison rules written out in the little language — see
+    /// <see cref="Consolidation.RuleScriptParser"/> — for a category whose question the
+    /// ordered steps above cannot express. Blank for every category that has never been given
+    /// one, which is every category by default.
+    ///
+    /// When there is a script it is what runs, and the steps above are left alone rather than
+    /// thrown away: somebody who writes a script and then thinks better of it should find
+    /// their steps still there when they clear it.
+    /// </summary>
+    public string Script { get; set; } = string.Empty;
+
     /// <summary>What counts as two copies of one thing for this category.</summary>
     public DuplicateMatch MatchBy { get; set; } = DuplicateMatch.SameContentOrTitle;
 
@@ -710,6 +722,13 @@ public class AppSettings
     /// </summary>
     public IReadOnlyList<Consolidation.ConsolidationRule> RulesFor(string category) =>
         ConsolidationFor(category)?.Rules ?? new List<Consolidation.ConsolidationRule>();
+
+    /// <summary>
+    /// The comparison script written for this category, or an empty string when it has none
+    /// and the ordered steps — or the built-in judgement — apply instead.
+    /// </summary>
+    public string ScriptFor(string category) =>
+        ConsolidationFor(category)?.Script ?? string.Empty;
 
     /// <summary>What counts as two copies of one thing, for this category.</summary>
     public Consolidation.DuplicateMatch MatchForCategory(string category) =>
