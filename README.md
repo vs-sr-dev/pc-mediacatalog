@@ -114,6 +114,65 @@ application restart:
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
 
+## New in v2.6
+
+**Rules of your own, written as rules**
+- ✅ **A small language for choosing between two copies.** The ordered steps added in v2.5
+  answer almost everybody's question, and there is one shape they cannot say at all: anything
+  conditional. *The better picture, unless it fails a decode.* *The longer one, but only when
+  they are more than a minute apart.* A step compares one thing and knows nothing about any
+  other, so that sentence has nowhere to go. **Settings… → Library → Rules… → Rules of your
+  own** is where it goes now: `if (File1.Quality >= File2.Quality AND NOT File1.Corrupt)
+  Consolidate(File1)`, as many lines as you like, read in order
+- ✅ **Built by dragging, not by typing.** Every piece of the language is a block in a palette
+  — what each of the two files is (`File1.Size`, `File2.Quality`, `File1.AlreadyFiled`), how
+  to compare them, how to join two comparisons up — and a rule is built by dropping them into
+  it. What can be dragged out is exactly what can be written, so a rule built this way always
+  reads. **Write it out instead** shows the same rules as text, and typing there puts the
+  blocks back the way the text says: they are one thing, not two
+- ✅ **You can ask it to find something out mid-comparison.** `DeepScan(File1)` decodes that
+  file end to end and fills in what the next line reads. `FingerprintFiles()` fingerprints
+  both. `LengthDifferent(60)` is false when the two run the same length to within a minute and
+  true when they do not. **Nothing expensive is ever done twice** — a copy that keeps winning
+  turns up in every comparison there is, and decoding it once per round is the difference
+  between an evening and a week
+- ✅ **`Consolidate(File1)` ends the comparison and names the keeper.** With more than two
+  different copies of one thing they are played off against each other two at a time — the
+  winner carried forward as `File1`, the next copy as `File2` — until one is left standing.
+  Only **unique** copies are compared: how many physical files there are does not matter if
+  only two of them are different, and where several copies of one of them exist the one on the
+  library's own drive is the one that goes forward
+- ✅ **`Undecided` is a thing you can say.** A script that has just established the two files
+  are not the same content at all should stand aside and let you look, and it can say so —
+  along with the line that did it. A script that simply runs out does the same
+- ✅ **The worked example works your rules too.** The two sample copies at the bottom of the
+  wizard are put through the script by the same code the real run uses, and it says which
+  would be filed, which line decided it, and what getting there would have cost in decodes
+
+**Two files, one name**
+- ✅ **Consolidate the copy you pick.** That dialog has never only held the two files in the
+  collision — it lists every other known copy of either of them, which is the whole reason it
+  is a list. Now you can pick one and say **Consolidate selected**: that copy goes to the
+  contested name, the file already there makes way for it, and the one that started it all
+  stays where it is. Often the best copy is neither of the two you were asked about
+
+**Episode numbers**
+- ✅ **`Sabrina, The Teenage Witch [01-01] Pilot [Dvdrip SAiNTS].avi` is S01E01.** A season and
+  an episode in brackets with nothing marking either of them. The brackets are what makes it
+  safe to read: `[2009-2012]` cannot match, and neither can `(1-2)`, which is a part number
+- ✅ **`bull.2016.101.hdtv-lol[ettv].mkv` is S01E01 again**, and so is
+  `01 - the.flash.2014.101.hdtv-lol.mp4`. The year names the programme rather than dating a
+  film, and what follows it is the episode code — read as episode 1 of season 1 rather than
+  episode 1 of season 10, because shows reach a first season rather more often than a tenth.
+  A year with nothing else beside it is still the signature of a film, and
+  `Blade.Runner.2049.2017.1080p` is still two years and not season 20
+- ✅ **Fixing doubled episode numbers reaches the whole tree.** *Library → Fix doubled episode
+  numbers in a folder…* walks every folder underneath the one you point it at, all the way
+  down, and no longer consults the scan exclusions on the way. A library is a tree — the
+  programme, then the season, then the episodes — and an exclusion is somebody saying what a
+  *scan* should not waste time on, which is no reason to refuse to repair a folder they have
+  just picked out by hand
+
 ## New in v2.5
 
 **A menu, instead of a wall of buttons**
@@ -861,6 +920,69 @@ was, and the whole thing is on the Undo stack.
 Without FFmpeg and ffprobe, step 4 cannot compare or decode anything, so those items are
 listed for you rather than guessed at. Everything else still runs.
 
+### Rules of your own
+
+The ordered steps on **Settings… → Library → Rules…** are the right answer for almost every
+library: a list of things to compare, applied in order, the first that can tell two copies
+apart deciding. What they cannot express is anything conditional, because a step compares one
+thing and knows nothing about any other.
+
+The second tab of that wizard, **Rules of your own**, is a small language for the rest. Each
+rule is one line — a condition, and what to do when it holds — and they are read in order:
+
+```
+FingerprintFiles()
+if (NOT FingerprintsMatch()) Undecided
+if (LengthDifferent(60)) Undecided
+if (File1.Quality > File2.Quality) Consolidate(File1)
+if (File2.Quality > File1.Quality) Consolidate(File2)
+if (File1.Size <= File2.Size) Consolidate(File1)
+Consolidate(File2)
+```
+
+Rules are **built by dragging blocks** out of a palette rather than typed; the text box under
+it shows the same rules written out, and typing there puts the blocks back the way the text
+says. A line beginning with `#` is a note to yourself.
+
+**Two files at a time, always.** `File1` is the copy that has won every comparison so far and
+`File2` is the next one. With more than two genuinely different copies of one thing they are
+played off against each other until one is left standing, so a language that only ever talks
+about two files can settle any number of them. **Only unique copies are compared** — how many
+physical files there are does not matter if only two of them are different — and where a
+piece of content has several identical copies the one already in the library, or on the
+library's drive, is the one that goes forward.
+
+**About each file** — `Size` (bytes), `Length` (seconds), `Quality` (picture height, or
+bitrate for audio), `Modified`, `NameLength`, `AlreadyFiled`, `DeepCheckIntegrity`, `Corrupt`,
+`Checked`, `HasFingerprint`. Written `File1.Size`, `File2.Quality`, and so on.
+
+**Comparing and joining** — `>` `>=` `<` `<=` `==` `!=`, joined with `AND`, `OR` and `NOT`,
+and bracketed where the order matters.
+
+**Finding something out**
+
+| | |
+|---|---|
+| `DeepScan(File1)` | Decode that file end to end and record what it found in its `DeepCheckIntegrity`, `Corrupt` and `Checked`, for the lines below to read. Answers true when the file came back sound |
+| `FingerprintFiles()` | Fingerprint both files, if they do not already have one |
+| `FingerprintsMatch()` | True when the two fingerprints are close enough to call the same content |
+| `LengthDifferent(60)` | False when the two run the same length to within sixty seconds, true when they are further apart |
+
+**Ending a comparison** — `Consolidate(File1)` or `Consolidate(File2)` names the copy that is
+kept; nothing after it runs, and every copy still to be looked at is compared against it.
+`Undecided` stops and puts the copies to you, which is the honest answer when the rules have
+just established that the two are not the same thing at all. A script that runs out without
+naming a copy does the same rather than guessing.
+
+**Nothing expensive is done twice.** A file that has been decoded, fingerprinted or measured
+once stays that way for the rest of the run, however many comparisons it goes on to appear
+in — which matters, because a copy that keeps winning appears in every comparison there is.
+Lengths and qualities are measured up front, once each, and only when the rules mention them.
+
+A category with rules of your own uses them instead of the steps; the steps are kept, not
+thrown away, so clearing the script brings them back. Rules that do not read are refused when
+you press **Use these rules**, with the line and what is wrong with it.
+
 ### Subtitles
 
 `The Film.mkv` and `The Film.eng.srt` are tied together by name and by nothing else, so a
@@ -1410,8 +1532,8 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.5` for
-v2.5 — with the product version kept as the number people talk about (`2.5`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.6` for
+v2.6 — with the product version kept as the number people talk about (`2.6`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
@@ -1440,8 +1562,9 @@ to the program icon.
   logic is unit-testable in isolation.
 - `MediaCatalog.App` — WPF front end (MVVM, no external packages).
 - `MediaCatalog.Tests` — xUnit tests over the engine: the episode-number parsing, the
-  consolidation rules and their round trip through the settings file, the rename fallbacks,
-  the extras linking, and the paused-job session. `dotnet test` runs them.
+  consolidation rules and their round trip through the settings file, the comparison language
+  the rules-of-your-own wizard builds, the rename fallbacks, the extras linking, and the
+  paused-job session. `dotnet test` runs them.
 
 ## How it works (the interesting bits)
 - **Exact duplicates** — streamed SHA-256 content hashes, grouped.
