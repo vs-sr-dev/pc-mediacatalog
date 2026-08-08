@@ -55,7 +55,9 @@ $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
 $project    = 'MediaCatalog.App\MediaCatalog.App.csproj'
+$plugin     = 'MediaCatalog.Plugins.EBooks\MediaCatalog.Plugins.EBooks.csproj'
 $publishDir = 'dist\publish'
+$pluginDir  = 'dist\plugin'
 $stageDir   = 'dist\MediaCatalog'
 $zipPath    = 'MediaCatalog-app.zip'
 
@@ -98,6 +100,16 @@ if (-not $SkipBuild) {
         -o $publishDir `
         --nologo
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE." }
+
+    # The example plugin. Framework-dependent and on its own, because a plugin is loaded off
+    # disk by the host at run time rather than linked into it - which is the whole point of
+    # the contract, and means it must not be dragged into the single-file executable.
+    Write-Step 'Building the example e-book plugin'
+
+    if (Test-Path $pluginDir) { Remove-Item $pluginDir -Recurse -Force }
+
+    dotnet publish $plugin -c Release -o $pluginDir --nologo
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish (plugin) failed with exit code $LASTEXITCODE." }
 }
 
 $exe = Join-Path $publishDir 'MediaCatalog.App.exe'
@@ -129,6 +141,62 @@ and fingerprinting and deep integrity checks are unavailable.
 
 Both are free and portable - just unzip.
 '@ | Out-File -FilePath (Join-Path $stageDir 'tools\PUT_TOOLS_HERE.txt') -Encoding utf8
+
+# --- Plugins -----------------------------------------------------------------------
+#
+# Two folders on purpose. 'plugins' is loaded at startup and ships empty; the example plugin
+# sits in 'plugins-available' and is copied across by whoever wants it. It claims .pdf, and
+# quietly deciding to catalogue every PDF on somebody's machine is not a thing to do to them
+# on their behalf.
+
+Write-Step 'Staging the plugins folders'
+
+$pluginsIn    = Join-Path $stageDir 'plugins'
+$pluginsExtra = Join-Path $stageDir 'plugins-available'
+New-Item -ItemType Directory -Path $pluginsIn    -Force | Out-Null
+New-Item -ItemType Directory -Path $pluginsExtra -Force | Out-Null
+
+if (Test-Path $pluginDir) {
+    Get-ChildItem -Path $pluginDir -Filter 'MediaCatalog.Plugins.*.dll' |
+        Copy-Item -Destination $pluginsExtra
+}
+
+@'
+Drop a plugin DLL in this folder and it is picked up the next time the program starts.
+
+A plugin teaches Media Catalog about file types it does not handle on its own - e-books,
+comics, whatever you have. What it brings is folded in everywhere: a scan picks the files up,
+the results grid gets a column per field, the filter offers them, and the consolidation rules
+can compare two copies on any of it.
+
+An example is in the plugins-available folder beside this one. Copy it in here to turn it on.
+
+  A PLUGIN IS A PROGRAM. It runs inside Media Catalog, with everything Media Catalog can
+  reach - every drive it can read, every file it can delete. Add plugins you trust, and
+  nothing else.
+
+Plugins can also be added, and switched off again, on Settings - Plugins.
+'@ | Out-File -FilePath (Join-Path $pluginsIn 'PUT_PLUGINS_HERE.txt') -Encoding utf8
+
+@'
+The example plugin: e-books.
+
+Copy MediaCatalog.Plugins.EBooks.dll into the "plugins" folder beside this one to turn it on,
+then restart Media Catalog (or press Save on Settings - Plugins).
+
+It picks up .epub .mobi .azw .azw3 .fb2 .djvu .pdf and fills in the book name, author, year
+published, publisher, genre, language, chapter count and - for a PDF - the page count. Those
+become columns in the results, values in the filter, and things your consolidation rules can
+compare two copies on. Files it handles are filed under a new "EBook" category, which can be
+given a consolidation folder and a naming pattern like any other.
+
+It is not switched on for you because it claims .pdf, and deciding to catalogue every PDF on
+your machine is your decision rather than ours.
+
+The source is in the repository under MediaCatalog.Plugins.EBooks, and it is written to be
+read: the whole plugin contract is three methods that take and return strings of XML, and no
+reference to Media Catalog at all.
+'@ | Out-File -FilePath (Join-Path $pluginsExtra 'ABOUT_THIS_PLUGIN.txt') -Encoding utf8
 
 # --- Zip -------------------------------------------------------------------------
 

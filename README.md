@@ -114,6 +114,71 @@ application restart:
 Files that vanished from disk are only pruned from the catalogue once a scan runs to
 full completion — a pause never deletes anything.
 
+## New in v2.7
+
+**The rules already in place**
+- ✅ **The built-in consolidation rules are shown.** A third tab in **Settings… → Library →
+  Rules…** is the judgement the program makes for itself when a category has none of its own —
+  written out both as ordered steps and in the little language, with the length tolerance
+  really set for that category, and a button to copy either into the tabs beside it. Until now
+  it was a paragraph of prose and several hundred lines of code nobody outside the project
+  will ever read, and anybody writing their first rules was being asked to start from nothing
+- ✅ **The difference between the two forms is the lesson.** The steps are the *choosing*; the
+  rules are the choosing plus the two places the program refuses to choose — copies that do
+  not look like the same thing, copies too far apart in length to be the same cut. A step
+  compares one thing and knows nothing about any other, so it always chooses, and the tab says
+  so rather than letting somebody find out when their library starts filing things it used to
+  ask about
+- ✅ **The language grew enough to say it.** `SameContent()` is the real test the built-in run
+  uses — two copies of different lengths are re-sampled over the stretch they have in common,
+  so a minute of credits does not make one look like a different film. That the built-in
+  judgement can be expressed at all is now a test rather than a claim: the day the language
+  cannot say what the program itself relies on, it has stopped being able to say the things
+  that matter
+
+**Rules built by dragging, properly**
+- ✅ **A block already placed can be dragged again** — anywhere in the rule it is in, or into
+  a different rule altogether. Taking blocks out and dropping fresh ones back in, which is
+  what v2.6 asked of everybody, is not building; it is retyping
+- ✅ **A whole rule can be dragged by its grip** to change where it comes in the order, which
+  matters rather a lot in a language where the first rule that holds is the one that decides
+
+**What would happen**
+- ✅ **Every field a rule can read is now in the worked example** — date modified, what a deep
+  check has already found, what one *would* find if a rule asked for one, whether either copy
+  has a fingerprint, and a tick for whether the two really are the same thing. A demonstration
+  that shows four of the ten fields can answer four tenths of the questions you have, and the
+  ones it could not answer were exactly the interesting ones: what happens when the best copy
+  is the one that will not decode
+- ✅ **Add a copy** puts a third and a fourth rival in, which is how to watch the tournament
+  actually play them off against each other rather than take it on trust
+
+**Plugins**
+- ✅ **Teach it about file types nobody wrote it to handle.** A plugin is a DLL with three
+  public methods that take and return strings of XML: what it is, which extensions it claims,
+  and what it makes of one file. They are found *by name* rather than through an interface, so
+  a plugin needs no reference to this program, can be written in anything that produces a .NET
+  assembly, and cannot be broken by a version of this that ships next year
+- ✅ **Dropped in and picked up.** Anything in the `plugins` folder beside the application is
+  loaded at startup; anything else can be named on **Settings… → Plugins**, by file or by
+  folder, and switched off there without being deleted. A plugin that will not load says why,
+  where you can see it, rather than failing quietly in the middle of a scan
+- ✅ **What it brings is folded in everywhere.** The extensions it claims become things a scan
+  picks up. The fields it declares become columns in the results, values in the filter bar,
+  lines in the file's details — and things a consolidation rule can compare two copies on,
+  both as a step (*keep the greater number of pages*) and in the language
+  (`if (File1.Author == "Iain M. Banks") Consolidate(File1)`). The media type it declares
+  becomes a real category, with its own consolidation folder, naming pattern and rules
+- ✅ **The example plugin ships with it.** An e-book plugin that reads EPUB metadata out of
+  the archive, counts a PDF's pages and falls back on the file name for the rest. It is in
+  `plugins-available` rather than `plugins`, deliberately: it claims `.pdf`, and deciding to
+  catalogue every PDF on somebody's machine is not a thing to do on their behalf
+- ✅ **Nothing a plugin does is trusted.** One that throws on a file has not stopped working —
+  a malformed e-book is a thing that exists — so the failure belongs to the file. One that
+  claims an extension the program already knows does not get it. One that tries to take a
+  field name the built-in rules use is refused, because `File1.Size` has to mean the size on
+  disk for every file there has ever been
+
 ## New in v2.6
 
 **Rules of your own, written as rules**
@@ -944,6 +1009,12 @@ Rules are **built by dragging blocks** out of a palette rather than typed; the t
 it shows the same rules written out, and typing there puts the blocks back the way the text
 says. A line beginning with `#` is a note to yourself.
 
+**A block already placed can be dragged again** — anywhere in the rule it is in, or into a
+different rule altogether — and a whole rule can be picked up by the grip at its left and
+dropped where it should come in the order. Building a rule by taking blocks out and dropping
+fresh ones back in, which is what the first version of this asked of everybody, is not
+building: it is retyping. Clicking a block still takes it out.
+
 **Two files at a time, always.** `File1` is the copy that has won every comparison so far and
 `File2` is the next one. With more than two genuinely different copies of one thing they are
 played off against each other until one is left standing, so a language that only ever talks
@@ -966,7 +1037,13 @@ and bracketed where the order matters.
 | `DeepScan(File1)` | Decode that file end to end and record what it found in its `DeepCheckIntegrity`, `Corrupt` and `Checked`, for the lines below to read. Answers true when the file came back sound |
 | `FingerprintFiles()` | Fingerprint both files, if they do not already have one |
 | `FingerprintsMatch()` | True when the two fingerprints are close enough to call the same content |
+| `SameContent()` | True when the two really are the same thing, allowing for one running longer than the other. This is the test the built-in rules use: a copy with a minute of credits on the end samples every frame at a different moment, so a plain fingerprint comparison says no about a film they both hold in full |
 | `LengthDifferent(60)` | False when the two run the same length to within sixty seconds, true when they are further apart |
+
+**Words, as well as numbers.** Anything a plugin hands back that is not a quantity — an
+author, a genre — is compared as words: `if (File1.Author == "Iain M. Banks")
+Consolidate(File1)`. Either quote opens a run and doubling one inside stands for it, so
+`'Frankie''s'` needs no escape anybody has to learn. Case is ignored.
 
 **Ending a comparison** — `Consolidate(File1)` or `Consolidate(File2)` names the copy that is
 kept; nothing after it runs, and every copy still to be looked at is compared against it.
@@ -982,6 +1059,159 @@ Lengths and qualities are measured up front, once each, and only when the rules 
 A category with rules of your own uses them instead of the steps; the steps are kept, not
 thrown away, so clearing the script brings them back. Rules that do not read are refused when
 you press **Use these rules**, with the line and what is wrong with it.
+
+### The rules already in place
+
+The third tab of that wizard, **What the built-in rules do**, is the judgement the program
+makes for itself when a category has no rules of its own — written out in both of the ways
+you can write yours, with a button to copy either into the tabs beside it.
+
+It is there because the best starting point for a set of rules is a working set of rules.
+Until now, "the built-in judgement" was a paragraph of prose and several hundred lines of
+code nobody outside the project will ever read, and anybody sitting down to write their first
+rules was being asked to start from nothing — with no way of telling whether what they were
+about to write was better or worse than what they already had.
+
+**As steps**, it is four lines: keep the greater integrity, then the greater quality, then the
+greater length, then the lesser size. **As rules of your own**, it is the whole of it,
+including the two places the program refuses to choose at all:
+
+```
+FingerprintFiles()
+if (NOT SameContent()) Undecided
+if (LengthDifferent(60)) Undecided
+if (File1.Quality > File2.Quality AND DeepScan(File1)) Consolidate(File1)
+if (File2.Quality > File1.Quality AND DeepScan(File2)) Consolidate(File2)
+if (File1.Length > File2.Length AND DeepScan(File1)) Consolidate(File1)
+if (File2.Length > File1.Length AND DeepScan(File2)) Consolidate(File2)
+if (File1.Size <= File2.Size AND DeepScan(File1)) Consolidate(File1)
+if (DeepScan(File2)) Consolidate(File2)
+Undecided
+```
+
+The tolerance on line three is the one really set for that category, so what is on screen is
+your library's rules rather than a specimen.
+
+The shape of the last six lines is worth reading twice. `AND DeepScan(File1)` is not so much
+a second condition as an order of work: the comparison decides which copy is in front, and
+only that one is decoded. A copy that fails its decode fails the rule and falls through — and
+since every later rule that would have kept it is guarded by its now-known state, it cannot
+win any of those either. That is exactly what the built-in run does, and it is why nothing is
+decoded that did not need to be.
+
+The difference between the two columns is the lesson. The steps are the *choosing*; the rules
+are the choosing plus the two places the program stands aside. A step compares one thing and
+knows nothing about any other, so it always chooses — which is why somebody who copies the
+steps and changes nothing ends up with a category that files rather more readily than the
+built-in judgement does. The wizard says so rather than leaving them to find out.
+
+That these two really are the built-in judgement is a test rather than a claim. If the little
+language ever stops being able to express the rules the program itself relies on, it has
+stopped being able to say the things that matter, and that is where it turns up.
+
+### What would happen
+
+At the bottom of the wizard sit sample copies with **every figure a rule can read** — name,
+length, quality, size, date modified, what a deep check has already found, what one *would*
+find if a rule asked for one, whether either has been fingerprinted, whether either is already
+filed, and a box for each field a plugin adds for that category. Under them is a tick for
+whether the two really are the same thing, which is what `SameContent()` and
+`FingerprintsMatch()` are answered from.
+
+Change any of them and the sentence below changes with it: which copy would be filed, which
+rule decided it, which files would go, and what getting there would have cost in decodes and
+fingerprints. It is worked out by the same code the real run uses — the samples are the same
+objects a real file is — and **Add a copy** puts a third and a fourth in, which is how to
+watch the tournament play several rivals off against each other.
+
+A demonstration that lets you change four of the ten things a rule can ask about can answer
+four tenths of the questions you have, and the ones it cannot answer are exactly the ones
+worth asking: what happens when the best copy is the one that will not decode, what happens
+when nothing has fingerprinted either of them.
+
+## Plugins
+
+The program handles audio and video itself. **A plugin is how it is taught about anything
+else** — e-books, comics, whatever you have — and what a plugin brings is folded in as though
+it had always been there: a scan picks the files up, the results grid gets a column for every
+field, the filter bar offers them, the file's details show them, a category appears that can
+be given a consolidation folder and a naming pattern, and the consolidation rules can compare
+two copies on any of it.
+
+**Where they come from.** Anything in the `plugins` folder beside the application is picked up
+on its own. Anything else can be named on **Settings… → Plugins**, either a DLL or a folder to
+look in, and each one can be switched off there without deleting it. The list says what each
+plugin is, which extensions it claims and which fields it fills in — and, for one that will
+not load, why.
+
+> **A plugin is a program.** It runs inside this one, with everything this one can reach:
+> every drive it can read, every file it can delete. Add plugins you trust, and nothing else.
+
+**The contract is three methods.** A plugin is a .NET assembly holding a public class with
+three public methods, each taking and returning a string:
+
+```csharp
+public string Describe();             // what I am, and the fields I can fill in
+public string FileTypes();            // the extensions a scan should pick up for me
+public string Read(string fullPath);  // what I make of this one file
+```
+
+They are found **by name rather than through an interface**, and that is the point: a plugin
+needs no reference to this program to be written, cannot be broken by a version of it that
+ships next year, and can be written in anything that produces a .NET assembly. Every string
+that crosses the boundary is XML, which is a string with a shape — the right amount of
+structure for something somebody is going to write by hand in an afternoon.
+
+`Describe()` says what the plugin is and declares its fields:
+
+```xml
+<plugin name="E-books" version="1.0" media="EBook">
+  <description>Catalogues e-books.</description>
+  <fields>
+    <field name="BookName"      label="Book name"          type="text"   meaning="…" />
+    <field name="Author"        label="Author"             type="text"   meaning="…" />
+    <field name="YearPublished" label="Year published"     type="number" meaning="…" />
+    <field name="Chapters"      label="Number of chapters" type="number" meaning="…" />
+    <field name="Pages"         label="Number of pages"    type="number" meaning="…" />
+  </fields>
+</plugin>
+```
+
+`media` is the category those files are filed under, and it becomes a real one — it turns up
+in the category dropdown and can be configured like any other. `name` is what a rule writes
+(`File1.YearPublished`) and `label` is what everything on screen calls it (*Year published*);
+`type` is `text`, `number`, `date` or `truth`, and decides how two copies are compared, so
+that nine pages is fewer than ten rather than more.
+
+`FileTypes()` claims extensions — `<fileTypes><type extension=".epub"/></fileTypes>`, or just
+`.epub .mobi .azw3` for a plugin whose whole answer is three extensions. `Read(path)` hands
+back what it made of one file: `<file><field name="Author" value="Iain M. Banks"/></file>`,
+or a field per element if that is what you reach for. A field that was never declared is
+dropped, since a field nobody declared has no label, no type and nowhere to be shown.
+
+**Everything is forgiving on the way in.** A plugin that writes `ext=` rather than
+`extension=`, or names a field *Year published* where a rule needs one word, is understood
+rather than refused — the name becomes `YearPublished` and the label stays as it was written.
+Nothing a plugin does is trusted: a plugin that throws on a file is not a plugin that has
+stopped working (a malformed e-book is a thing that exists), so the failure belongs to the
+file; one that will not load at all is set aside with the reason rather than taking a scan
+down with it; and one claiming an extension another already has is told so on the settings
+page rather than quietly losing.
+
+**A plugin cannot take a name the built-in rules use.** `File1.Size` has to mean the size on
+disk for every file there has ever been, so a plugin field called `Size` is refused. Nor can
+it take an extension the program already knows: `.mp4` is not available.
+
+**The example plugin ships with the release.** `MediaCatalog.Plugins.EBooks.dll` is in
+`plugins-available` in the zip — copy it into `plugins` to turn it on — and its source is
+forty lines of documentation with a working plugin wrapped round it. It reads an EPUB's
+metadata out of the archive, counts a PDF's pages, and falls back on the file name for the
+rest. It is **not** on by default, deliberately: it claims `.pdf`, and quietly deciding to
+catalogue every PDF on somebody's machine is not a thing to do to them on their behalf.
+
+Once it is on, `Author` and `Number of pages` are columns you can sort and filter, and
+`if (File1.Pages > File2.Pages) Consolidate(File1)` is a rule you can write — or, in the
+steps: *keep the greater number of pages*.
 
 ### Subtitles
 
@@ -1532,8 +1762,8 @@ typed yourself). A confirmed name is also **shared with every file that had the 
 title**, so one lookup fixes — and spares a query for — the rest of the show.
 
 ## Versioning
-The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.6` for
-v2.6 — with the product version kept as the number people talk about (`2.6`). Major and
+The build carries a Windows **file version of `0.0.<major>.<minor>`** — `0.0.2.7` for
+v2.7 — with the product version kept as the number people talk about (`2.7`). Major and
 minor stay at `0`; the release rides in the build and revision fields.
 
 Both numbers are set in one place, [`Directory.Build.props`](Directory.Build.props), and
@@ -1561,10 +1791,15 @@ to the program icon.
   relocation, fingerprinting, integrity, XML persistence). No UI dependency, so the
   logic is unit-testable in isolation.
 - `MediaCatalog.App` — WPF front end (MVVM, no external packages).
+- `MediaCatalog.Plugins.EBooks` — the example plugin, and the documentation for writing one.
+  It references nothing of the other two projects, which is the point: a plugin is found by
+  the shape of its methods rather than by an interface it implements.
 - `MediaCatalog.Tests` — xUnit tests over the engine: the episode-number parsing, the
   consolidation rules and their round trip through the settings file, the comparison language
-  the rules-of-your-own wizard builds, the rename fallbacks, the extras linking, and the
-  paused-job session. `dotnet test` runs them.
+  the rules-of-your-own wizard builds, that the built-in judgement can still be written in
+  that language, the plugin contract (loaded off disk, through its own load context, exactly
+  as the program loads one), the rename fallbacks, the extras linking, and the paused-job
+  session. `dotnet test` runs them.
 
 ## How it works (the interesting bits)
 - **Exact duplicates** — streamed SHA-256 content hashes, grouped.
