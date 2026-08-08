@@ -58,6 +58,13 @@ public static class CategoryResolver
     /// <summary>The auto-detected category, ignoring any user override.</summary>
     public static string Auto(MediaFile file)
     {
+        // A file a plugin handles is whatever that plugin says it is, and nothing else gets
+        // a say. An e-book called "Discworld S01E02" is not an episode of anything: the
+        // extension is the plugin's, so the category is the plugin's too.
+        if (file.Kind == MediaKind.Other &&
+            Plugins.MediaPlugins.CategoryOf(file) is { Length: > 0 } fromPlugin)
+            return fromPlugin;
+
         // A season/episode code is the strongest signal there is: whatever the extension
         // suggests, a file that says S02E05 is an episode of something.
         if (file is { Season: not null, Episode: not null } && !file.IsExtra)
@@ -83,6 +90,13 @@ public static class CategoryResolver
     public static IReadOnlyList<string> All(AppSettings settings)
     {
         var list = new List<string>(BuiltIn);
+
+        // Whatever the plugins brought. They come before the user's own so that a category a
+        // plugin owns is never mistaken for one somebody typed and can be removed.
+        foreach (var c in Plugins.MediaPlugins.Categories)
+            if (!list.Contains(c, StringComparer.OrdinalIgnoreCase))
+                list.Add(c);
+
         foreach (var c in settings.CustomCategories)
             if (!string.IsNullOrWhiteSpace(c) &&
                 !list.Contains(c, StringComparer.OrdinalIgnoreCase))

@@ -109,6 +109,76 @@ public class RuleScriptTests
     }
 
     /// <summary>
+    /// "Within six seconds" takes in six seconds exactly. Anything else makes the figure
+    /// somebody typed mean one second less than it says, and puts the language a hair out of
+    /// step with the tolerance the built-in rules use.
+    /// </summary>
+    [Fact]
+    public async Task ExactlyTheMarginApartIsNotDifferent()
+    {
+        var first = File("first.mkv", minutes: 90);
+        var second = File("second.mkv", minutes: 91);   // sixty seconds
+
+        var verdict = await RunAsync(
+            "if (LengthDifferent(60)) Undecided\nConsolidate(File1)",
+            new[] { first, second });
+
+        Assert.Same(first, verdict.Winner);
+    }
+
+    /// <summary>
+    /// SameContent goes through the services rather than comparing fingerprints here, so the
+    /// application can supply the better test — the one that lines two copies up over the
+    /// stretch they have in common — and the built-in rules mean the same thing written out
+    /// as they do when they run.
+    /// </summary>
+    [Fact]
+    public async Task SameContentIsAskedOfTheServices()
+    {
+        var services = new SayingServices { Same = false };
+
+        var verdict = await RunAsync(
+            "if (NOT SameContent()) Undecided\nConsolidate(File1)",
+            new[] { File("a.mkv"), File("b.mkv") }, services);
+
+        Assert.True(verdict.Undecided);
+        Assert.True(services.Asked);
+    }
+
+    private sealed class SayingServices : IRuleScriptServices
+    {
+        public bool Same { get; init; }
+        public bool Asked { get; private set; }
+
+        public Task ProbeAsync(MediaFile file, CancellationToken ct) => Task.CompletedTask;
+        public Task DeepScanAsync(MediaFile file, CancellationToken ct) => Task.CompletedTask;
+        public Task FingerprintAsync(MediaFile file, CancellationToken ct) => Task.CompletedTask;
+
+        public Task<bool> SameContentAsync(MediaFile a, MediaFile b, CancellationToken ct)
+        {
+            Asked = true;
+            return Task.FromResult(Same);
+        }
+    }
+
+    /// <summary>
+    /// Words in quotes, for the fields a plugin brings that are not quantities. Either quote
+    /// opens a run, and doubling one inside stands for it — so a name with an apostrophe can
+    /// be written without anybody having to learn an escape.
+    /// </summary>
+    [Theory]
+    [InlineData("if (File1.Size > 0) Consolidate(File1)", 1)]
+    [InlineData("if (\"a\" == \"a\") Consolidate(File1)", 1)]
+    [InlineData("if ('Frankie''s' != \"other\") Consolidate(File1)", 1)]
+    public void ReadsWordsInQuotes(string script, int statements) =>
+        Assert.Equal(statements, RuleScriptParser.Parse(script).Statements.Count);
+
+    [Fact]
+    public void AQuoteThatIsNeverClosedIsRefused() =>
+        Assert.False(RuleScriptParser.TryParse(
+            "if (File1.Size == \"never ends) Consolidate(File1)", out _, out _));
+
+    /// <summary>
     /// A copy that keeps winning turns up in every comparison there is, and decoding it once
     /// per round would be the difference between an evening and a week.
     /// </summary>
@@ -194,6 +264,7 @@ public class RuleScriptTests
     [InlineData("if (File1.Size > File2.Size Consolidate(File1)")]
     [InlineData("DeepScan()")]
     [InlineData("LengthDifferent(10, 20)")]
+    [InlineData("if (File1.Size > File2.Size) Consolidate(File1) @")]
     public void RefusesWhatItCannotRun(string script)
     {
         Assert.False(RuleScriptParser.TryParse(script, out _, out var error));
@@ -229,6 +300,8 @@ public class RuleScriptTests
     [InlineData("if (LengthDifferent(60)) Undecided")]
     [InlineData("FingerprintFiles()")]
     [InlineData("Consolidate(File2)")]
+    [InlineData("if (SameContent()) Consolidate(File1)")]
+    [InlineData("if (File1.NameLength != 0 AND NOT File2.Corrupt) Consolidate(File1)")]
     public void PiecesGoBackTogetherIntoTheSameRule(string line)
     {
         var statement = RuleScriptParser.Parse(line).Statements.Single();

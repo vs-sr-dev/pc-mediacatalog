@@ -5,7 +5,14 @@ public enum MediaKind
 {
     Unknown = 0,
     Audio,
-    Video
+    Video,
+
+    /// <summary>
+    /// Something a plugin handles: an e-book, or whatever else somebody has taught the
+    /// program about. Not audio and not video, but catalogued, filed and de-duplicated
+    /// exactly as they are — which is the whole point of a plugin.
+    /// </summary>
+    Other
 }
 
 /// <summary>For video files, our best guess at what the content is.</summary>

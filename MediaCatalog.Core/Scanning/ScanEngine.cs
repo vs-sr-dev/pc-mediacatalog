@@ -243,6 +243,14 @@ public class ScanEngine
 
             var entry = MergeEntry(info);
             MediaClassifier.Classify(entry, settings);
+
+            // What a plugin makes of a file it handles — an author, a page count. Asked once
+            // and written into the catalogue, because a plugin that opens an archive to read
+            // its metadata is far too slow to ask again every time a window is opened. A file
+            // no plugin handles never reaches the registry at all.
+            if (entry.Kind == MediaKind.Other && entry.PluginFields.Count == 0)
+                Plugins.MediaPlugins.Enrich(entry);
+
             Classification.DuplicateMetadata.ApplyFolderTitle(entry, settings);
             QuickIntegrityCheck(entry, info);
 
@@ -440,6 +448,9 @@ public class ScanEngine
         {
             entry.Sha256 = string.Empty;
             entry.HashFailed = false;   // a changed file earns a fresh attempt
+            // A book that has been edited has a different page count. Whatever a plugin said
+            // about the old contents is about the old contents, so it is asked again.
+            entry.PluginFields.Clear();
         }
 
         entry.FileName = info.Name;

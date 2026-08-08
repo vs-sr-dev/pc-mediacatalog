@@ -20,6 +20,18 @@ public interface IRuleScriptServices
 
     /// <summary>Say what the run is doing, for the status line.</summary>
     void Report(string what) { }
+
+    /// <summary>
+    /// Whether these two really are the same content, allowing for one running longer than
+    /// the other.
+    ///
+    /// The default is a plain fingerprint comparison, which is all anything without the
+    /// external tools can offer. The application supplies a better one — it re-samples the
+    /// stretch the two files have in common, so a copy with a minute of credits on the end is
+    /// still recognised as the same film — and that is what the built-in rules use.
+    /// </summary>
+    Task<bool> SameContentAsync(MediaFile a, MediaFile b, CancellationToken ct) =>
+        Task.FromResult(FingerprintMatcher.LooksLikeSameContent(a, b));
 }
 
 /// <summary>
@@ -140,6 +152,9 @@ public sealed class RuleScriptSession
             case NumberExpr number:
                 return ScriptValue.Of(number.Value);
 
+            case TextExpr text:
+                return ScriptValue.Of(text.Value);
+
             case TruthExpr truth:
                 return ScriptValue.Of(truth.Value);
 
@@ -168,15 +183,7 @@ public sealed class RuleScriptSession
             {
                 var left = await EvaluateAsync(compare.Left, file1, file2, ct);
                 var right = await EvaluateAsync(compare.Right, file1, file2, ct);
-                return ScriptValue.Of(compare.Operator switch
-                {
-                    ">" => left.Number > right.Number,
-                    "<" => left.Number < right.Number,
-                    ">=" => left.Number >= right.Number,
-                    "<=" => left.Number <= right.Number,
-                    "==" => Math.Abs(left.Number - right.Number) < 0.000001,
-                    _ => Math.Abs(left.Number - right.Number) >= 0.000001
-                });
+                return ScriptValue.Of(Compare(left, right, compare.Operator));
             }
 
             case CallExpr call:
@@ -184,6 +191,30 @@ public sealed class RuleScriptSession
         }
 
         return ScriptValue.Of(false);
+    }
+
+    /// <summary>
+    /// One comparison. Two numbers are compared as numbers; anything involving words is
+    /// compared as words, ignoring case — which is what somebody asking whether an author is
+    /// "Iain M. Banks" means, and which puts A before B when the question is which of two
+    /// genres sorts first.
+    /// </summary>
+    private static bool Compare(ScriptValue left, ScriptValue right, string @operator)
+    {
+        var order = left.IsText || right.IsText
+            ? string.Compare(left.ToString(), right.ToString(), StringComparison.OrdinalIgnoreCase)
+            : Math.Abs(left.Number - right.Number) < 0.000001 ? 0
+            : left.Number < right.Number ? -1 : 1;
+
+        return @operator switch
+        {
+            ">" => order > 0,
+            "<" => order < 0,
+            ">=" => order >= 0,
+            "<=" => order <= 0,
+            "==" => order == 0,
+            _ => order != 0
+        };
     }
 
     private async Task<ScriptValue> CallAsync(
@@ -208,11 +239,17 @@ public sealed class RuleScriptSession
                     HasFingerprint(file1) && HasFingerprint(file2) &&
                     FingerprintMatcher.LooksLikeSameContent(file1, file2));
 
+            case "SameContent":
+                return ScriptValue.Of(await _services.SameContentAsync(file1, file2, ct));
+
             case "LengthDifferent":
             {
+                // Strictly further apart than the margin: "within ten seconds" takes in ten
+                // seconds exactly, which is what anybody writing the number means by it and
+                // what the built-in rules have always done with their own tolerance.
                 var margin = Math.Abs((await EvaluateAsync(call.Arguments[0], file1, file2, ct)).Number);
                 var gap = Math.Abs(file1.DurationSeconds - file2.DurationSeconds);
-                return ScriptValue.Of(gap >= margin);
+                return ScriptValue.Of(gap > margin);
             }
         }
 
@@ -225,7 +262,15 @@ public sealed class RuleScriptSession
     private static bool HasFingerprint(MediaFile file) =>
         !string.IsNullOrEmpty(file.AudioFingerprint) || !string.IsNullOrEmpty(file.VideoFingerprint);
 
-    /// <summary>One thing about one file, as a number the comparisons can use.</summary>
+    /// <summary>
+    /// One thing about one file, as a value the comparisons can use.
+    ///
+    /// Anything the built-in list does not know is a plugin's field, and what sort of thing
+    /// it holds is the plugin's own declaration: a page count compares as a number, a
+    /// publication date as a date, an author as words. A file of some other kind entirely has
+    /// no such field, and comes back empty rather than pretending to a value — which is what
+    /// makes a rule about e-books harmless in a library that also holds films.
+    /// </summary>
     private static ScriptValue Read(MediaFile file, string property) => property switch
     {
         "Size" => ScriptValue.Of(file.SizeBytes),
@@ -242,8 +287,45 @@ public sealed class RuleScriptSession
         "Corrupt" => ScriptValue.Of(file.Integrity == IntegrityStatus.Corrupt),
         "Checked" => ScriptValue.Of(file.Integrity != IntegrityStatus.NotChecked),
         "HasFingerprint" => ScriptValue.Of(HasFingerprint(file)),
-        _ => ScriptValue.Of(false)
+        _ => PluginValue(file, property)
     };
+
+    /// <summary>A plugin's field, read as whatever sort of thing the plugin said it is.</summary>
+    public static ScriptValue PluginValue(MediaFile file, string property)
+    {
+        var raw = file.FieldValue(property);
+        var type = Plugins.MediaPlugins.Field(property)?.Type ?? Plugins.PluginFieldType.Text;
+
+        switch (type)
+        {
+            case Plugins.PluginFieldType.Number:
+                // Something that was meant to be a figure and is not — "unknown", or blank —
+                // is zero, so a rule asking for more than three hundred pages passes it over
+                // rather than choosing on a value nobody has.
+                return ScriptValue.Of(
+                    double.TryParse(raw, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var number)
+                        ? number
+                        : 0);
+
+            case Plugins.PluginFieldType.Date:
+                // The same scale as Modified, so the two are comparable and both read as a
+                // number that grows with the date.
+                return ScriptValue.Of(
+                    DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal |
+                        System.Globalization.DateTimeStyles.AdjustToUniversal, out var date)
+                        ? (date - new DateTime(2000, 1, 1)).TotalSeconds
+                        : 0);
+
+            case Plugins.PluginFieldType.Truth:
+                return ScriptValue.Of(raw.Trim() is "true" or "True" or "TRUE" or "yes" or "Yes"
+                    or "YES" or "1");
+
+            default:
+                return ScriptValue.Of(raw);
+        }
+    }
 
     // --- The expensive things, each done once per file ----------------------
 

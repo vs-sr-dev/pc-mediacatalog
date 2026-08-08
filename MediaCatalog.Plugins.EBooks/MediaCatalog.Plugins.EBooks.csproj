@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The worked example of a plugin.
+
+    Note what it does not reference: not MediaCatalog.Core, not MediaCatalog.App, nothing of
+    this program's at all. A plugin is found by the shape of its methods rather than by an
+    interface it implements, so it can be built by anybody, against nothing, in any version
+    of .NET the host runtime will load - and cannot be broken by a release of the program it
+    knows nothing about.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>MediaCatalog.Plugins.EBooks</AssemblyName>
+    <RootNamespace>MediaCatalog.Plugins.EBooks</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

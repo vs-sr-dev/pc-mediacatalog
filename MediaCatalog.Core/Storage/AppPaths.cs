@@ -26,6 +26,14 @@ public static class AppPaths
     public static string EnumerationPath => Path.Combine(DataDirectory, "enumeration.xml");
 
     /// <summary>
+    /// Where plugins are picked up from without anybody having to say so — a folder beside
+    /// the application, in keeping with everything else it keeps beside itself. A plugin
+    /// dropped in here is found the next time the program starts; one anywhere else can be
+    /// added by name.
+    /// </summary>
+    public static string PluginsDir => Path.Combine(DataDirectory, "plugins");
+
+    /// <summary>
     /// IMDb's raw <c>title.basics.tsv</c> as downloaded (or still gzipped). Over a
     /// gigabyte, and only ever read a line at a time to boil it down to
     /// <see cref="ImdbDataPath"/>.

@@ -67,6 +67,20 @@ public class ConsolidationRule
 {
     public ConsolidationField Field { get; set; } = ConsolidationField.Quality;
 
+    /// <summary>
+    /// The name of a plugin's field, when this step compares one of those rather than one of
+    /// the built-in seven — <c>Author</c>, <c>NumberOfPages</c>. Empty for every step that
+    /// compares something every file has, which is every step anybody wrote before there
+    /// were plugins.
+    ///
+    /// When it is set, <see cref="Field"/> says nothing and is not read.
+    /// </summary>
+    public string FieldName { get; set; } = string.Empty;
+
+    /// <summary>True when this step is about something a plugin brought.</summary>
+    [System.Xml.Serialization.XmlIgnore]
+    public bool IsPluginField => !string.IsNullOrWhiteSpace(FieldName);
+
     public RulePreference Prefer { get; set; } = RulePreference.Greater;
 
     /// <summary>
@@ -89,8 +103,18 @@ public class ConsolidationRule
         var margin = Tolerance > 0
             ? $", when they differ by more than {Tolerance.ToString("0.##", CultureInfo.InvariantCulture)}"
             : "";
-        return $"Keep {direction} {Label(Field).ToLowerInvariant()}{margin}";
+        return $"Keep {direction} {Caption().ToLowerInvariant()}{margin}";
     }
+
+    /// <summary>
+    /// What this step compares, in words: a built-in field's label, or a plugin field's own —
+    /// which is why a plugin declares a label at all, so a rule reads "keep the greater number
+    /// of pages" rather than "keep the greater NumberOfPages".
+    /// </summary>
+    public string Caption() =>
+        IsPluginField
+            ? Plugins.MediaPlugins.Field(FieldName)?.Label ?? FieldName
+            : Label(Field);
 
     /// <summary>What a field is called on screen.</summary>
     public static string Label(ConsolidationField field) => field switch
@@ -186,6 +210,14 @@ public static class ConsolidationRules
     {
         foreach (var rule in rules)
         {
+            // A step about a plugin's field is settled by the plugin's own idea of what that
+            // field is: a page count as a number, an author as words.
+            if (rule.IsPluginField)
+            {
+                if (BetweenOnPluginField(a, b, rule) is { } decided) return decided;
+                continue;
+            }
+
             var left = ValueOf(a, rule.Field);
             var right = ValueOf(b, rule.Field);
 
@@ -202,6 +234,59 @@ public static class ConsolidationRules
         }
 
         return (null, "every step found them equal");
+    }
+
+    /// <summary>
+    /// One step about a plugin's field, or null when it cannot tell the two apart — either
+    /// file has nothing in that field, or they hold the same thing.
+    ///
+    /// A file of some other kind has no such field at all, which is the case that matters:
+    /// a step comparing page counts, applied to two rips of a film, has to stand aside rather
+    /// than find them equal at nothing and stop the steps below it from deciding.
+    /// </summary>
+    private static (MediaFile? Winner, string Why)? BetweenOnPluginField(
+        MediaFile a, MediaFile b, ConsolidationRule rule)
+    {
+        var left = a.FieldValue(rule.FieldName);
+        var right = b.FieldValue(rule.FieldName);
+        if (left.Length == 0 || right.Length == 0) return null;
+
+        var type = Plugins.MediaPlugins.Field(rule.FieldName)?.Type ?? Plugins.PluginFieldType.Text;
+        var greaterWins = rule.Prefer == RulePreference.Greater;
+
+        if (type == Plugins.PluginFieldType.Text)
+        {
+            var order = string.Compare(left, right, StringComparison.OrdinalIgnoreCase);
+            if (order == 0) return null;
+            var textWinner = (order > 0) == greaterWins ? a : b;
+            return (textWinner, $"{rule.Describe()} — \"{left}\" against \"{right}\"");
+        }
+
+        var x = Numeric(left, type);
+        var y = Numeric(right, type);
+        if (x is not { } first || y is not { } second) return null;
+
+        if (Math.Abs(first - second) <= Math.Max(0, rule.Tolerance)) return null;
+
+        var winner = (first > second) == greaterWins ? a : b;
+        return (winner, $"{rule.Describe()} — {left} against {right}");
+    }
+
+    /// <summary>A plugin field's value as a figure, or null when it does not read as one.</summary>
+    private static double? Numeric(string value, Plugins.PluginFieldType type)
+    {
+        if (type == Plugins.PluginFieldType.Truth)
+            return value.Trim().ToLowerInvariant() is "true" or "yes" or "1" ? 1 : 0;
+
+        if (type == Plugins.PluginFieldType.Date)
+            return DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date)
+                ? (date - new DateTime(2000, 1, 1)).TotalSeconds
+                : null;
+
+        return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+            ? number
+            : null;
     }
 
     /// <summary>

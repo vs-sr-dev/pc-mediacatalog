@@ -3,6 +3,19 @@ using System.Xml.Serialization;
 namespace MediaCatalog.Core.Models;
 
 /// <summary>
+/// One thing a plugin said about a file: "Author", "Iain M. Banks".
+///
+/// Held as a name and a string rather than as anything typed, because what the fields are is
+/// decided by a plugin the program has never seen. What each one means — a number, a date,
+/// words — is the plugin's own declaration, and lives with the plugin.
+/// </summary>
+public class MediaFileField
+{
+    public string Name { get; set; } = string.Empty;
+    public string Value { get; set; } = string.Empty;
+}
+
+/// <summary>
 /// A single catalogued media file. Kept as a flat, XML-serialisable record so the
 /// whole catalogue round-trips cleanly through <see cref="Persistence.CatalogStore"/>.
 /// </summary>
@@ -154,6 +167,33 @@ public class MediaFile
 
     /// <summary>When this entry was last (re)scanned.</summary>
     public DateTime IndexedUtc { get; set; }
+
+    /// <summary>
+    /// What a plugin made of this file: an author, a page count, whatever the plugin that
+    /// handles this file type says a file of that type has.
+    ///
+    /// Empty for every audio and video file, which is what the program handles itself. The
+    /// catalogue carries them because a plugin that is slow — one that opens an archive to
+    /// read a book's metadata, say — should be asked once, at the scan, and never again.
+    /// </summary>
+    [XmlArray("PluginFields"), XmlArrayItem("Field")]
+    public List<MediaFileField> PluginFields { get; set; } = new();
+
+    /// <summary>
+    /// What a plugin field holds for this file, or an empty string when this file has no such
+    /// field — which is the answer for every file a plugin does not handle.
+    /// </summary>
+    public string FieldValue(string name)
+    {
+        foreach (var field in PluginFields)
+            if (string.Equals(field.Name, name, StringComparison.OrdinalIgnoreCase))
+                return field.Value;
+        return string.Empty;
+    }
+
+    /// <summary>True when a plugin has said anything at all about this file.</summary>
+    [XmlIgnore]
+    public bool HasPluginFields => PluginFields.Count > 0;
 
     /// <summary>
     /// Set when hashing was attempted and failed (unreadable, locked, refused). Distinct

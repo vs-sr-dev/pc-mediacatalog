@@ -15,6 +15,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MediaCatalog.Core\MediaCatalog.Core.csproj" />
+    <!--
+      The example plugin, so its DLL lands beside the tests and the plugin tests can load it
+      the way the program does - off disk, through its own load context, by the shape of its
+      methods. A plugin system tested only against a plugin written inside the test assembly
+      is a plugin system tested against the one case that cannot go wrong.
+    -->
+    <ProjectReference Include="..\MediaCatalog.Plugins.EBooks\MediaCatalog.Plugins.EBooks.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 
 namespace MediaCatalog.Core.Consolidation;
 
@@ -15,7 +16,7 @@ namespace MediaCatalog.Core.Consolidation;
 /// </summary>
 public static class RuleScriptParser
 {
-    private enum TokenKind { Identifier, Number, Symbol, End }
+    private enum TokenKind { Identifier, Number, Text, Symbol, End }
 
     private record Token(TokenKind Kind, string Text, int Line, int Start, int Length)
     {
@@ -96,10 +97,14 @@ public static class RuleScriptParser
     {
         FileExpr f => f.Side.ToString(),
         NumberExpr n => n.Value.ToString("0.##", CultureInfo.InvariantCulture),
+        TextExpr t => Quote(t.Value),
         TruthExpr t => t.Value ? "true" : "false",
         PropertyExpr p => $"{p.Side}.{p.Property}",
         _ => string.Empty
     };
+
+    /// <summary>Words written back the way they were read, doubling any quote inside them.</summary>
+    public static string Quote(string text) => "\"" + (text ?? string.Empty).Replace("\"", "\"\"") + "\"";
 
     private static void Write(ScriptExpr expr, List<string> pieces, ScriptExpr? parent)
     {
@@ -113,6 +118,9 @@ public static class RuleScriptParser
                 return;
             case NumberExpr n:
                 pieces.Add(n.Value.ToString("0.##", CultureInfo.InvariantCulture));
+                return;
+            case TextExpr text:
+                pieces.Add(Quote(text.Value));
                 return;
             case TruthExpr t:
                 pieces.Add(t.Value ? "true" : "false");
@@ -168,7 +176,9 @@ public static class RuleScriptParser
     private static bool MentionsLength(ScriptExpr expr) => expr switch
     {
         PropertyExpr p => p.Property is "Length" or "Quality",
-        CallExpr c => c.Name == "LengthDifferent",
+        // SameContent lines the two files up over the stretch they have in common, which it
+        // cannot do without knowing how long either of them runs.
+        CallExpr c => c.Name is "LengthDifferent" or "SameContent",
         _ => false
     };
 
@@ -182,7 +192,7 @@ public static class RuleScriptParser
     private static bool MentionsFingerprint(ScriptExpr expr) => expr switch
     {
         PropertyExpr p => p.Property is "HasFingerprint",
-        CallExpr c => c.Name is "FingerprintFiles" or "FingerprintsMatch",
+        CallExpr c => c.Name is "FingerprintFiles" or "FingerprintsMatch" or "SameContent",
         _ => false
     };
 
@@ -225,6 +235,43 @@ public static class RuleScriptParser
                 var start = i;
                 while (i < source.Length && (char.IsDigit(source[i]) || source[i] == '.')) i++;
                 tokens.Add(new Token(TokenKind.Number, source[start..i], line, start, i - start));
+                continue;
+            }
+
+            // Words in quotes, for comparing against a plugin's text field. Either quote
+            // opens one, so a name with an apostrophe in it can be written without escaping
+            // anything: "Frankie's". A doubled quote inside stands for one.
+            if (c is '"' or '\'')
+            {
+                var quote = c;
+                var start = i;
+                var text = new StringBuilder();
+                i++;
+
+                while (true)
+                {
+                    if (i >= source.Length || source[i] == '\n')
+                        throw new RuleScriptException(
+                            $"This {quote} is never closed — put another one at the end of the words.",
+                            line);
+
+                    if (source[i] == quote)
+                    {
+                        if (i + 1 < source.Length && source[i + 1] == quote)
+                        {
+                            text.Append(quote);
+                            i += 2;
+                            continue;
+                        }
+                        i++;
+                        break;
+                    }
+
+                    text.Append(source[i]);
+                    i++;
+                }
+
+                tokens.Add(new Token(TokenKind.Text, text.ToString(), line, start, i - start));
                 continue;
             }
 
@@ -395,6 +442,8 @@ public static class RuleScriptParser
                     throw new RuleScriptException($"'{token.Text}' is not a number.", token.Line);
                 return new NumberExpr(value);
             }
+
+            if (Current.Kind == TokenKind.Text) return new TextExpr(Take().Text);
 
             if (Current.Kind != TokenKind.Identifier)
                 throw new RuleScriptException(

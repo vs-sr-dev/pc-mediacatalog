@@ -14,27 +14,45 @@ public enum ScriptSide
     File2 = 1
 }
 
-/// <summary>A value in the little language: a number, with a note of whether it was written
-/// as a truth value, so it can be shown back the way it was meant.</summary>
+/// <summary>
+/// A value in the little language: a number or some words, with a note of whether the number
+/// was written as a truth value, so it can be shown back the way it was meant.
+///
+/// Words are here because of plugins. A field an e-book plugin hands back — an author, a
+/// genre — is not a quantity, and a language that can only hold numbers can only ask numeric
+/// questions about it. A comparison where either side is words is settled as words; one where
+/// both sides are numbers is settled as numbers, exactly as it always was.
+/// </summary>
 public readonly struct ScriptValue
 {
-    private ScriptValue(double number, bool isBoolean)
+    private ScriptValue(double number, bool isBoolean, string? text)
     {
         Number = number;
         IsBoolean = isBoolean;
+        Text = text;
     }
 
     public double Number { get; }
     public bool IsBoolean { get; }
 
-    /// <summary>Anything that is not zero is true, which is how the comparisons chain.</summary>
-    public bool Truth => Number != 0;
+    /// <summary>The words, when this is words. Null when it is a number.</summary>
+    public string? Text { get; }
 
-    public static ScriptValue Of(double number) => new(number, false);
-    public static ScriptValue Of(bool truth) => new(truth ? 1 : 0, true);
+    public bool IsText => Text != null;
 
-    public override string ToString() => IsBoolean
-        ? (Truth ? "true" : "false")
+    /// <summary>
+    /// Anything that is not zero is true, which is how the comparisons chain. Words are true
+    /// when there are any: a field the plugin filled in is something, and an empty one is not.
+    /// </summary>
+    public bool Truth => IsText ? Text!.Length > 0 : Number != 0;
+
+    public static ScriptValue Of(double number) => new(number, false, null);
+    public static ScriptValue Of(bool truth) => new(truth ? 1 : 0, true, null);
+    public static ScriptValue Of(string text) => new(0, false, text ?? string.Empty);
+
+    public override string ToString() =>
+        IsText ? Text!
+        : IsBoolean ? (Truth ? "true" : "false")
         : Number.ToString("0.##", CultureInfo.InvariantCulture);
 }
 
@@ -49,6 +67,9 @@ public sealed record PropertyExpr(ScriptSide Side, string Property) : ScriptExpr
 public sealed record FileExpr(ScriptSide Side) : ScriptExpr;
 
 public sealed record NumberExpr(double Value) : ScriptExpr;
+
+/// <summary>Some words in quotes: <c>File1.Author == "Iain M. Banks"</c>.</summary>
+public sealed record TextExpr(string Value) : ScriptExpr;
 
 public sealed record TruthExpr(bool Value) : ScriptExpr;
 
@@ -122,9 +143,32 @@ public sealed record RuleScriptProgram(IReadOnlyList<ScriptStatement> Statements
 public static class RuleScriptVocabulary
 {
     /// <summary>A file property, and what it means when the user hovers over it.</summary>
-    public record Term(string Name, bool IsTruth, string Meaning);
+    /// <param name="Label">
+    /// What it is called on screen, when that differs from what a rule writes — a plugin
+    /// field declared "Number of pages" is written <c>File1.NumberOfPages</c>.
+    /// </param>
+    /// <param name="Category">
+    /// The category the property belongs to, for a plugin field: only e-books have an author.
+    /// Empty for everything built in, which every file has.
+    /// </param>
+    public record Term(string Name, bool IsTruth, string Meaning)
+    {
+        public string Label { get; init; } = string.Empty;
+        public string Category { get; init; } = string.Empty;
 
-    public static readonly IReadOnlyList<Term> Properties = new List<Term>
+        /// <summary>True for a property some plugin brought rather than one built in.</summary>
+        public bool FromPlugin => Category.Length > 0;
+
+        /// <summary>What to put on screen: the plugin's own words when it gave any.</summary>
+        public string Caption => Label.Length > 0 ? Label : Name;
+    }
+
+    /// <summary>
+    /// The things every file has, whatever it is. Kept apart from
+    /// <see cref="Properties"/> so a plugin can never take one of these names: a rule saying
+    /// <c>File1.Size</c> has to mean the size on disk for every file there has ever been.
+    /// </summary>
+    public static readonly IReadOnlyList<Term> BuiltInProperties = new List<Term>
     {
         new("Size", false, "Size on disk, in bytes. Always known, so a comparison on it always decides."),
         new("Length", false,
@@ -143,6 +187,55 @@ public static class RuleScriptVocabulary
         new("HasFingerprint", true, "True when a perceptual fingerprint has been calculated for this file.")
     };
 
+    private static IReadOnlyList<Term> _pluginProperties = Array.Empty<Term>();
+
+    /// <summary>
+    /// The properties plugins have brought — an e-book's author, its page count. Empty until
+    /// a plugin has been loaded, which is the state every installation starts in.
+    /// </summary>
+    public static IReadOnlyList<Term> PluginProperties => _pluginProperties;
+
+    /// <summary>
+    /// Everything a rule can say about a file: the built-in properties, plus whatever the
+    /// plugins added. The parser, the palette and the help text all read this one list, which
+    /// is what stops a plugin field being something you can write but not drag, or drag but
+    /// not have accepted.
+    /// </summary>
+    public static IReadOnlyList<Term> Properties =>
+        _pluginProperties.Count == 0
+            ? BuiltInProperties
+            : BuiltInProperties.Concat(_pluginProperties).ToList();
+
+    /// <summary>
+    /// Take the fields the loaded plugins declare as properties a rule may use. Called by the
+    /// plugin registry as it loads, and by nothing else — the vocabulary is a statement of
+    /// what may be written, so there is exactly one place that decides it.
+    /// </summary>
+    public static void UsePluginFields(IEnumerable<Plugins.PluginField> fields) =>
+        _pluginProperties = fields.Select(f => new Term(
+                f.Name,
+                f.Type == Plugins.PluginFieldType.Truth,
+                Explain(f))
+            {
+                Label = f.Label,
+                Category = f.MediaType
+            })
+            .ToList();
+
+    private static string Explain(Plugins.PluginField field)
+    {
+        var sort = field.Type switch
+        {
+            Plugins.PluginFieldType.Number => "A number",
+            Plugins.PluginFieldType.Date => "A date",
+            Plugins.PluginFieldType.Truth => "True or false",
+            _ => "Words"
+        };
+        var meaning = field.Meaning is { Length: > 0 } m ? m + " " : "";
+        return $"{meaning}{sort}, from the {field.PluginName} plugin. Only files of the " +
+               $"'{field.MediaType}' category have it; for anything else it is empty.";
+    }
+
     /// <summary>A function, its arity, and what it does.</summary>
     public record Function(string Name, int Arity, bool TakesFile, string Meaning);
 
@@ -159,6 +252,11 @@ public static class RuleScriptVocabulary
         new("FingerprintsMatch", 0, false,
             "True when both fingerprints are close enough to call the same content. Fingerprint " +
             "the files first, or this has nothing to compare and answers false."),
+        new("SameContent", 0, false,
+            "True when the two really are the same thing, allowing for one running longer than " +
+            "the other — a copy with a minute of credits on the end samples every frame at a " +
+            "different moment, so a plain fingerprint comparison says no about a film they both " +
+            "hold in full. This is the test the built-in rules use. Fingerprint the files first."),
         new("LengthDifferent", 1, false,
             "Compare how long the two files run. False when they are within the number of seconds " +
             "you pass — the same length, allowing for a distributor's ident — and true when they " +

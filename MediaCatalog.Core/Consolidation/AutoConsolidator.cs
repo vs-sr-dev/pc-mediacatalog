@@ -86,7 +86,10 @@ public static class AutoConsolidator
             // Extras are never filed on their own account: they belong beside the film or
             // episode they are an extra of, and travel with it when that moves.
             if (CategoryResolver.IsExtra(category) || file.IsExtra) continue;
-            if (file.Kind is not (MediaKind.Audio or MediaKind.Video)) continue;
+            // Audio, video, and whatever a plugin has taught the program to catalogue. What
+            // is left out is only the genuinely unknown: a file nothing claims to understand
+            // cannot be filed anywhere, because nothing knows what it is.
+            if (file.Kind is not (MediaKind.Audio or MediaKind.Video or MediaKind.Other)) continue;
             if (!File.Exists(file.FullPath)) continue;
 
             if (MissingInformation(file, category, settings) is { } problem)

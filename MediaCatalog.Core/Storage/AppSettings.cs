@@ -583,6 +583,44 @@ public class AppSettings
         return IsKindScanned(Scanning.MediaExtensions.Classify(extension));
     }
 
+    // --- Plugins -----------------------------------------------------------
+
+    /// <summary>
+    /// Extra folders to look in for plugins, over and above the <c>plugins</c> folder beside
+    /// the application. For somebody who keeps their plugins with the rest of their tools
+    /// rather than inside the program's own folder.
+    /// </summary>
+    [XmlArray("PluginFolders"), XmlArrayItem("Folder")]
+    public List<string> PluginFolders { get; set; } = new();
+
+    /// <summary>
+    /// Individual plugin DLLs named outright — what "Add a plugin…" adds. Kept apart from
+    /// the folders so that adding one file does not quietly load everything sitting beside it.
+    /// </summary>
+    [XmlArray("PluginFiles"), XmlArrayItem("File")]
+    public List<string> PluginFiles { get; set; } = new();
+
+    /// <summary>
+    /// Plugins switched off by file name. A plugin is somebody else's code running inside
+    /// this program, so being able to stop one without deleting it matters: the answer to
+    /// "did the new plugin break my scan?" should not be "delete it and find out".
+    /// </summary>
+    [XmlArray("DisabledPlugins"), XmlArrayItem("Plugin")]
+    public List<string> DisabledPlugins { get; set; } = new();
+
+    /// <summary>True when the user has switched a plugin off, by its file name.</summary>
+    public bool IsPluginDisabled(string fileName) =>
+        !string.IsNullOrWhiteSpace(fileName) &&
+        DisabledPlugins.Any(p => string.Equals(p, fileName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Switch a plugin on or off, keeping the list free of duplicates.</summary>
+    public void SetPluginEnabled(string fileName, bool enabled)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return;
+        DisabledPlugins.RemoveAll(p => string.Equals(p, fileName, StringComparison.OrdinalIgnoreCase));
+        if (!enabled) DisabledPlugins.Add(fileName);
+    }
+
     // --- Categories ---
     [XmlArray("CustomCategories"), XmlArrayItem("Category")]
     public List<string> CustomCategories { get; set; } = new();
