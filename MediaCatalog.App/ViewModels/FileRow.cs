@@ -99,8 +99,19 @@ public class FileRow : ObservableObject
         "Dup" => DuplicateFlag,
         "TMDb" => TmdbFlag,
         "Consolidated" => Model.Consolidated ? "yes" : "no",
-        _ => ""
+        // Anything else is a plugin's field, under the name the plugin calls it on screen.
+        _ => PluginValue(column)
     };
+
+    /// <summary>
+    /// What a plugin said about this file, under a field's own label. Empty for every file
+    /// the plugin does not handle, which is what makes filtering on Author harmless in a
+    /// library that is mostly films — those rows simply have nothing there.
+    /// </summary>
+    public string PluginValue(string label) =>
+        MediaCatalog.Core.Plugins.MediaPlugins.FieldByLabel(label) is { } field
+            ? Model.FieldValue(field.Name)
+            : "";
 
     public bool IsDuplicate
     {

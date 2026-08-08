@@ -55,6 +55,11 @@ public partial class MainWindow : Window
         _vm.ConfirmRedundantExclusions = AskAboutRedundantExclusions;
         UpdateUndoButton();
 
+        // Plugin columns go up before the layout is restored, so a remembered width for
+        // "Author" lands on the Author column rather than on nothing.
+        SyncPluginColumns();
+        _vm.PluginColumnsChanged += SyncPluginColumns;
+
         BuildColumnHeaderMenu();
         ApplySavedColumnLayout();
         ApplyTmdbVisibility();
@@ -1444,6 +1449,70 @@ public partial class MainWindow : Window
         column.Visibility = Visibility.Collapsed;
         SaveColumnLayout();
     }
+
+    /// <summary>
+    /// Marks a column as one a plugin brought, so the set can be taken down and put back up
+    /// when the plugins change without disturbing the ones that were always there.
+    /// </summary>
+    private const string PluginColumnTag = "plugin";
+
+    /// <summary>
+    /// Put a column on the grid for every field the loaded plugins declare, and take away
+    /// the ones belonging to a plugin that has gone.
+    ///
+    /// They go on the end rather than among the built-in columns. A library that is nine
+    /// tenths films should not have Author sitting between Year and Size; a library that is
+    /// nine tenths books can drag it where it likes, and the position is remembered as any
+    /// other column's is.
+    /// </summary>
+    private void SyncPluginColumns()
+    {
+        foreach (var stale in FilesGrid.Columns
+                     .Where(c => Equals(GetColumnTag(c), PluginColumnTag)).ToList())
+            FilesGrid.Columns.Remove(stale);
+
+        foreach (var field in MediaCatalog.Core.Plugins.MediaPlugins.Fields)
+        {
+            var column = new DataGridTextColumn
+            {
+                Header = field.Label,
+                Width = 130,
+                IsReadOnly = true,
+                Binding = new System.Windows.Data.Binding
+                {
+                    Converter = PluginFieldColumn.Instance,
+                    ConverterParameter = field.Label
+                },
+                HeaderStyle = PluginHeaderStyle(field)
+            };
+            SetColumnTag(column, PluginColumnTag);
+            FilesGrid.Columns.Add(column);
+        }
+
+        BuildColumnHeaderMenu();
+        ApplySavedColumnLayout();
+    }
+
+    private static Style PluginHeaderStyle(MediaCatalog.Core.Plugins.PluginField field)
+    {
+        var style = new Style(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader));
+        style.Setters.Add(new Setter(ToolTipProperty,
+            $"{field.Meaning}\n\nFrom the {field.PluginName} plugin. Only '{field.MediaType}' " +
+            "files have it.".TrimStart()));
+        return style;
+    }
+
+    private static object? GetColumnTag(DataGridColumn column) =>
+        column.ReadLocalValue(ColumnTagProperty) is { } value &&
+        value != DependencyProperty.UnsetValue
+            ? value
+            : null;
+
+    private static void SetColumnTag(DataGridColumn column, string tag) =>
+        column.SetValue(ColumnTagProperty, tag);
+
+    private static readonly DependencyProperty ColumnTagProperty =
+        DependencyProperty.RegisterAttached("ColumnTag", typeof(string), typeof(MainWindow));
 
     private void ApplySavedColumnLayout()
     {

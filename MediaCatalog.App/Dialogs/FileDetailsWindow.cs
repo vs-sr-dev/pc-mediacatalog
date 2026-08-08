@@ -109,6 +109,29 @@ public class FileDetailsWindow : Window
         panel.Children.Add(Hint("Change the title and leave the file name alone, and the file is renamed " +
                                 "to match the naming scheme (unless that is switched off in Settings)."));
 
+        // Whatever a plugin made of this file. Shown rather than edited: the values are read
+        // out of the file itself, so anything typed here would be overwritten by the next
+        // scan and would have been a lie in the meantime.
+        if (file.PluginFields.Count > 0)
+        {
+            panel.Children.Add(Section("What the plugin read"));
+            foreach (var field in file.PluginFields)
+            {
+                var label = MediaCatalog.Core.Plugins.MediaPlugins.Field(field.Name)?.Label
+                            ?? field.Name;
+                panel.Children.Add(Labeled($"{label}:", new TextBox
+                {
+                    Text = field.Value, IsReadOnly = true,
+                    Background = System.Windows.Media.Brushes.WhiteSmoke,
+                    BorderThickness = new Thickness(0)
+                }));
+            }
+            panel.Children.Add(Hint(
+                $"Read out of the file by the {MediaCatalog.Core.Plugins.MediaPlugins.For(file.Extension)?.Name ?? "plugin"} " +
+                "plugin when it was scanned. Not editable here — the file is where these live, and " +
+                "the next scan would read them back."));
+        }
+
         var buttons = new StackPanel
         {
             Orientation = Orientation.Horizontal,

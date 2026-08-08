@@ -15,6 +15,7 @@ using MediaCatalog.Core.Integrity;
 using MediaCatalog.Core.Models;
 using MediaCatalog.Core.Naming;
 using MediaCatalog.Core.Persistence;
+using MediaCatalog.Core.Plugins;
 using MediaCatalog.Core.Relocation;
 using MediaCatalog.Core.Scanning;
 using MediaCatalog.Core.Storage;
@@ -190,6 +191,12 @@ public class MainViewModel : ObservableObject
         _catalog = CatalogStore.Load(_catalogPath);
         _toolSettings = ToolSettings.Load(_toolSettingsPath);
         _settings = AppSettings.Load(_settingsPath);
+
+        // Before anything reads the catalogue or asks what a category is: the plugins decide
+        // which extensions count as media, which categories exist and what a rule may compare
+        // on, and every one of those questions is asked from here on.
+        MediaPlugins.Reload(_settings);
+
         _tools = ExternalTools.Resolve(_toolSettings);
         _session = ScanSession.Load(_sessionPath);
         _consolidationSession = ConsolidationSession.Load(_consolidationSessionPath);
@@ -365,7 +372,22 @@ public class MainViewModel : ObservableObject
         "S/E", "Size", "Length", "Quality", "Integrity", "Path", "Dup", "TMDb", "Consolidated"
     };
 
-    public Array Columns => FilterColumns;
+    /// <summary>
+    /// The columns the filter bar offers: the built-in ones, plus a column for every field
+    /// the loaded plugins declare. A library with an e-book plugin can filter on author in
+    /// the same box it filters on title, which is the whole point of folding a plugin's
+    /// fields into the program rather than showing them in a corner of their own.
+    /// </summary>
+    public IReadOnlyList<string> AllColumns =>
+        FilterColumns.Concat(MediaPlugins.Fields.Select(f => f.Label)).ToList();
+
+    public Array Columns => AllColumns.ToArray();
+
+    /// <summary>
+    /// Raised when the loaded plugins change, so the grid can put up — or take down — the
+    /// columns for their fields.
+    /// </summary>
+    public event Action? PluginColumnsChanged;
 
     /// <summary>
     /// What the user picks to mean "this column is empty here". Some of the most useful
@@ -3107,6 +3129,19 @@ public class MainViewModel : ObservableObject
         if (_settings.RulesFor(job.Category) is { Count: > 0 } rules)
             return await SettleByRulesAsync(job, candidates, rules, review, ct);
 
+        // A file type a plugin brought cannot be fingerprinted or decoded: the program knows
+        // what an e-book is only because a plugin told it, and has no idea what two of them
+        // sounding alike would even mean. Two genuinely different files claiming to be the
+        // same book is a real question, and the honest thing is to say who can answer it.
+        if (candidates.Any(c => c.Kind == MediaKind.Other))
+        {
+            review.Add(new AutoReview(candidates[0],
+                $"{job.Distinct.Count} different files claim to be this, and nothing built in can " +
+                $"compare two '{job.Category}' files — write consolidation rules for " +
+                $"'{job.Category}' (Settings → Library → Rules) to say which copy to keep"));
+            return null;
+        }
+
         if (!CanAnalyze)
         {
             review.Add(new AutoReview(candidates[0],
@@ -3310,6 +3345,16 @@ public class MainViewModel : ObservableObject
 
         public void Report(string what) => _owner.StatusText = what;
 
+        /// <summary>
+        /// The same test the built-in rules use, rather than the plain fingerprint comparison
+        /// the interface falls back on: two copies that differ in length are re-sampled over
+        /// the stretch they have in common, so a copy carrying a minute of credits is still
+        /// recognised as the same film. It is what makes the built-in rules, written out in
+        /// the language, really be the built-in rules.
+        /// </summary>
+        public Task<bool> SameContentAsync(MediaFile a, MediaFile b, CancellationToken ct) =>
+            ContentSameness.LooksLikeSameContentAsync(a, b, _owner._tools, ct == default ? _ct : ct);
+
         private async Task RunAsync(MediaFile file, bool fingerprint, bool deepCheck, CancellationToken ct)
         {
             if (!_owner.CanAnalyze) return;
@@ -3334,10 +3379,12 @@ public class MainViewModel : ObservableObject
     {
         if (!CanAnalyze) return;
 
+        // A step about a plugin's field needs nothing measured: what a book's page count is
+        // was read at the scan, and no amount of ffprobe will change it.
         var wantsProbe = rules.Any(r =>
-            r.Field is ConsolidationField.Length or ConsolidationField.Quality);
+            !r.IsPluginField && r.Field is ConsolidationField.Length or ConsolidationField.Quality);
         var wantsDeepCheck = _settings.DeepCheckFor(category) ||
-                             rules.Any(r => r.Field == ConsolidationField.Integrity);
+                             rules.Any(r => !r.IsPluginField && r.Field == ConsolidationField.Integrity);
         var wantsFingerprint = _settings.FingerprintFor(category);
 
         var unmeasured = candidates.Where(c =>
@@ -4791,6 +4838,14 @@ public class MainViewModel : ObservableObject
         _settings = settings;
         _settings.SyncLegacyFolders();
         _settings.Save(_settingsPath);
+
+        // A plugin added, removed or switched off takes effect now rather than at the next
+        // start: it decides what a scan picks up and what a rule may compare on, and being
+        // told to restart to see the plugin you have just added is not an answer.
+        MediaPlugins.Reload(_settings);
+        OnPropertyChanged(nameof(Columns));
+        PluginColumnsChanged?.Invoke();
+
         StartupManager.Apply(_settings.StartWithWindows, _settings.StartInTray);
         StartWatchingIfEnabled(_lastRoots);
 

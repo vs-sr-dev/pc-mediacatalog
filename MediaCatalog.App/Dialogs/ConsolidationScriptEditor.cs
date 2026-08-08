@@ -47,14 +47,26 @@ public class ScriptLine : INotifyPropertyChanged
 /// Every rule is one line: a condition, and what to do when it holds. That shape is the
 /// language's own — there are no blocks inside blocks to get lost in — and it is why a
 /// dragged piece always has exactly one obvious place to land.
+///
+/// A piece already placed can be dragged again — to somewhere else in the rule it is in, or
+/// into a different rule altogether — and a whole rule can be picked up by its grip and
+/// dropped where it should come in the order. Building a rule by taking pieces out and
+/// putting fresh ones back, which is what the first version of this asked of everybody, is
+/// not building: it is retyping.
 /// </summary>
 public class ConsolidationScriptEditor : UserControl
 {
     private const string PieceFormat = "MediaCatalog.ScriptPiece";
+    private const string MoveFormat = "MediaCatalog.ScriptPieceMove";
+    private const string RuleFormat = "MediaCatalog.ScriptRuleMove";
+
+    /// <summary>A piece being carried from where it was placed to somewhere else.</summary>
+    private sealed record PieceMove(ScriptLine From, int Index, string Piece);
 
     private readonly ObservableCollection<ScriptLine> _lines = new();
     private readonly StackPanel _lineList = new();
     private readonly TextBox _number = new() { Width = 54, Text = "60" };
+    private readonly TextBox _words = new() { Width = 110 };
     private readonly TextBox _source = new()
     {
         AcceptsReturn = true, FontFamily = new FontFamily("Consolas, Courier New, monospace"),
@@ -117,8 +129,8 @@ public class ConsolidationScriptEditor : UserControl
 
         panel.Children.Add(new TextBlock
         {
-            Text = "Drag a piece into a rule on the right. Click a piece already in a rule to " +
-                   "take it out again.",
+            Text = "Drag a piece into a rule on the right. A piece already placed can be dragged " +
+                   "again — anywhere in its own rule, or into another one. Click one to take it out.",
             TextWrapping = TextWrapping.Wrap, Foreground = Brushes.Gray,
             Margin = new Thickness(0, 0, 0, 6)
         });
@@ -131,9 +143,29 @@ public class ConsolidationScriptEditor : UserControl
         var blocks = new StackPanel();
 
         blocks.Children.Add(Group("About the first file",
-            RuleScriptVocabulary.Properties.Select(p => ($"File1.{p.Name}", p.Meaning))));
+            RuleScriptVocabulary.BuiltInProperties.Select(p => ($"File1.{p.Name}", p.Meaning))));
         blocks.Children.Add(Group("About the second file",
-            RuleScriptVocabulary.Properties.Select(p => ($"File2.{p.Name}", p.Meaning))));
+            RuleScriptVocabulary.BuiltInProperties.Select(p => ($"File2.{p.Name}", p.Meaning))));
+
+        // Whatever the plugins brought, kept in a block of its own per category: an author is
+        // not something every file has, and a palette that mixed them in would be offering
+        // pieces that mean nothing for nine tenths of a library.
+        foreach (var category in RuleScriptVocabulary.PluginProperties
+                     .Select(p => p.Category)
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var fields = RuleScriptVocabulary.PluginProperties
+                .Where(p => string.Equals(p.Category, category, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            blocks.Children.Add(Group($"About a '{category}' file",
+                fields.SelectMany(p => new[]
+                {
+                    ($"File1.{p.Name}", $"{p.Caption}, of the first file. {p.Meaning}"),
+                    ($"File2.{p.Name}", $"{p.Caption}, of the second file. {p.Meaning}")
+                })));
+        }
+
         blocks.Children.Add(Group("Compare them", new[]
         {
             (">", "The left is greater than the right."),
@@ -161,23 +193,34 @@ public class ConsolidationScriptEditor : UserControl
         scroll.Content = blocks;
         panel.Children.Add(scroll);
 
-        var numbers = new StackPanel
-        {
-            Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0)
-        };
-        numbers.Children.Add(new TextBlock
-        {
-            Text = "A number:", VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 6, 0)
-        });
-        numbers.Children.Add(_number);
-        numbers.Children.Add(Piece("the number", () => Number(),
+        panel.Children.Add(TypedPiece("A number:", _number, "the number", Number,
             "Whatever is in the box beside this. Drag it in to compare against a figure of " +
             "your own — a size in bytes, a quality, a length in seconds."));
-        panel.Children.Add(numbers);
+
+        panel.Children.Add(TypedPiece("Some words:", _words, "the words", Words,
+            "Whatever is in the box beside this, as words. For comparing something a plugin " +
+            "hands back that is not a number — an author, a genre. Case is ignored."));
 
         panel.Children.Add(_help);
         return panel;
+    }
+
+    /// <summary>A box to type in and a piece that carries whatever is in it.</summary>
+    private FrameworkElement TypedPiece(
+        string label, TextBox box, string caption, Func<string> payload, string meaning)
+    {
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0)
+        };
+        row.Children.Add(new TextBlock
+        {
+            Text = label, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0)
+        });
+        row.Children.Add(box);
+        row.Children.Add(Piece(caption, payload, meaning));
+        return row;
     }
 
     /// <summary>The pieces one function offers: DeepScan needs a file, the rest do not.</summary>
@@ -220,6 +263,8 @@ public class ConsolidationScriptEditor : UserControl
             ? value.ToString("0.##", CultureInfo.InvariantCulture)
             : "0";
 
+    private string Words() => RuleScriptParser.Quote(_words.Text ?? string.Empty);
+
     /// <summary>A draggable block. What it drops is worked out at the moment it is dragged,
     /// so the number box beside the palette is read then rather than when the page was built.</summary>
     private Border Piece(string caption, Func<string> payload, string meaning)
@@ -239,13 +284,26 @@ public class ConsolidationScriptEditor : UserControl
 
         block.MouseEnter += (_, _) => _help.Text = $"{caption} — {meaning}";
 
-        // The drag starts once the pointer has actually moved, rather than the moment the
-        // button goes down: a press that turns out to be a click should come to nothing
-        // instead of holding the mouse hostage until it is let go.
+        Drags(block, () => new DataObject(PieceFormat, payload()), DragDropEffects.Copy);
+        return block;
+    }
+
+    /// <summary>
+    /// Make something a drag source, starting only once the pointer has actually moved: a
+    /// press that turns out to be a click should come to nothing rather than holding the
+    /// mouse hostage until it is let go.
+    /// </summary>
+    /// <param name="onDragged">
+    /// Called when a drag really did start, so a click handler on the same element can tell
+    /// the two apart. Letting go at the end of a drag must not also count as a click.
+    /// </param>
+    private void Drags(
+        UIElement element, Func<DataObject> data, DragDropEffects effects, Action? onDragged = null)
+    {
         Point? from = null;
-        block.PreviewMouseLeftButtonDown += (_, e) => from = e.GetPosition(this);
-        block.PreviewMouseLeftButtonUp += (_, _) => from = null;
-        block.PreviewMouseMove += (_, e) =>
+        element.PreviewMouseLeftButtonDown += (_, e) => from = e.GetPosition(this);
+        element.PreviewMouseLeftButtonUp += (_, _) => from = null;
+        element.PreviewMouseMove += (_, e) =>
         {
             if (from is not { } start || e.LeftButton != MouseButtonState.Pressed) return;
 
@@ -254,9 +312,9 @@ public class ConsolidationScriptEditor : UserControl
                 Math.Abs(now.Y - start.Y) < SystemParameters.MinimumVerticalDragDistance) return;
 
             from = null;
-            DragDrop.DoDragDrop(block, new DataObject(PieceFormat, payload()), DragDropEffects.Copy);
+            onDragged?.Invoke();
+            DragDrop.DoDragDrop(element, data(), effects);
         };
-        return block;
     }
 
     // --- The rules ----------------------------------------------------------
@@ -276,7 +334,19 @@ public class ConsolidationScriptEditor : UserControl
         AcceptPieces(scroll);
         scroll.Drop += (_, e) =>
         {
-            if (e.Data.GetData(PieceFormat) is not string piece) return;
+            // Below the last rule: a piece dropped here starts a new rule, and a rule dragged
+            // here goes to the end, which is the only thing either of them can sensibly mean.
+            if (e.Data.GetData(RuleFormat) is ScriptLine moved)
+            {
+                MoveRule(moved, _lines.Count - 1);
+                e.Handled = true;
+                return;
+            }
+
+            var piece = Carried(e.Data);
+            if (piece == null) return;
+
+            Detach(e.Data);
             var line = new ScriptLine();
             line.Condition.Add(piece);
             _lines.Add(line);
@@ -301,7 +371,8 @@ public class ConsolidationScriptEditor : UserControl
         panel.Children.Add(new TextBlock
         {
             Text = "Each rule is read in turn, and the first one that both holds and names a " +
-                   "copy ends the comparison. What it names is the copy that is kept.",
+                   "copy ends the comparison. What it names is the copy that is kept. Drag a " +
+                   "rule by its grip to change where it comes in the order.",
             TextWrapping = TextWrapping.Wrap, Foreground = Brushes.Gray,
             Margin = new Thickness(0, 0, 0, 6)
         });
@@ -320,56 +391,28 @@ public class ConsolidationScriptEditor : UserControl
         return button;
     }
 
-    /// <summary>One rule's row: "if (" pieces ")" and the thing to do.</summary>
+    /// <summary>One rule's row: a grip, "if (" pieces ")" and the thing to do.</summary>
     private FrameworkElement Row(ScriptLine line)
     {
         var pieces = new WrapPanel { MinWidth = 220, MinHeight = 24, Background = Brushes.White };
         AcceptPieces(pieces);
 
-        void Redraw()
-        {
-            pieces.Children.Clear();
-            for (var i = 0; i < line.Condition.Count; i++)
+        for (var i = 0; i < line.Condition.Count; i++)
+            pieces.Children.Add(PlacedPiece(line, i));
+
+        if (line.Condition.Count == 0)
+            pieces.Children.Add(new TextBlock
             {
-                var index = i;
-                var chip = Chip(line.Condition[i]);
-                chip.MouseLeftButtonUp += (_, _) =>
-                {
-                    line.Condition.RemoveAt(index);
-                    Redraw();
-                    Rebuilt();
-                };
-                AcceptPieces(chip);
-                chip.Drop += (_, e) =>
-                {
-                    if (e.Data.GetData(PieceFormat) is not string dropped) return;
-                    line.Condition.Insert(index, dropped);
-                    Redraw();
-                    Rebuilt();
-                    e.Handled = true;
-                };
-                pieces.Children.Add(chip);
-            }
+                Text = "always",
+                Foreground = Brushes.Gray, FontStyle = FontStyles.Italic,
+                Margin = new Thickness(2, 2, 2, 2)
+            });
 
-            if (line.Condition.Count == 0)
-                pieces.Children.Add(new TextBlock
-                {
-                    Text = "always",
-                    Foreground = Brushes.Gray, FontStyle = FontStyles.Italic,
-                    Margin = new Thickness(2, 2, 2, 2)
-                });
-        }
-
+        // Anywhere in the rule that is not a piece: the dropped one goes on the end.
         pieces.Drop += (_, e) =>
         {
-            if (e.Data.GetData(PieceFormat) is not string dropped) return;
-            line.Condition.Add(dropped);
-            Redraw();
-            Rebuilt();
-            e.Handled = true;
+            if (Place(line, line.Condition.Count, e.Data)) e.Handled = true;
         };
-
-        Redraw();
 
         var action = new ComboBox { Width = 168, Margin = new Thickness(6, 0, 6, 0) };
         action.ItemsSource = ActionChoices();
@@ -405,6 +448,10 @@ public class ConsolidationScriptEditor : UserControl
         DockPanel.SetDock(action, Dock.Right);
         row.Children.Add(action);
 
+        var grip = Grip(line);
+        DockPanel.SetDock(grip, Dock.Left);
+        row.Children.Add(grip);
+
         var opening = new TextBlock
         {
             Text = "if (", VerticalAlignment = VerticalAlignment.Center,
@@ -428,7 +475,122 @@ public class ConsolidationScriptEditor : UserControl
             Child = pieces
         });
 
+        // The whole row takes a rule dropped on it, wherever on the row that lands: the
+        // dragged rule takes this one's place in the order.
+        AcceptPieces(row);
+        row.Drop += (_, e) =>
+        {
+            if (e.Data.GetData(RuleFormat) is not ScriptLine moved) return;
+            MoveRule(moved, _lines.IndexOf(line));
+            e.Handled = true;
+        };
+
         return row;
+    }
+
+    /// <summary>
+    /// The handle a whole rule is dragged by. Separate from the rule's body so that dragging
+    /// a piece out of a rule and dragging the rule itself are two different gestures rather
+    /// than the same one meaning different things depending on where the pointer went down.
+    /// </summary>
+    private FrameworkElement Grip(ScriptLine line)
+    {
+        var grip = new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0xF0, 0xF0, 0xF0)),
+            BorderBrush = Brushes.Gainsboro,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(2),
+            Padding = new Thickness(3, 0, 3, 0),
+            Margin = new Thickness(0, 0, 4, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Cursor = Cursors.SizeAll,
+            ToolTip = "Drag to move this rule up or down the order.",
+            Child = new TextBlock
+            {
+                Text = "⋮⋮", Foreground = Brushes.Gray, FontFamily = new FontFamily("Segoe UI")
+            }
+        };
+
+        Drags(grip, () => new DataObject(RuleFormat, line), DragDropEffects.Move);
+        return grip;
+    }
+
+    /// <summary>A piece sitting in a rule: draggable out of it, and clickable to remove.</summary>
+    private Border PlacedPiece(ScriptLine line, int index)
+    {
+        var chip = Chip(line.Condition[index]);
+        var dragged = false;
+
+        chip.MouseLeftButtonUp += (_, _) =>
+        {
+            // Letting go at the end of a drag is not a click, and must not take the piece out
+            // of the place it has just been dropped in.
+            if (dragged) { dragged = false; return; }
+            if (index >= line.Condition.Count) return;
+            line.Condition.RemoveAt(index);
+            Rebuilt();
+        };
+
+        Drags(chip,
+            () => new DataObject(MoveFormat, new PieceMove(line, index, line.Condition[index])),
+            DragDropEffects.Move,
+            () => dragged = true);
+
+        AcceptPieces(chip);
+        chip.Drop += (_, e) =>
+        {
+            if (Place(line, index, e.Data)) e.Handled = true;
+        };
+
+        return chip;
+    }
+
+    /// <summary>
+    /// Put whatever is being dragged into <paramref name="line"/> at <paramref name="at"/>.
+    /// A piece from the palette is a new one; a piece already placed is moved, which means it
+    /// leaves where it was — including when where it was is this very rule, a little further
+    /// along, which is the case that has to be counted carefully.
+    /// </summary>
+    private bool Place(ScriptLine line, int at, IDataObject data)
+    {
+        if (data.GetData(MoveFormat) is PieceMove move)
+        {
+            if (move.Index >= move.From.Condition.Count) return false;
+
+            move.From.Condition.RemoveAt(move.Index);
+            if (ReferenceEquals(move.From, line) && move.Index < at) at--;
+
+            line.Condition.Insert(Math.Clamp(at, 0, line.Condition.Count), move.Piece);
+            Rebuilt();
+            return true;
+        }
+
+        if (data.GetData(PieceFormat) is not string piece) return false;
+
+        line.Condition.Insert(Math.Clamp(at, 0, line.Condition.Count), piece);
+        Rebuilt();
+        return true;
+    }
+
+    /// <summary>The text being dragged, whether it is a new piece or one already placed.</summary>
+    private static string? Carried(IDataObject data) =>
+        data.GetData(MoveFormat) is PieceMove move ? move.Piece
+        : data.GetData(PieceFormat) as string;
+
+    /// <summary>Take a moved piece out of where it came from, for a drop that re-homes it.</summary>
+    private static void Detach(IDataObject data)
+    {
+        if (data.GetData(MoveFormat) is not PieceMove move) return;
+        if (move.Index < move.From.Condition.Count) move.From.Condition.RemoveAt(move.Index);
+    }
+
+    private void MoveRule(ScriptLine line, int to)
+    {
+        var from = _lines.IndexOf(line);
+        if (from < 0 || to < 0 || to >= _lines.Count || from == to) return;
+        _lines.Move(from, to);
+        Rebuilt();
     }
 
     private static string[] ActionChoices() => new[]
@@ -446,7 +608,11 @@ public class ConsolidationScriptEditor : UserControl
         element.AllowDrop = true;
         element.DragOver += (_, e) =>
         {
-            e.Effects = e.Data.GetDataPresent(PieceFormat) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effects =
+                e.Data.GetDataPresent(PieceFormat) ? DragDropEffects.Copy
+                : e.Data.GetDataPresent(MoveFormat) || e.Data.GetDataPresent(RuleFormat)
+                    ? DragDropEffects.Move
+                    : DragDropEffects.None;
             e.Handled = true;
         };
     }
@@ -460,7 +626,7 @@ public class ConsolidationScriptEditor : UserControl
         Padding = new Thickness(5, 1, 5, 1),
         Margin = new Thickness(0, 1, 3, 1),
         Cursor = Cursors.Hand,
-        ToolTip = "Click to take this out. Drop another piece on it to put one in front.",
+        ToolTip = "Drag to move it. Drop another piece on it to put one in front. Click to take it out.",
         Child = new TextBlock { Text = text, FontFamily = new FontFamily("Consolas") }
     };
 
@@ -592,5 +758,4 @@ public class ConsolidationScriptEditor : UserControl
             : string.Empty;
         _problem.Text = Problem;
     }
-
 }

@@ -10,6 +10,7 @@ using System.Windows.Input;
 using MediaCatalog.Core.Classification;
 using MediaCatalog.Core.Consolidation;
 using MediaCatalog.Core.Models;
+using MediaCatalog.Core.Plugins;
 using MediaCatalog.Core.Storage;
 using MediaCatalog.Core.Tools;
 using Microsoft.Win32;
@@ -24,6 +25,7 @@ public enum SettingsTab
     Library,
     Exclusions,
     Categories,
+    Plugins,
     ExternalTools,
     DataSources
 }
@@ -156,6 +158,12 @@ public class SettingsWindow : Window
 
     private readonly ComboBox _redundantRules = new() { Width = 260 };
 
+    // --- Plugins ---
+    private readonly ObservableCollection<string> _pluginFolders = new();
+    private readonly ObservableCollection<string> _pluginFiles = new();
+    private readonly HashSet<string> _pluginDisabled = new(StringComparer.OrdinalIgnoreCase);
+    private readonly StackPanel _pluginList = new();
+
     // --- Deleting ---
     private readonly CheckBox _skipRecycleBin = new()
     {
@@ -287,6 +295,7 @@ public class SettingsWindow : Window
         _tabs.Items.Add(Tab("Library", LibraryTab()));
         _tabs.Items.Add(Tab("Exclusions", ExclusionsTab()));
         _tabs.Items.Add(Tab("Categories", CategoriesTab()));
+        _tabs.Items.Add(Tab("Plugins", PluginsTab()));
         _tabs.Items.Add(Tab("External tools", ToolsTab()));
         _tabs.Items.Add(Tab("Data sources", DataTab()));
 
@@ -384,6 +393,10 @@ public class SettingsWindow : Window
         foreach (var c in settings.CustomCategories) _categories.Add(c);
         foreach (var f in settings.AdditionalScanFolders) _scanFolders.Add(f);
         foreach (var f in settings.WatchedFolders) _watchFolders.Add(f);
+
+        foreach (var f in settings.PluginFolders) _pluginFolders.Add(f);
+        foreach (var f in settings.PluginFiles) _pluginFiles.Add(f);
+        foreach (var p in settings.DisabledPlugins) _pluginDisabled.Add(p);
 
         // The menu order, seeded from the categories that exist now so nothing is missing
         // from the list even if the saved order predates them.
@@ -778,6 +791,227 @@ public class SettingsWindow : Window
             .Where(c => !string.IsNullOrWhiteSpace(c) && !CategoryResolver.IsExtra(c) &&
                         !string.Equals(c, CategoryResolver.Unknown, StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase);
+
+    // --- Plugins ------------------------------------------------------------
+
+    /// <summary>
+    /// What the program knows about file types nobody wrote it to handle.
+    ///
+    /// A plugin is a DLL holding three methods that take and return strings of XML: what it
+    /// is, which extensions it claims, and what it makes of one file. That is the whole
+    /// contract — no reference to this program, nothing to keep in step with a version of it
+    /// that ships next year — and what comes back is folded in as though it had always been
+    /// there: a scan picks the files up, the grid gets a column per field, the filter offers
+    /// them, and the consolidation rules can compare on them.
+    ///
+    /// It is a page with a warning on it, and the warning is not decoration. A plugin is
+    /// somebody else's program running inside this one with everything this one can reach.
+    /// </summary>
+    private StackPanel PluginsTab()
+    {
+        var panel = new StackPanel();
+
+        panel.Children.Add(Group("Plugins found",
+            _pluginList,
+            Hint("Anything in the plugins folder beside the application, plus whatever is listed " +
+                 "below. A plugin that will not load says why, here, rather than failing quietly " +
+                 "in the middle of a scan.")));
+
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+        buttons.Children.Add(PluginButton("Add a plugin…", AddPluginFile));
+        buttons.Children.Add(PluginButton("Add a folder…", AddPluginFolder));
+        buttons.Children.Add(PluginButton("Open the plugins folder", OpenPluginsFolder));
+        buttons.Children.Add(PluginButton("Look again", ShowPlugins));
+
+        panel.Children.Add(Group("Where to look",
+            buttons,
+            PluginPathList(),
+            Hint($"The plugins folder is {AppPaths.PluginsDir}. A DLL dropped in there is picked " +
+                 "up on its own; anywhere else, name it or its folder here. Changes take effect " +
+                 "when you press Save.")));
+
+        panel.Children.Add(Group("What a plugin is",
+            Hint("A .NET assembly with a public class holding three public methods, each taking " +
+                 "and returning a string:\n\n" +
+                 "    string Describe();             what I am, and the fields I can fill in\n" +
+                 "    string FileTypes();            the extensions a scan should pick up\n" +
+                 "    string Read(string fullPath);  what I make of this one file\n\n" +
+                 "They are found by name, so a plugin needs no reference to this program and " +
+                 "cannot be broken by a later version of it. The strings are XML; the example " +
+                 "e-book plugin that ships beside this is forty lines and is the documentation."),
+            Warning("A plugin is a program. It runs inside this one, with everything this one " +
+                    "can reach — every drive it can read, every file it can delete. Add plugins " +
+                    "you trust, and nothing else.")));
+
+        ShowPlugins();
+        return panel;
+    }
+
+    private Button PluginButton(string caption, Action onClick)
+    {
+        var button = new Button
+        {
+            Content = caption, Padding = new Thickness(10, 2, 10, 2),
+            Margin = new Thickness(0, 0, 6, 0)
+        };
+        button.Click += (_, _) => onClick();
+        return button;
+    }
+
+    /// <summary>
+    /// Every plugin found, with what it brings and a box to switch it off.
+    ///
+    /// Loaded here purely to be looked at: nothing is registered, so a plugin added and then
+    /// thought better of before Save has changed nothing at all.
+    /// </summary>
+    private void ShowPlugins()
+    {
+        _pluginList.Children.Clear();
+
+        var working = new AppSettings
+        {
+            PluginFolders = _pluginFolders.ToList(),
+            PluginFiles = _pluginFiles.ToList()
+        };
+
+        var found = MediaPlugins.Discover(working);
+        if (found.Count == 0)
+        {
+            _pluginList.Children.Add(new TextBlock
+            {
+                Text = "None. The program handles audio and video on its own; a plugin is how it " +
+                       "is taught about anything else — e-books, comics, whatever you have.",
+                Foreground = System.Windows.Media.Brushes.Gray,
+                TextWrapping = TextWrapping.Wrap
+            });
+            return;
+        }
+
+        foreach (var path in found)
+        {
+            var plugin = MediaPlugin.Load(path);
+            var name = Path.GetFileName(path);
+
+            var tick = new CheckBox
+            {
+                Content = plugin.IsUsable ? plugin.Summarise() : $"{name} — {plugin.Problem}",
+                IsChecked = !_pluginDisabled.Contains(name),
+                Margin = new Thickness(0, 4, 0, 0),
+                Foreground = plugin.IsUsable
+                    ? System.Windows.Media.Brushes.Black
+                    : System.Windows.Media.Brushes.Firebrick,
+                ToolTip = path
+            };
+            tick.Checked += (_, _) => _pluginDisabled.Remove(name);
+            tick.Unchecked += (_, _) => _pluginDisabled.Add(name);
+            _pluginList.Children.Add(tick);
+
+            if (!plugin.IsUsable) continue;
+
+            _pluginList.Children.Add(new TextBlock
+            {
+                Text = $"     picks up {string.Join(" ", plugin.FileTypesClaimed.Select(t => t.Extension))}" +
+                       (plugin.Fields.Count > 0
+                           ? $"  ·  fills in {string.Join(", ", plugin.Fields.Select(f => f.Label))}"
+                           : ""),
+                Foreground = System.Windows.Media.Brushes.Gray,
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+    }
+
+    /// <summary>The folders and files named by hand, with a way to take one off the list.</summary>
+    private FrameworkElement PluginPathList()
+    {
+        var panel = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
+
+        void Draw()
+        {
+            panel.Children.Clear();
+            foreach (var (list, label) in new[]
+                     {
+                         ((ObservableCollection<string>)_pluginFolders, "folder"),
+                         (_pluginFiles, "plugin")
+                     })
+            {
+                foreach (var entry in list.ToList())
+                {
+                    var row = new DockPanel { Margin = new Thickness(0, 1, 0, 1) };
+                    var remove = new Button
+                    {
+                        Content = "✕", Width = 24, ToolTip = $"Stop looking at this {label}."
+                    };
+                    remove.Click += (_, _) => { list.Remove(entry); Draw(); ShowPlugins(); };
+                    DockPanel.SetDock(remove, Dock.Right);
+                    row.Children.Add(remove);
+                    row.Children.Add(new TextBlock
+                    {
+                        Text = entry, VerticalAlignment = VerticalAlignment.Center,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        Foreground = Directory.Exists(entry) || File.Exists(entry)
+                            ? System.Windows.Media.Brushes.Black
+                            : System.Windows.Media.Brushes.Firebrick
+                    });
+                    panel.Children.Add(row);
+                }
+            }
+        }
+
+        Draw();
+        _pluginFolders.CollectionChanged += (_, _) => Draw();
+        _pluginFiles.CollectionChanged += (_, _) => Draw();
+        return panel;
+    }
+
+    private void AddPluginFile()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Add a plugin",
+            Filter = "Plugins (*.dll)|*.dll|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) != true) return;
+
+        // Load it before taking it, so a file that is not a plugin is refused where the user
+        // is looking rather than turning into a line of red on a tab they may not revisit.
+        var plugin = MediaPlugin.Load(dialog.FileName);
+        if (!plugin.IsUsable)
+        {
+            MessageBox.Show(this,
+                $"{Path.GetFileName(dialog.FileName)} {plugin.Problem}",
+                "That is not a plugin", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (!_pluginFiles.Contains(dialog.FileName, StringComparer.OrdinalIgnoreCase))
+            _pluginFiles.Add(dialog.FileName);
+        ShowPlugins();
+    }
+
+    private void AddPluginFolder()
+    {
+        var dialog = new OpenFolderDialog { Title = "A folder to look in for plugins" };
+        if (dialog.ShowDialog(this) != true) return;
+
+        if (!_pluginFolders.Contains(dialog.FolderName, StringComparer.OrdinalIgnoreCase))
+            _pluginFolders.Add(dialog.FolderName);
+        ShowPlugins();
+    }
+
+    private void OpenPluginsFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.PluginsDir);
+            ShellOpen.Open(this, AppPaths.PluginsDir);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "The plugins folder",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
 
     private StackPanel ToolsTab()
     {
@@ -1690,7 +1924,10 @@ public class SettingsWindow : Window
         {
             var name = combo.Text.Trim();
             var wizard = new ConsolidationRulesWizard(
-                name.Length == 0 ? "this category" : name, row.Rules)
+                name.Length == 0 ? "this category" : name, row.Rules,
+                // The built-in rules are shown with the tolerance this category really uses,
+                // so what is on screen is this library's rules rather than a specimen.
+                _incoming.DurationToleranceFor(name))
             { Owner = this };
             if (wizard.ShowDialog() != true || wizard.Result == null) return;
             row.Rules = wizard.Result;
@@ -1995,6 +2232,9 @@ public class SettingsWindow : Window
             ExcludedFolders = _excluded.Select(r => r.Model).ToList(),
             CustomCategories = _categories.ToList(),
             CategoryFolders = folders,
+            PluginFolders = _pluginFolders.ToList(),
+            PluginFiles = _pluginFiles.ToList(),
+            DisabledPlugins = _pluginDisabled.ToList(),
             AdditionalScanFolders = _scanFolders.ToList(),
             ColumnLayouts = _incoming.ColumnLayouts,            // owned by the grid
             LastFilterMode = _incoming.LastFilterMode,          // owned by the filter bar
